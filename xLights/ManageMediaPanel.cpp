@@ -379,6 +379,8 @@ void ManageMediaPanel::Populate(const std::string& selectPath)
             _mediaTree->EnsureVisible(item);
             UpdatePreview(selectPath);
             UpdateButtons();
+            wxDataViewEvent evt(wxEVT_DATAVIEW_SELECTION_CHANGED, _mediaTree, item);
+            wxPostEvent(_mediaTree, evt);
         }
     }
 }
@@ -476,10 +478,14 @@ void ManageMediaPanel::UpdatePreview(const std::string& filepath)
 
     auto img = entry->GetFrame(0, false);
     if (img && img->IsOk()) {
-        double scale = std::min(150.0 / img->GetWidth(), 150.0 / img->GetHeight());
+        double scaleFactor = GetContentScaleFactor();
+        double maxPx = 150.0 * scaleFactor;
+        double scale = std::min(maxPx / img->GetWidth(), maxPx / img->GetHeight());
         int w = std::max(1, (int)(img->GetWidth() * scale));
         int h = std::max(1, (int)(img->GetHeight() * scale));
-        refreshPreview(wxBitmap(img->Scale(w, h, wxIMAGE_QUALITY_HIGH)));
+        wxBitmap bmp(*entry->GetScaledImage(0, w, h, false));
+        bmp.SetScaleFactor(scaleFactor);
+        refreshPreview(bmp);
     } else {
         refreshPreview(wxNullBitmap);
     }
