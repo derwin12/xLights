@@ -16,6 +16,7 @@
 #include "SevenSegmentDialog.h"
 #include "NodeSelectGrid.h"
 #include "models/Model.h"
+#include "models/SubModel.h"
 #include "xLightsApp.h"
 #include "UtilFunctions.h"
 #include "xLightsMain.h"
@@ -1171,27 +1172,26 @@ void ModelStateDialog::ImportSubmodel(wxGridEvent& event)
 
 wxString ModelStateDialog::getSubmodelNodes(Model* sm)
 {
-    wxXmlNode* root = sm->GetModelXml();
-    wxString row = "";
-
-    if (root->GetName() == "subModel")
-    {
-        bool isRanges = root->GetAttribute("type", "") == "ranges";
-        if (isRanges)
-        {
-            wxArrayString rows;
-            int line = 0;
-            while (root->HasAttribute(wxString::Format("line%d", line)))
-            {
-                auto l = root->GetAttribute(wxString::Format("line%d", line), "");
-                rows.Add(l);
-                line++;
-            }
-            row = wxJoin(rows, ',','\0');
+    SubModel* subModel = dynamic_cast<SubModel*>(sm);
+    if (subModel == nullptr) {
+        return "";
+    }
+    
+    // Only process if it's a ranges-type submodel
+    if (!subModel->IsRanges()) {
+        return "";
+    }
+    
+    wxArrayString rows;
+    int numRanges = subModel->GetNumRanges();
+    for (int i = 0; i < numRanges; i++) {
+        std::string range = subModel->GetRange(i);
+        if (!range.empty()) {
+            rows.Add(range);
         }
     }
-
-    return row;
+    
+    return wxJoin(rows, ',', '\0');
 }
 
 void ModelStateDialog::OnAddBtnPopup(wxCommandEvent& event) {

@@ -871,7 +871,31 @@ void SubModelsDialog::OnImportBtnPopup(wxCommandEvent& event)
         wxSingleChoiceDialog dlg(GetParent(), "", "Select Model", choices);
         if (dlg.ShowModal() == wxID_OK) {
             Model *m = xlights->GetModel(dlg.GetStringSelection());
-            ImportSubModelXML(m->GetModelXml());
+            // Convert SubModel objects directly to SubModelImportData
+            std::vector<XmlSerialize::SubModelImportData> subModels;
+            const std::vector<Model*>& sourceSubModels = m->GetSubModels();
+            for (const auto& model : sourceSubModels) {
+                SubModel* sub = dynamic_cast<SubModel*>(model);
+                if (sub) {
+                    XmlSerialize::SubModelImportData smData;
+                    smData.name = sub->GetName();
+                    smData.vertical = sub->IsVertical();
+                    smData.isRanges = sub->IsRanges();
+                    smData.bufferStyle = sub->GetSubModelBufferStyle();
+                    
+                    if (smData.isRanges) {
+                        int num_ranges = sub->GetNumRanges();
+                        for (int x = 0; x < num_ranges; ++x) {
+                            smData.strands.push_back(sub->GetRange(x));
+                        }
+                    } else {
+                        smData.subBuffer = sub->GetSubModelLines();
+                    }
+                    
+                    subModels.push_back(std::move(smData));
+                }
+            }
+            ImportSubModels(subModels);
         }
     }
     else if (event.GetId() == SUBMODEL_DIALOG_IMPORT_STATE) {

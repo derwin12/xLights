@@ -48,6 +48,7 @@
 #include "xLightsMain.h"
 #include "NodeSelectGrid.h"
 #include "models/Model.h"
+#include "models/SubModel.h"
 #include "xLightsApp.h"
 #include "support/VectorMath.h"
 #include "models/CustomModel.h"
@@ -1484,24 +1485,26 @@ void ModelFaceDialog::ImportSubmodel(wxGridEvent& event)
 
 wxString ModelFaceDialog::getSubmodelNodes(Model* sm)
 {
-    if (sm == nullptr) return "";
-
-    wxXmlNode* root = sm->GetModelXml();
-    wxString row = "";
-
-    if (root->GetName() == "subModel") {
-        if (root->GetAttribute("type", "") == "ranges") {
-            wxArrayString rows;
-            int line = 0;
-            while (root->HasAttribute(wxString::Format("line%d", line))) {
-                auto l = root->GetAttribute(wxString::Format("line%d", line), "");
-                rows.Add(l);
-                line++;
-            }
-            row = wxJoin(rows, ',', '\0');
+    SubModel* subModel = dynamic_cast<SubModel*>(sm);
+    if (subModel == nullptr) {
+        return "";
+    }
+    
+    // Only process if it's a ranges-type submodel
+    if (!subModel->IsRanges()) {
+        return "";
+    }
+    
+    wxArrayString rows;
+    int numRanges = subModel->GetNumRanges();
+    for (int i = 0; i < numRanges; i++) {
+        std::string range = subModel->GetRange(i);
+        if (!range.empty()) {
+            rows.Add(range);
         }
     }
-    return row;
+    
+    return wxJoin(rows, ',', '\0');
 }
 
 void ModelFaceDialog::OnAddBtnPopup(wxCommandEvent& event)
