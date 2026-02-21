@@ -1191,7 +1191,6 @@ std::string ModelManager::GenerateModelName(const std::string& candidateName) co
 Model* ModelManager::CreateDefaultModel(const std::string& type, const std::string& startChannel) const
 {
     Model* model;
-    wxXmlNode* node = new wxXmlNode(wxXML_ELEMENT_NODE, "model");  // TODO: Delete this when all models are updated to not use the node*
 
     std::string type_conversion = type;
     std::string protocol = "ws2811";
@@ -1218,13 +1217,13 @@ Model* ModelManager::CreateDefaultModel(const std::string& type, const std::stri
     } else if (type == "Circle") {
         model = new CircleModel(*this);
         parm3 = 50;
-        node->AddAttribute("InsideOut", "0");
+        dynamic_cast<CircleModel*>(model)->SetInsideOut(false);
     } else if (type == "DmxMovingHead") {
         model = new DmxMovingHead(*this);
         protocol = xlEMPTY_STRING;
         parm1 = 8;
         parm2 = 1;
-        node->AddAttribute("DmxStyle", "Moving Head Top");
+        dynamic_cast<DmxMovingHead*>(model)->SetDmxStyle("Moving Head Top");
         model->SetStringType("Single Color White");
     } else if (type == "DmxGeneral") {
         model = new DmxGeneral(*this);
@@ -1269,11 +1268,11 @@ Model* ModelManager::CreateDefaultModel(const std::string& type, const std::stri
         parm2 = 1;
         model->SetStringType("Single Color White");
         if (type == "DmxServo3Axis") {
-            node->AddAttribute("DisplayAs", "DmxServo3d");
-            node->AddAttribute("NumServos", "3");
-            node->AddAttribute("NumStatic", "1");
-            node->AddAttribute("NumMotion", "3");
-            node->AddAttribute("parm1", "6");
+            dynamic_cast<DmxServo3d*>(model)->SetNumServos(3);
+            dynamic_cast<DmxServo3d*>(model)->SetNumStatic(1);
+            dynamic_cast<DmxServo3d*>(model)->SetNumMotion(3);
+            model->SetParm1(6);
+            model->SetDisplayAs("DmxServo3d");
         }
     } else if (type == "Image") {
         model = new ImageModel(*this);
@@ -1286,7 +1285,6 @@ Model* ModelManager::CreateDefaultModel(const std::string& type, const std::stri
         model = new WindowFrameModel(*this);
         parm1 = 16;
         parm3 = 16;
-        node->AddAttribute("Rotation", "CW");
     } else if (type == "Wreath") {
         model = new WreathModel(*this);
     } else if (type.find("Sphere") == 0) {
@@ -1325,7 +1323,7 @@ Model* ModelManager::CreateDefaultModel(const std::string& type, const std::stri
         parm2 = 80;
         dynamic_cast<IciclesModel*>(model)->SetDropPattern("3,4,5,4");
     } else {
-        DisplayError(wxString::Format("'%s' is not a valid model type for model '%s'", type, node->GetAttribute("name")).ToStdString());
+        DisplayError(wxString::Format("'%s' is not a valid model type for a model", type));
         return nullptr;
     }
 
@@ -1338,9 +1336,6 @@ Model* ModelManager::CreateDefaultModel(const std::string& type, const std::stri
     model->SetParm1(parm1);
     model->SetParm2(parm2);
     model->SetParm3(parm3);
-
-    // TODO:  remove this later we aren't using xml nodes anymore
-    delete node;
     
     model->Setup();
 
