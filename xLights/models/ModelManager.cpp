@@ -1380,26 +1380,9 @@ void ModelManager::AddModel(Model* model)
             ResetModelGroups();
         }
         models[model->name] = model;
-
-        // TODO:  Probably can delete all this now
-/*
-        if ("ModelGroup" == model->GetDisplayAs()) {
-            if (model->GetModelXml()->GetParent() != groupNode) {
-                if (model->GetModelXml()->GetParent() != nullptr) {
-                    model->GetModelXml()->GetParent()->RemoveChild(model->GetModelXml());
-                }
-                groupNode->AddChild(model->GetModelXml());
-            }
-        } else {
-            if (model->GetModelXml()->GetParent() != modelNode) {
-                if (model->GetModelXml()->GetParent() != nullptr) {
-                    model->GetModelXml()->GetParent()->RemoveChild(model->GetModelXml());
-                }
-                modelNode->AddChild(model->GetModelXml());
-            }
-        }*/
     }
 }
+
 void ModelManager::ReplaceModel(const std::string &name, Model* nm) {
     if (nm != nullptr && name != "") {
         std::lock_guard<std::recursive_mutex> _lock(_modelMutex);

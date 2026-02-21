@@ -18,6 +18,7 @@
 #include "MeshObject.h"
 #include "TerrainObject.h"
 #include "xLightsMain.h"
+#include "ModelGroup.h"
 #include "XmlSerializer/XmlSerializer.h"
 
 #include <log4cpp/Category.hh>
@@ -86,24 +87,6 @@ void ViewObjectManager::AddViewObject(ViewObject *view_object) {
             it->second = nullptr;
         }
         view_objects[view_object->name] = view_object;
-
-        // TODO:  Probably can delete all this now
-/*
-        if ("ViewObjectGroup" == view_object->GetDisplayAs()) {
-            if (view_object->GetModelXml()->GetParent() != groupNode) {
-                if (view_object->GetModelXml()->GetParent() != nullptr) {
-                    view_object->GetModelXml()->GetParent()->RemoveChild(view_object->GetModelXml());
-                }
-                groupNode->AddChild(view_object->GetModelXml());
-            }
-        } else {
-            if (view_object->GetModelXml()->GetParent() != modelNode) {
-                if (view_object->GetModelXml()->GetParent() != nullptr) {
-                    view_object->GetModelXml()->GetParent()->RemoveChild(view_object->GetModelXml());
-                }
-                modelNode->AddChild(view_object->GetModelXml());
-            }
-        }*/
     }
 }
 
@@ -152,8 +135,6 @@ void ViewObjectManager::Delete(const std::string &name) {
             ViewObject *view_object = it->second;
 
             if (view_object != nullptr) {
-                //view_object->GetModelXml()->GetParent()->RemoveChild(view_object->GetModelXml());
-
                 /*for (auto it2 = view_objects.begin(); it2 != view_objects.end(); ++it2) {
                     if (it2->second->GetDisplayAs() == "ObjectGroup") {
                         ModelGroup *group = (ModelGroup*)it2->second;
@@ -161,7 +142,6 @@ void ViewObjectManager::Delete(const std::string &name) {
                     }
                 }*/
                 view_objects.erase(it);
-                //delete view_object->GetModelXml();
                 delete view_object;
                 return;
             }
@@ -235,9 +215,7 @@ bool ViewObjectManager::Rename(const std::string &oldName, const std::string &ne
     if (view_object == nullptr) {
         return false;
     }
-    view_object->GetModelXml()->DeleteAttribute("name");
-    view_object->GetModelXml()->AddAttribute("name",newName);
-    view_object->name = newName;
+    view_object->SetName(newName);
 
     bool changed = false;
     //for (auto it2 = view_objects.begin(); it2 != view_objects.end(); ++it2) {

@@ -239,7 +239,6 @@ public:
     [[nodiscard]] Model* CreateDefaultModelFromSavedModelNode(Model* model, ModelPreview* modelPreview, wxXmlNode* node, xLightsFrame* xlights, bool& cancelled) const;
 
     [[nodiscard]] wxString SerialiseSubmodel() const;
-    [[nodiscard]] wxString SerialiseAliases() const;
     [[nodiscard]] virtual wxString CreateBufferAsSubmodel() const;
     bool importAliases = false;
     bool skipImportAliases = false;

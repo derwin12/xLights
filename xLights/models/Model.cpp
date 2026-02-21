@@ -5818,28 +5818,6 @@ wxString Model::SerialiseSubmodel() const
     return res;
 }
 
-wxString Model::SerialiseAliases() const {
-    wxString alias = "";
-
-    wxXmlNode* root = GetModelXml();
-    wxXmlNode* child = root->GetChildren();
-    while (child != nullptr) {
-        if (child->GetName() == "Aliases") {
-            wxXmlDocument new_doc;
-            new_doc.SetRoot(new wxXmlNode(*child));
-            wxStringOutputStream stream;
-            new_doc.Save(stream);
-            wxString s = stream.GetString();
-            s = s.SubString(s.Find("\n") + 1, s.Length()); // skip over xml format header
-            alias += s;
-            break;
-        }
-        child = child->GetNext();
-    }
-
-    return alias;
-}
-
 wxString Model::CreateBufferAsSubmodel() const
 {
     int buffW = GetDefaultBufferWi();
