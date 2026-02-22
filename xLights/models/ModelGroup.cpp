@@ -295,33 +295,6 @@ bool ModelGroup::OnlyContainsModel(const std::string& name) const
     return true;
 }
 
-std::string ModelGroup::SerialiseModelGroup(const std::string& forModel) const
-{
-    wxXmlDocument new_doc;
-    new_doc.SetRoot(new wxXmlNode(*GetModelXml()));
-
-    std::string nmns;
-    auto mns = wxSplit(new_doc.GetRoot()->GetAttribute("models"), ',');
-    for (auto& it : mns) {
-        if(!it.StartsWith(forModel)) continue;
-        if (!nmns.empty()) nmns += ",";
-        it.Replace(forModel + "/", "EXPORTEDMODEL/");
-        nmns += it;
-    }
-    new_doc.GetRoot()->DeleteAttribute("models");
-    new_doc.GetRoot()->AddAttribute("models", nmns);
-    new_doc.GetRoot()->DeleteAttribute("centrex");
-    new_doc.GetRoot()->AddAttribute("centrex", wxString::Format("%f", centrex));
-    new_doc.GetRoot()->DeleteAttribute("centrey");
-    new_doc.GetRoot()->AddAttribute("centrey", wxString::Format("%f", centrey));
-    new_doc.GetRoot()->DeleteAttribute("centreDefined");
-    new_doc.GetRoot()->AddAttribute("centreDefined", wxString::Format("%d", centreDefined));
-    wxStringOutputStream stream;
-    new_doc.Save(stream);
-    wxString s = stream.GetString();
-    return (s.SubString(s.Find("\n") + 1, s.Length()) + "\n").ToStdString(); // skip over xml format header
-}
-
 const std::vector<std::string> &ModelGroup::GetBufferStyles() const {
     struct Initializer {
         Initializer() {
