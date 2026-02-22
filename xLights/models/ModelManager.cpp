@@ -1476,7 +1476,7 @@ std::vector<std::string> ModelManager::GetGroupsContainingModel(const Model* mod
     return res;
 }
 
-std::vector<std::string> ModelManager::GetGroupsContainingModelOrSubmodel(Model* model) const
+std::vector<std::string> ModelManager::GetGroupsContainingModelOrSubmodel(const Model* model) const
 {
     std::vector<std::string> res;
     for (const auto& it : *this) {

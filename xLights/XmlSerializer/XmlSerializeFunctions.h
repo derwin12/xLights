@@ -28,6 +28,8 @@ void DeserializeTwoPointScreenLocationAttributes(BaseObject* object, wxXmlNode* 
 void DeserializeThreePointScreenLocationAttributes(BaseObject* object, wxXmlNode* node);
 void DeserializePolyPointScreenLocationAttributes(BaseObject* object, wxXmlNode* node);
 
+void SerializeModelGroupsForModel(const Model* object, wxXmlNode* docNode);
+
 // Data structure for importing custom models
 struct CustomModelImportData {
     std::string name;

@@ -5048,11 +5048,11 @@ void LayoutPanel::OnPreviewModelPopup(wxCommandEvent& event)
         xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RELOAD_PROPERTYGRID, "LayoutPanel::OnPreviewModelPopup::ID_PREVIEW_MODEL_ASPECTRATIO");
         xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RELOAD_ALLMODELS, "LayoutPanel::OnPreviewModelPopup::ID_PREVIEW_MODEL_ASPECTRATIO", nullptr, nullptr, GetSelectedModelName());
     } else if (event.GetId() == ID_PREVIEW_MODEL_EXPORTXLIGHTSMODEL) {
-        Model* md = dynamic_cast<Model*>(selectedBaseObject);
+        const Model* md = dynamic_cast<Model*>(selectedBaseObject);
         if (md == nullptr)
             return;
         XmlSerializer serializer;
-        serializer.SerializeAndSaveModel(*md, xlights);
+        serializer.SerializeAndSaveModel(md, xlights);
     } else if (event.GetId() == ID_PREVIEW_DELETE_ACTIVE) {
         DeleteCurrentPreview();
     } else if (event.GetId() == ID_PREVIEW_RENAME_ACTIVE) {
@@ -7427,9 +7427,6 @@ void LayoutPanel::DoUndo(wxCommandEvent& event) {
 }
 
 void LayoutPanel::CreateUndoPoint(const std::string &tp, const std::string &model, const std::string &key, const std::string &data) {
-    
-    return;  // TODO:  Undo needs to be reworked for XML removal
-    
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "LayoutPanel::CreateUndoPoint");
     size_t idx = undoBuffer.size();
@@ -7474,8 +7471,10 @@ void LayoutPanel::CreateUndoPoint(const std::string &tp, const std::string &mode
     undoBuffer[idx].key = key;
     undoBuffer[idx].data = data;
 
+    XmlSerializer serializer;
+
     if (type == "SingleModel") {
-        Model *m = _newModel;
+        const Model *m = _newModel;
         if (m == nullptr) {
             if( selectedBaseObject == nullptr ) {
                 undoBuffer.resize(idx);
@@ -7484,26 +7483,13 @@ void LayoutPanel::CreateUndoPoint(const std::string &tp, const std::string &mode
             m=dynamic_cast<Model*>(selectedBaseObject);
             wxASSERT(m != nullptr);
         }
-        wxXmlDocument doc;
         
-       // XmlSerializer serializer;
-       // wxXmlDocument doc = SerializeModel(object, xlights);
-
- //       serializer.SerializeAndSaveModel(*md, xlights);
-        
-        wxXmlNode *parent = m->GetModelXml()->GetParent();
-        if (parent == nullptr) {
-            undoBuffer.resize(idx); // restore undo buffer back to its old size
-            return; // this shouldnt happen but it does and when it does it crashes.
-        }
-        wxXmlNode *next = m->GetModelXml()->GetNext();
-        parent->RemoveChild(m->GetModelXml());
-        doc.SetRoot(m->GetModelXml());
+        // Use XmlSerializer to create the XML document
+        wxXmlDocument doc = serializer.SerializeModel(m, xlights);
+       
         wxStringOutputStream stream;
         doc.Save(stream);
         undoBuffer[idx].data = stream.GetString();
-        doc.DetachRoot();
-        parent->InsertChild(m->GetModelXml(), next);
     } else if (type == "SingleObject") {
         ViewObject *obj = nullptr;
         if( selectedBaseObject == nullptr ) {
@@ -7512,61 +7498,56 @@ void LayoutPanel::CreateUndoPoint(const std::string &tp, const std::string &mode
         }
         obj=dynamic_cast<ViewObject*>(selectedBaseObject);
         wxASSERT(obj != nullptr);
-        wxXmlDocument doc;
-        wxXmlNode *parent = obj->GetModelXml()->GetParent();
-        if (parent == nullptr) {
-            undoBuffer.resize(idx); // restore undo buffer back to its old size
-            return; // this shouldnt happend but it does and when it does it crashes.
-        }
-        wxXmlNode *next = obj->GetModelXml()->GetNext();
-        parent->RemoveChild(obj->GetModelXml());
-        doc.SetRoot(obj->GetModelXml());
+        
+        // Use XmlSerializer to create the XML document
+        wxXmlDocument doc = serializer.SerializeObject(*obj, xlights);
+        
         wxStringOutputStream stream;
         doc.Save(stream);
         undoBuffer[idx].data = stream.GetString();
-        doc.DetachRoot();
-        parent->InsertChild(obj->GetModelXml(), next);
     } else if (type == "All") {
-        wxXmlDocument doc;
-        wxXmlNode *parent = xlights->ModelsNode->GetParent();
-        if (parent == nullptr) {
-            undoBuffer.resize(idx); // restore undo buffer back to its old size
-            return; // this shouldnt happend but it does and when it does it crashes.
+        // Serialize all models
+        {
+            wxXmlDocument doc;
+            wxXmlNode* root = new wxXmlNode(wxXML_ELEMENT_NODE, "root");
+            serializer.SerializeAllModels(xlights->AllModels, xlights, root);
+            doc.SetRoot(root);
+            
+            wxStringOutputStream stream;
+            doc.Save(stream);
+            undoBuffer[idx].models = stream.GetString();
         }
-        wxXmlNode *next = xlights->ModelsNode->GetNext();
-        parent->RemoveChild(xlights->ModelsNode);
-        doc.SetRoot(xlights->ModelsNode);
-        wxStringOutputStream stream;
-        doc.Save(stream);
-        undoBuffer[idx].models = stream.GetString();
-        doc.DetachRoot();
-        parent->InsertChild(xlights->ModelsNode, next);
-
-        parent = xlights->ViewObjectsNode->GetParent();
-        if (parent == nullptr) logger_base.crit("LayoutPanel::CreateUndoPoint ViewObjectsNode Parent was NULL ... this is going to get ugly.");
-        next = xlights->ViewObjectsNode->GetNext();
-        parent->RemoveChild(xlights->ViewObjectsNode);
-        doc.SetRoot(xlights->ViewObjectsNode);
-        wxStringOutputStream stream3;
-        doc.Save(stream3);
-        undoBuffer[idx].objects = stream3.GetString();
-        doc.DetachRoot();
-        parent->InsertChild(xlights->ViewObjectsNode, next);
-
-        wxStringOutputStream stream2;
-        parent = xlights->ModelGroupsNode->GetParent();
-        if (parent == nullptr) {
-            undoBuffer.resize(idx); // restore undo buffer back to its old size
-            return; // this shouldnt happend but it does and when it does it crashes.
+        
+        // Serialize all view objects
+        {
+            wxXmlDocument doc;
+            wxXmlNode* root = new wxXmlNode(wxXML_ELEMENT_NODE, "root");
+            serializer.SerializeAllObjects(xlights->AllObjects, xlights, root);
+            doc.SetRoot(root);
+            
+            wxStringOutputStream stream;
+            doc.Save(stream);
+            undoBuffer[idx].objects = stream.GetString();
         }
-        next = xlights->ModelGroupsNode->GetNext();
-        parent->RemoveChild(xlights->ModelGroupsNode);
-        doc.SetRoot(xlights->ModelGroupsNode);
-        doc.Save(stream2);
-        undoBuffer[idx].groups = stream2.GetString();
-        stream.Reset();
-        doc.DetachRoot();
-        parent->InsertChild(xlights->ModelGroupsNode, next);
+        
+        // Serialize all model groups
+        {
+            wxXmlDocument doc;
+            wxXmlNode* root = new wxXmlNode(wxXML_ELEMENT_NODE, "root");
+            
+            // Serialize model groups by iterating and serializing each group model
+            for (auto& m : xlights->AllModels) {
+                if (m.second->GetDisplayAs() == "ModelGroup") {
+                    XmlSerializingVisitor visitor{ root };
+                    m.second->Accept(visitor);
+                }
+            }
+            
+            doc.SetRoot(root);
+            wxStringOutputStream stream;
+            doc.Save(stream);
+            undoBuffer[idx].groups = stream.GetString();
+        }
     }
 }
 
@@ -7640,11 +7621,11 @@ void LayoutPanel::OnModelsPopup(wxCommandEvent& event) {
         xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RELOAD_PROPERTYGRID, "LayoutPanel::OnPreviewModelPopup::ID_PREVIEW_MODEL_ASPECTRATIO");
         xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RELOAD_ALLMODELS, "LayoutPanel::OnPreviewModelPopup::ID_PREVIEW_MODEL_ASPECTRATIO", nullptr, nullptr, GetSelectedModelName());
     } else if (event.GetId() == ID_PREVIEW_MODEL_EXPORTXLIGHTSMODEL) {
-        Model* md = dynamic_cast<Model*>(selectedBaseObject);
+        const Model* md = dynamic_cast<Model*>(selectedBaseObject);
         if (md == nullptr)
             return;
         XmlSerializer serializer;
-        serializer.SerializeAndSaveModel(*md, xlights);
+        serializer.SerializeAndSaveModel(md, xlights);
     } else if (event.GetId() == ID_PREVIEW_DELETE_ACTIVE) {
         DeleteCurrentPreview();
     } else if (event.GetId() == ID_PREVIEW_RENAME_ACTIVE) {

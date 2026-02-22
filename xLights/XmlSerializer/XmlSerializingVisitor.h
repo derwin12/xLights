@@ -28,6 +28,7 @@ class DmxMotor;
 class DmxPresetAbility;
 class DmxShutterAbility;
 class Mesh;
+class ModelGroup;
 class Servo;
 
 struct XmlSerializingVisitor : BaseObjectVisitor {
@@ -102,7 +103,6 @@ private:
     void AddAliases(wxXmlNode* node, const std::list<std::string>& aliases);
     void AddDimmingCurve(wxXmlNode* node, const Model* m);
     void AddSubmodels(wxXmlNode* node, const Model* m);
-    void AddGroups(wxXmlNode* node, const Model* m);
     void AddControllerConnection(wxXmlNode* node, const Model* m);
     void AddDimensions(wxXmlNode* node, const Model* m);
     void AddSuperStrings(Model const& model, wxXmlNode* node);

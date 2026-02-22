@@ -10,7 +10,11 @@
 
 #include "XmlSerializeFunctions.h"
 #include "XmlNodeKeys.h"
+#include "CheckboxSelectDialog.h"
 #include "../UtilFunctions.h"
+#include "../models/ModelGroup.h"
+#include "../models/ModelManager.h"
+#include "../xLightsMain.h"
 
 #include <wx/xml/xml.h>
 
@@ -431,6 +435,73 @@ std::string GetModelAttributesAsJSON(const wxXmlNode* modelNode) {
     json += "}}";
     
     return json;
+}
+
+void SerializeModelGroupsForModel(const Model* model, wxXmlNode* docNode) {
+    if (model == nullptr) return;
+    
+    const ModelManager& mgr = model->GetModelManager();
+
+    wxArrayString allGroups;
+    wxArrayString onlyGroups;
+    for (const auto& it : mgr.GetModels()) {
+        if (it.second->GetDisplayAs() == "ModelGroup") {
+            if (dynamic_cast<ModelGroup*>(it.second)->OnlyContainsModel(model->Name())) {
+                onlyGroups.Add(it.first);
+                allGroups.Add(it.first);
+            } else if (dynamic_cast<ModelGroup*>(it.second)->ContainsModelOrSubmodel(model)) {
+                allGroups.Add(it.first);
+            }
+        }
+    }
+
+    if (allGroups.size() == 0) {
+        return;
+    }
+
+    CheckboxSelectDialog dlg(dynamic_cast<wxWindow*>(mgr.GetXLightsFrame()), "Select Groups to Export - cancel to include no groups", allGroups, onlyGroups);
+    if (dlg.ShowModal() == wxID_OK) {
+        onlyGroups = dlg.GetSelectedItems();
+    } else {
+        return;
+    }
+
+    if (onlyGroups.size() == 0) {
+        return;
+    }
+
+    // Serialize selected model groups to the docNode
+    for (const auto& it : mgr.GetModels()) {
+        if (onlyGroups.Index(it.first) != wxNOT_FOUND) {
+            ModelGroup* mg = dynamic_cast<ModelGroup*>(it.second);
+            if (mg != nullptr) {
+                // Get the model names from the ModelGroup
+                const std::vector<std::string>& model_names = mg->ModelNames();
+                
+                // Create comma-delimited string of model names
+                std::string modelsStr;
+                for (size_t i = 0; i < model_names.size(); ++i) {
+                    if (i > 0) {
+                        modelsStr += ",";
+                    }
+                    modelsStr += model_names[i];
+                }
+                
+                wxXmlNode* groupNode = new wxXmlNode(wxXML_ELEMENT_NODE, "modelGroup");
+                groupNode->AddAttribute(XmlNodeKeys::NameAttribute, it.first);
+                groupNode->AddAttribute(XmlNodeKeys::mgSelectedAttribute, std::to_string(mg->IsSelected()));
+                groupNode->AddAttribute(XmlNodeKeys::mgModelsAttribute, modelsStr);
+                groupNode->AddAttribute(XmlNodeKeys::LayoutGroupAttribute, mg->GetLayoutGroup());
+                groupNode->AddAttribute(XmlNodeKeys::LayoutAttribute, mg->GetLayout());
+                groupNode->AddAttribute(XmlNodeKeys::mgGridSizeAttribute, std::to_string(mg->GetGridSize()));
+                groupNode->AddAttribute(XmlNodeKeys::mgCentrexAttribute, std::to_string(mg->GetCentreX()));
+                groupNode->AddAttribute(XmlNodeKeys::mgCentreyAttribute, std::to_string(mg->GetCentreY()));
+                groupNode->AddAttribute(XmlNodeKeys::mgCentreDefinedAttribute, std::to_string(mg->GetCentreDefined()));
+
+                docNode->AddChild(groupNode);
+            }
+        }
+    }
 }
 
 } // end namespace XmlSerialize

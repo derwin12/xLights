@@ -36,19 +36,19 @@ struct XmlSerializer {
         root->AddChild(modelsNode);
     }
 
-    // Serializes and Saves a single model into an XML document
-    void SerializeAndSaveModel(const BaseObject& object, xLightsFrame* xlights) {
-        wxString name = object.GetName();
+    // Serializes and Saves a single model into an XML document (only used for Export)
+    void SerializeAndSaveModel(const Model* model, xLightsFrame* xlights) {
+        wxString name = model->GetName();
 
         wxString filename = wxFileSelector(_("Choose output file"), wxEmptyString, name, wxEmptyString, "Custom Model files (*.xmodel)|*.xmodel", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (filename.IsEmpty())
             return;
-        wxXmlDocument doc = SerializeModel(object, xlights);
+        wxXmlDocument doc = SerializeModel(model, xlights, true);
         doc.Save(filename);
     }
 
     // Serialize a single model into an XML document
-    wxXmlDocument SerializeModel(const BaseObject& object, xLightsFrame* xlights) {
+    wxXmlDocument SerializeModel(const Model* model, xLightsFrame* xlights, bool exporting = false) {
         wxXmlDocument doc;
 
         wxXmlNode* docNode = new wxXmlNode(wxXML_ELEMENT_NODE, XmlNodeKeys::ModelsNodeName);
@@ -56,7 +56,9 @@ struct XmlSerializer {
 
         XmlSerializingVisitor visitor{ docNode };
 
-        object.Accept(visitor);
+        model->Accept(visitor);
+        
+        XmlSerialize::SerializeModelGroupsForModel(model, docNode);
 
         doc.SetRoot(docNode);
 

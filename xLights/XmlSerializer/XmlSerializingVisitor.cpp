@@ -425,38 +425,6 @@ void XmlSerializingVisitor::AddSubmodels(wxXmlNode* node, const Model* m) {
     }
 }
 
-void XmlSerializingVisitor::AddGroups(wxXmlNode* node, const Model* m) {
-    const ModelManager& mgr = m->GetModelManager();
-    std::vector<Model*> mg = mgr.GetModelGroups(m);
-
-    for (const Model* g : mg) {
-        const ModelGroup* mg1 = dynamic_cast<const ModelGroup*>(g);
-        if (mg1 == nullptr) return;
-        wxXmlNode* groups = new wxXmlNode(wxXML_ELEMENT_NODE, XmlNodeKeys::GroupNodeName);
-        groups->AddAttribute(XmlNodeKeys::NameAttribute, g->GetName());
-        groups->AddAttribute(XmlNodeKeys::mgModelsAttribute, m->GetName());
-        groups->AddAttribute(XmlNodeKeys::LayoutGroupAttribute, g->GetLayoutGroup());
-        groups->AddAttribute(XmlNodeKeys::mgSelectedAttribute, std::to_string(mg1->IsSelected()));
-        groups->AddAttribute(XmlNodeKeys::LayoutAttribute, mg1->GetLayout());
-        groups->AddAttribute(XmlNodeKeys::mgGridSizeAttribute, std::to_string(mg1->GetGridSize()));
-        groups->AddAttribute(XmlNodeKeys::TagColourAttribute, mg1->GetTagColourAsString());
-        groups->AddAttribute(XmlNodeKeys::mgCentreMinxAttribute, std::to_string(mg1->GetCentreMinx()));
-        groups->AddAttribute(XmlNodeKeys::mgCentreMinyAttribute, std::to_string(mg1->GetCentreMiny()));
-        groups->AddAttribute(XmlNodeKeys::mgCentreMaxxAttribute, std::to_string(mg1->GetCentreMaxx()));
-        groups->AddAttribute(XmlNodeKeys::mgCentreMaxyAttribute, std::to_string(mg1->GetCentreMaxy()));
-        groups->AddAttribute(XmlNodeKeys::mgCentrexAttribute, std::to_string(mg1->GetCentreX()));
-        groups->AddAttribute(XmlNodeKeys::mgCentreyAttribute, std::to_string(mg1->GetCentreY()));
-        groups->AddAttribute(XmlNodeKeys::mgCentreDefinedAttribute, std::to_string(mg1->GetCentreDefined()));
-        groups->AddAttribute(XmlNodeKeys::mgDefaultCameraAttribute, mg1->GetDefaultCamera());
-        groups->AddAttribute(XmlNodeKeys::mgxCentreOffsetAttribute, std::to_string(mg1->GetXCentreOffset()));
-        groups->AddAttribute(XmlNodeKeys::mgyCentreOffsetAttribute, std::to_string(mg1->GetYCentreOffset()));
-        const std::list<std::string>& aliases = mg1->GetAliases();
-        AddAliases(groups,aliases);
-        SortAttributes(groups);
-        node->AddChild(groups);
-    }
-}
-
 void XmlSerializingVisitor::AddControllerConnection(wxXmlNode* node, const Model* m) {
     auto const& cc = m->GetConstCtrlConn();
     int p = cc.GetCtrlPort();
@@ -508,7 +476,6 @@ void XmlSerializingVisitor::AddOtherElements(wxXmlNode* xmlNode, const Model* m)
     AddDimmingCurve(xmlNode,m);
     AddAliases(xmlNode, m->GetAliases());
     AddSubmodels(xmlNode, m);
-    AddGroups(xmlNode, m);
     AddDimensions(xmlNode, m);
 }
 

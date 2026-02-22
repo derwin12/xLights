@@ -169,7 +169,7 @@ bool ModelGroup::DirectlyContainsModel(std::string const& m) const
     return std::find(modelNames.begin(), modelNames.end(), m) != modelNames.end();
 }
 
-bool ModelGroup::ContainsModelOrSubmodel(Model* m) const
+bool ModelGroup::ContainsModelOrSubmodel(const Model* m) const
 {
     wxASSERT(m->GetDisplayAs() != "ModelGroup");
 
@@ -259,7 +259,7 @@ bool ModelGroup::ContainsModel(const Model* m, std::list<const Model*>& visited)
     return found;
 }
 
-bool ModelGroup::ContainsModelOrSubmodel(Model* m, std::list<const Model*>& visited) const
+bool ModelGroup::ContainsModelOrSubmodel(const Model* m, std::list<const Model*>& visited) const
 {
     visited.push_back(this);
 

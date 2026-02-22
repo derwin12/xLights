@@ -83,7 +83,7 @@ class ModelManager : public ObjectManager
         Model *createAndAddModel(wxXmlNode *node, int previewW, int previewH);
         std::string GetModelsOnChannels(uint32_t start, uint32_t end, int perLine) const;
         std::vector<std::string> GetGroupsContainingModel(const Model* model) const;
-        std::vector<std::string> GetGroupsContainingModelOrSubmodel(Model* model) const;
+        std::vector<std::string> GetGroupsContainingModelOrSubmodel(const Model* model) const;
         std::vector<Model*> GetModelGroups(const Model* model) const;
         std::string GenerateNewStartChannel(const std::string& lastModel = "") const;
 
@@ -91,6 +91,8 @@ class ModelManager : public ObjectManager
         int GetPreviewHeight() const { return previewHeight; }
         bool MergeFromBase(const std::string& baseShowDir, bool prompt);
         std::string GetLastGeneratedModelName() const { return lastGeneratedModelName; }
+
+        std::map<std::string, Model *> GetModels() const { return models; }
 
     private:
 

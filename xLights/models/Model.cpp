@@ -6370,7 +6370,7 @@ std::string Model::GetAttributesAsJSON() const
 {
     // Serialize the model to XML using XmlSerializer
     XmlSerializer serializer;
-    wxXmlDocument doc = serializer.SerializeModel(*this, const_cast<xLightsFrame*>(modelManager.GetXLightsFrame()));
+    wxXmlDocument doc = serializer.SerializeModel(this, const_cast<xLightsFrame*>(modelManager.GetXLightsFrame()));
     
     // Get the root node - the model node should be the first child
     wxXmlNode* root = doc.GetRoot();
