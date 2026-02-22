@@ -2345,11 +2345,6 @@ wxString Model::SerialiseConnection() const
     return res;
 }
 
-wxString Model::SerialiseGroups() const
-{
-    return modelManager.SerialiseModelGroupsForModel(const_cast<Model*>(this));
-}
-
 void Model::AddModelGroups(wxXmlNode* n, int w, int h, const wxString& name, bool& merge, bool& ask)
 {
     auto grpModels = n->GetAttribute("models");
@@ -5932,6 +5927,47 @@ void Model::SetBlackTransparency(int t)
         IncrementChangeCount();
         AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "Model::SetBlackTransparency");
     }
+}
+
+// Getter methods for export functionality
+std::string Model::GetModelBrightness() const
+{
+    if (ModelXml) {
+        return ModelXml->GetAttribute("ModelBrightness", "0").ToStdString();
+    }
+    return "0";
+}
+
+std::string Model::GetAntialias() const
+{
+    if (ModelXml) {
+        return ModelXml->GetAttribute("Antialias", "").ToStdString();
+    }
+    return "";
+}
+
+std::string Model::GetPixelCount() const
+{
+    if (ModelXml) {
+        return ModelXml->GetAttribute("PixelCount", "").ToStdString();
+    }
+    return "";
+}
+
+std::string Model::GetPixelType() const
+{
+    if (ModelXml) {
+        return ModelXml->GetAttribute("PixelType", "").ToStdString();
+    }
+    return "";
+}
+
+std::string Model::GetPixelSpacing() const
+{
+    if (ModelXml) {
+        return ModelXml->GetAttribute("PixelSpacing", "").ToStdString();
+    }
+    return "";
 }
 
 void Model::SetPixelStyle(PIXEL_STYLE style)

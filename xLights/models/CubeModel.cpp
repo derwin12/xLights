@@ -1038,7 +1038,7 @@ std::string CubeModel::ChannelLayoutHtml(OutputManager* outputManager)
 
 void CubeModel::ExportAsCustomXModel3D() const
 {
-    wxString name = ModelXml->GetAttribute("name");
+    wxString name = GetName();
     wxLogNull logNo; //kludge: avoid "error 0" message from wxWidgets after new file is written
     wxString filename = wxFileSelector(_("Choose output file"), wxEmptyString, name, wxEmptyString, "Custom Model files (*.xmodel)|*.xmodel", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
 
@@ -1046,7 +1046,6 @@ void CubeModel::ExportAsCustomXModel3D() const
         return;
 
     wxFile f(filename);
-    //    bool isnew = !FileExists(filename);
     if (!f.Create(filename, true) || !f.IsOpened()) {
         DisplayError(wxString::Format("Unable to create file %s. Error %d\n", filename, f.GetLastError()).ToStdString());
         return;
@@ -1081,13 +1080,13 @@ void CubeModel::ExportAsCustomXModel3D() const
     wxString st = GetStringType();
     wxString ps = std::to_string(GetPixelSize());
     wxString t = GetTransparency() ? "1" : "0";
-    wxString mb = ModelXml->GetAttribute("ModelBrightness", "0");
-    wxString a = ModelXml->GetAttribute("Antialias");
+    wxString mb = GetModelBrightness();
+    wxString a = GetAntialias();
     wxString sn = GetStrandNames();
     wxString nn = GetNodeNames();
-    wxString pc = ModelXml->GetAttribute("PixelCount");
-    wxString pt = ModelXml->GetAttribute("PixelType");
-    wxString psp = ModelXml->GetAttribute("PixelSpacing");
+    wxString pc = GetPixelCount();
+    wxString pt = GetPixelType();
+    wxString psp = GetPixelSpacing();
 
     wxString v = xlights_version_string;
     f.Write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<custommodel \n");
@@ -1102,11 +1101,11 @@ void CubeModel::ExportAsCustomXModel3D() const
     f.Write(wxString::Format("Antialias=\"%s\" ", a));
     f.Write(wxString::Format("StrandNames=\"%s\" ", sn));
     f.Write(wxString::Format("NodeNames=\"%s\" ", nn));
-    if (pc != "")
+    if (!pc.empty())
         f.Write(wxString::Format("PixelCount=\"%s\" ", pc));
-    if (pt != "")
+    if (!pt.empty())
         f.Write(wxString::Format("PixelType=\"%s\" ", pt));
-    if (psp != "")
+    if (!psp.empty())
         f.Write(wxString::Format("PixelSpacing=\"%s\" ", psp));
     f.Write("CustomModel=\"");
     f.Write(CustomModel::ToCustomModel(data));
@@ -1117,20 +1116,16 @@ void CubeModel::ExportAsCustomXModel3D() const
     f.Write(wxString::Format("SourceVersion=\"%s\" ", v));
     f.Write(ExportSuperStringColors());
     f.Write(" >\n");
-    wxString groups = SerialiseGroups();
-    if (groups != "") {
-        f.Write(groups);
-    }
     wxString face = SerialiseFace();
-    if (face != "") {
+    if (!face.empty()) {
         f.Write(face);
     }
     wxString state = SerialiseState();
-    if (state != "") {
+    if (!state.empty()) {
         f.Write(state);
     }
     wxString submodel = SerialiseSubmodel();
-    if (submodel != "") {
+    if (!submodel.empty()) {
         f.Write(submodel);
     }
     f.Write("</custommodel>");

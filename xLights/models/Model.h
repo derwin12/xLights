@@ -174,6 +174,14 @@ public:
     void SetPixelSize(int size);
     void SetTransparency(int t);
     void SetBlackTransparency(int t);
+    
+    // Getter methods for export functionality
+    [[nodiscard]] std::string GetModelBrightness() const;
+    [[nodiscard]] std::string GetAntialias() const;
+    [[nodiscard]] std::string GetPixelCount() const;
+    [[nodiscard]] std::string GetPixelType() const;
+    [[nodiscard]] std::string GetPixelSpacing() const;
+    wxString ExportSuperStringColors() const;
     void ApplyDimensions(const std::string& units, float width, float height, float depth, float& min_x, float& max_x, float& min_y, float& max_y, float& min_z, float& max_z);
     void ExportDimensions(wxFile& f) const;
     std::string GetRulerDim() const;
@@ -182,7 +190,6 @@ public:
     static void WriteFaceInfo(wxXmlNode* fiNode, const FaceStateData& faceInfo);
     wxString SerialiseFace() const;
     wxString SerialiseState() const;
-    wxString SerialiseGroups() const;
     wxString SerialiseConnection() const;
     void AddModelGroups(wxXmlNode* n, int w, int h, const wxString& name, bool& merge, bool& ask);
 
@@ -353,7 +360,6 @@ protected:
 
     bool FindCustomModelScale(int scale) const;
 
-    wxString ExportSuperStringColors() const;
     void ImportSuperStringColours(wxXmlNode* root);
 
     void SetLineCoord();

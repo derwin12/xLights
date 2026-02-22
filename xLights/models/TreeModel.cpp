@@ -350,22 +350,12 @@ void TreeModel::AddStyleProperties(wxPropertyGridInterface *grid) {
 }
 
 #define SCALE_FACTOR_3D (1.1)
-void TreeModel::ExportAsCustomXModel3D() const
+
+// Helper function to build 3D custom model data from node coordinates
+static std::vector<std::vector<std::vector<int>>> BuildTreeCustomModelData(
+    const std::vector<NodeBaseClassPtr>& nodes,
+    int& width, int& height, int& depth)
 {
-    wxString name = ModelXml->GetAttribute("name");
-    wxLogNull logNo; // kludge: avoid "error 0" message from wxWidgets after new file is written
-    wxString filename = wxFileSelector(_("Choose output file"), wxEmptyString, name, wxEmptyString, "Custom Model files (*.xmodel)|*.xmodel", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
-
-    if (filename.IsEmpty())
-        return;
-
-    wxFile f(filename);
-    //    bool isnew = !FileExists(filename);
-    if (!f.Create(filename, true) || !f.IsOpened()) {
-        DisplayError(wxString::Format("Unable to create file %s. Error %d\n", filename, f.GetLastError()).ToStdString());
-        return;
-    }
-
     float minx = 99999;
     float miny = 99999;
     float minz = 99999;
@@ -373,7 +363,7 @@ void TreeModel::ExportAsCustomXModel3D() const
     float maxy = -99999;
     float maxz = -99999;
 
-    for (auto& n : Nodes) {
+    for (auto& n : nodes) {
         minx = std::min(minx, n->Coords[0].screenX);
         miny = std::min(miny, n->Coords[0].screenY);
         minz = std::min(minz, n->Coords[0].screenZ);
@@ -385,12 +375,16 @@ void TreeModel::ExportAsCustomXModel3D() const
     float h = maxy - miny;
     float d = maxz - minz;
 
+    width = static_cast<int>(SCALE_FACTOR_3D * w + 1);
+    height = static_cast<int>(SCALE_FACTOR_3D * h + 1);
+    depth = static_cast<int>(SCALE_FACTOR_3D * d + 1);
+
     std::vector<std::vector<std::vector<int>>> data;
-    for (int l = 0; l < SCALE_FACTOR_3D * d + 1; l++) {
+    for (int l = 0; l < depth; l++) {
         std::vector<std::vector<int>> layer;
-        for (int r = SCALE_FACTOR_3D * h + 1; r >= 0; r--) {
+        for (int r = height; r >= 0; r--) {
             std::vector<int> row;
-            for (int c = 0; c < SCALE_FACTOR_3D * w + 1; c++) {
+            for (int c = 0; c < width; c++) {
                 row.push_back(-1);
             }
             layer.push_back(row);
@@ -399,33 +393,42 @@ void TreeModel::ExportAsCustomXModel3D() const
     }
 
     int i = 1;
-    for (auto& n : Nodes) {
+    for (auto& n : nodes) {
         int xx = SCALE_FACTOR_3D * w * (n->Coords[0].screenX - minx) / w;
         int yy = (SCALE_FACTOR_3D * h) - (SCALE_FACTOR_3D * h * (n->Coords[0].screenY - miny) / h);
         int zz = SCALE_FACTOR_3D * d * (maxz - n->Coords[0].screenZ) / d;
-        wxASSERT(xx >= 0 && xx < SCALE_FACTOR_3D * w + 1);
-        wxASSERT(yy >= 0 && yy < SCALE_FACTOR_3D * h + 1);
-        wxASSERT(zz >= 0 && zz < SCALE_FACTOR_3D * d + 1);
+        wxASSERT(xx >= 0 && xx < width);
+        wxASSERT(yy >= 0 && yy < height);
+        wxASSERT(zz >= 0 && zz < depth);
         wxASSERT(data[zz][yy][xx] == -1);
         data[zz][yy][xx] = i++;
     }
 
-    wxString p1 = wxString::Format("%i", (int)(SCALE_FACTOR_3D * w + 1));
-    wxString p2 = wxString::Format("%i", (int)(SCALE_FACTOR_3D * h + 1));
-    wxString dd = wxString::Format("%i", (int)(SCALE_FACTOR_3D * d + 1));
-    wxString p3 = wxString::Format("%i", parm3);
-    wxString st = ModelXml->GetAttribute("StringType");
-    wxString ps = ModelXml->GetAttribute("PixelSize");
-    wxString t = ModelXml->GetAttribute("Transparency", "0");
-    wxString mb = ModelXml->GetAttribute("ModelBrightness", "0");
-    wxString a = ModelXml->GetAttribute("Antialias");
-    wxString sn = ModelXml->GetAttribute("StrandNames");
-    wxString nn = ModelXml->GetAttribute("NodeNames");
-    wxString pc = ModelXml->GetAttribute("PixelCount");
-    wxString pt = ModelXml->GetAttribute("PixelType");
-    wxString psp = ModelXml->GetAttribute("PixelSpacing");
+    return data;
+}
 
+// Helper function to write custom model XML attributes
+static void WriteCustomModelAttributes(wxFile& f, const Model* model, 
+    int width, int height, int depth, long parm3,
+    const std::vector<std::vector<std::vector<int>>>& data)
+{
+    wxString name = model->GetName();
+    wxString p1 = wxString::Format("%i", width);
+    wxString p2 = wxString::Format("%i", height);
+    wxString dd = wxString::Format("%i", depth);
+    wxString p3 = wxString::Format("%i", parm3);
+    wxString st = model->GetStringType();
+    wxString ps = std::to_string(model->GetPixelSize());
+    wxString t = model->GetTransparency() ? "1" : "0";
+    wxString mb = model->GetModelBrightness();
+    wxString a = model->GetAntialias();
+    wxString sn = model->GetStrandNames();
+    wxString nn = model->GetNodeNames();
+    wxString pc = model->GetPixelCount();
+    wxString pt = model->GetPixelType();
+    wxString psp = model->GetPixelSpacing();
     wxString v = xlights_version_string;
+
     f.Write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<custommodel \n");
     f.Write(wxString::Format("name=\"%s\" ", name));
     f.Write(wxString::Format("parm1=\"%s\" ", p1));
@@ -439,11 +442,11 @@ void TreeModel::ExportAsCustomXModel3D() const
     f.Write(wxString::Format("Antialias=\"%s\" ", a));
     f.Write(wxString::Format("StrandNames=\"%s\" ", sn));
     f.Write(wxString::Format("NodeNames=\"%s\" ", nn));
-    if (pc != "")
+    if (!pc.empty())
         f.Write(wxString::Format("PixelCount=\"%s\" ", pc));
-    if (pt != "")
+    if (!pt.empty())
         f.Write(wxString::Format("PixelType=\"%s\" ", pt));
-    if (psp != "")
+    if (!psp.empty())
         f.Write(wxString::Format("PixelSpacing=\"%s\" ", psp));
     f.Write("CustomModel=\"");
     f.Write(CustomModel::ToCustomModel(data));
@@ -452,20 +455,47 @@ void TreeModel::ExportAsCustomXModel3D() const
     f.Write(CustomModel::ToCompressed(data));
     f.Write("\" ");
     f.Write(wxString::Format("SourceVersion=\"%s\" ", v));
-    f.Write(ExportSuperStringColors());
+    f.Write(model->ExportSuperStringColors());
     f.Write(" >\n");
+}
+
+void TreeModel::ExportAsCustomXModel3D() const
+{
+    wxString name = GetName();
+    wxLogNull logNo; // kludge: avoid "error 0" message from wxWidgets after new file is written
+    wxString filename = wxFileSelector(_("Choose output file"), wxEmptyString, name, wxEmptyString, 
+        "Custom Model files (*.xmodel)|*.xmodel", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+
+    if (filename.IsEmpty())
+        return;
+
+    wxFile f(filename);
+    if (!f.Create(filename, true) || !f.IsOpened()) {
+        DisplayError(wxString::Format("Unable to create file %s. Error %d\n", filename, f.GetLastError()).ToStdString());
+        return;
+    }
+
+    // Build the 3D custom model data from node coordinates
+    int width, height, depth;
+    auto data = BuildTreeCustomModelData(Nodes, width, height, depth);
+
+    // Write XML attributes
+    WriteCustomModelAttributes(f, this, width, height, depth, parm3, data);
+
+    // Write face, state, and submodel information
     wxString face = SerialiseFace();
-    if (face != "") {
+    if (!face.empty()) {
         f.Write(face);
     }
     wxString state = SerialiseState();
-    if (state != "") {
+    if (!state.empty()) {
         f.Write(state);
     }
     wxString submodel = SerialiseSubmodel();
-    if (submodel != "") {
+    if (!submodel.empty()) {
         f.Write(submodel);
     }
+    
     f.Write("</custommodel>");
     f.Close();
 }

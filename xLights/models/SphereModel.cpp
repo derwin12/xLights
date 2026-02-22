@@ -255,21 +255,21 @@ void SphereModel::ExportAsCustomXModel3D() const
     wxString p2 = wxString::Format("%i", (int)(scaleFactor3D * BufferHt + 1));
     wxString dd = wxString::Format("%i", (int)(scaleFactor3D * BufferWi + 1));
     wxString p3 = wxString::Format("%i", parm3);
-    wxString st = ModelXml->GetAttribute("StringType");
-    wxString ps = ModelXml->GetAttribute("PixelSize");
-    wxString t = ModelXml->GetAttribute("Transparency", "0");
-    wxString mb = ModelXml->GetAttribute("ModelBrightness", "0");
-    wxString a = ModelXml->GetAttribute("Antialias");
-    wxString sn = ModelXml->GetAttribute("StrandNames");
-    wxString nn = ModelXml->GetAttribute("NodeNames");
-    wxString pc = ModelXml->GetAttribute("PixelCount");
-    wxString pt = ModelXml->GetAttribute("PixelType");
-    wxString psp = ModelXml->GetAttribute("PixelSpacing");
-    wxString sl = ModelXml->GetAttribute("StartLatitude");
-    wxString el = ModelXml->GetAttribute("EndLatitude");
-    wxString dg = ModelXml->GetAttribute("Degrees");
-    wxString an = ModelXml->GetAttribute("AlternateNodes", "false");
-    wxString nz = ModelXml->GetAttribute("NoZig", "false");
+    wxString st = GetStringType();
+    wxString ps = std::to_string(GetPixelSize());
+    wxString t = GetTransparency() ? "1" : "0";
+    wxString mb = GetModelBrightness();
+    wxString a = GetAntialias();
+    wxString sn = GetStrandNames();
+    wxString nn = GetNodeNames();
+    wxString pc = GetPixelCount();
+    wxString pt = GetPixelType();
+    wxString psp = GetPixelSpacing();
+    wxString sl = wxString::Format("%d", GetStartLatitude());
+    wxString el = wxString::Format("%d", GetEndLatitude());
+    wxString dg = wxString::Format("%d", GetSphereDegrees());
+    wxString an = wxString::Format("%d", HasAlternateNodes());
+    wxString nz = wxString::Format("%d", IsNoZigZag());
 
     wxString v = xlights_version_string;
     f.Write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<custommodel \n");
@@ -290,11 +290,11 @@ void SphereModel::ExportAsCustomXModel3D() const
     f.Write(wxString::Format("Degrees=\"%s\" ", dg));
     f.Write(wxString::Format("AlternateNodes=\"%s\" ", an));
     f.Write(wxString::Format("NoZig=\"%s\" ", nz));
-    if (pc != "")
+    if (!pc.empty())
         f.Write(wxString::Format("PixelCount=\"%s\" ", pc));
-    if (pt != "")
+    if (!pt.empty())
         f.Write(wxString::Format("PixelType=\"%s\" ", pt));
-    if (psp != "")
+    if (!psp.empty())
         f.Write(wxString::Format("PixelSpacing=\"%s\" ", psp));
     f.Write("CustomModel=\"");
     f.Write(CustomModel::ToCustomModel(data));
@@ -306,17 +306,17 @@ void SphereModel::ExportAsCustomXModel3D() const
     f.Write(ExportSuperStringColors());
     f.Write(" >\n");
     wxString face = SerialiseFace();
-    if (face != "")
+    if (!face.empty())
     {
         f.Write(face);
     }
     wxString state = SerialiseState();
-    if (state != "")
+    if (!state.empty())
     {
         f.Write(state);
     }
     wxString submodel = SerialiseSubmodel();
-    if (submodel != "")
+    if (!submodel.empty())
     {
         f.Write(submodel);
     }

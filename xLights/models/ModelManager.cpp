@@ -352,46 +352,6 @@ void ModelManager::ReplaceIPInStartChannels(const std::string& oldIP, const std:
     }
 }
 
-std::string ModelManager::SerialiseModelGroupsForModel(Model* m) const
-{
-    wxArrayString allGroups;
-    wxArrayString onlyGroups;
-    for (const auto& it : models) {
-        if (it.second->GetDisplayAs() == "ModelGroup") {
-            if (dynamic_cast<ModelGroup*>(it.second)->OnlyContainsModel(m->Name())) {
-                onlyGroups.Add(it.first);
-                allGroups.Add(it.first);
-            } else if (dynamic_cast<ModelGroup*>(it.second)->ContainsModelOrSubmodel(m)) {
-                allGroups.Add(it.first);
-            }
-        }
-    }
-
-    std::string res;
-    if (allGroups.size() == 0) {
-        return res;
-    }
-
-    CheckboxSelectDialog dlg(GetXLightsFrame(), "Select Groups to Export - cancel to include no groups", allGroups, onlyGroups);
-    if (dlg.ShowModal() == wxID_OK) {
-        onlyGroups = dlg.GetSelectedItems();
-    } else {
-        return res;
-    }
-
-    if (onlyGroups.size() == 0) {
-        return res;
-    }
-
-    for (const auto& it : models) {
-        if (onlyGroups.Index(it.first) != wxNOT_FOUND) {
-            res += dynamic_cast<ModelGroup*>(it.second)->SerialiseModelGroup(m->Name());
-        }
-    }
-
-    return res;
-}
-
 void ModelManager::AddModelGroups(wxXmlNode* n, int w, int h, const std::string& mname, bool& merge, bool& ask) {
     // static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     // logger_base.debug("ModelManager adding groups.");
