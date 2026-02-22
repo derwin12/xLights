@@ -6180,17 +6180,8 @@ bool Model::CleanupFileLocations(xLightsFrame* frame)
     }
 
     if (rc) {
-        wxXmlNode* f = ModelXml->GetChildren();
-        while (f != nullptr) {
-            if ("faceInfo" == f->GetName()) {
-                ModelXml->RemoveChild(f);
-                delete f;
-                f = ModelXml->GetChildren();
-            } else {
-                f = f->GetNext();
-            }
-        }
-        Model::WriteFaceInfo(ModelXml, faceInfo);
+        IncrementChangeCount();
+        AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "Model::CleanupFileLocations");
     }
 
     return BaseObject::CleanupFileLocations(frame) || rc;
