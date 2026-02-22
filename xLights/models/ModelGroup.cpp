@@ -407,6 +407,10 @@ ModelGroup::ModelGroup(wxXmlNode* node, const ModelManager& m, int w, int h, con
     Reset();
 }
 
+void ModelGroup::Accept(BaseObjectVisitor& visitor) const {
+    visitor.Visit(*this);
+}
+
 void LoadRenderBufferNodes(Model *m, const std::string &type, const std::string &camera, std::vector<NodeBaseClassPtr> &newNodes, int &bufferWi, int &bufferHi, int stagger) {
 
     if (m == nullptr) return;

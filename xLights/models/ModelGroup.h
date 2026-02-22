@@ -73,6 +73,8 @@ class ModelGroup : public ModelWithScreenLocation<BoxedScreenLocation>
 
         virtual int GetNumStrands() const override { return 0;}
 
+        void Accept(BaseObjectVisitor& visitor) const override;
+
         bool Reset();
         void ResetModels();
 

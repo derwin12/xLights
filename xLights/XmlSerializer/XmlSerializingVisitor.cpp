@@ -608,6 +608,48 @@ void XmlSerializingVisitor::Visit(const MatrixModel& model) {
     AddOtherElements(xmlNode, m);
 }
 
+void XmlSerializingVisitor::Visit(const ModelGroup& model) {
+    wxXmlNode* xmlNode = new wxXmlNode(wxXML_ELEMENT_NODE, "modelGroup");
+    
+    // Add base attributes
+    AddBaseObjectAttributes(model, xmlNode);
+    AddModelScreenLocationAttributes(model, xmlNode);
+    
+    // Add ModelGroup-specific attributes
+    xmlNode->AddAttribute("GridSize", std::to_string(model.GetGridSize()));
+    xmlNode->AddAttribute("layout", model.GetLayout());
+    
+    // Add the list of models
+    std::string modelsStr;
+    const auto& modelNames = model.ModelNames();
+    for (size_t i = 0; i < modelNames.size(); ++i) {
+        if (i > 0) modelsStr += ",";
+        modelsStr += modelNames[i];
+    }
+    xmlNode->AddAttribute("models", modelsStr);
+    
+    // Add centre attributes if defined
+    if (model.GetCentreDefined()) {
+        xmlNode->AddAttribute("centreDefined", "1");
+        xmlNode->AddAttribute("centrex", std::to_string(model.GetCentreX()));
+        xmlNode->AddAttribute("centrey", std::to_string(model.GetCentreY()));
+        xmlNode->AddAttribute("centreMinx", std::to_string(model.GetCentreMinx()));
+        xmlNode->AddAttribute("centreMiny", std::to_string(model.GetCentreMiny()));
+        xmlNode->AddAttribute("centreMaxx", std::to_string(model.GetCentreMaxx()));
+        xmlNode->AddAttribute("centreMaxy", std::to_string(model.GetCentreMaxy()));
+    }
+    
+    // Add tag colour
+    xmlNode->AddAttribute("TagColour", model.GetTagColourAsString());
+    
+    // Note: We don't call AddOtherElements because ModelGroups don't have
+    // faces, states, controller connections, dimming curves, or submodels
+    // They also don't need aliases as those are model-specific
+    
+    SortAttributes(xmlNode);
+    parentNode->AddChild(xmlNode);
+}
+
 void XmlSerializingVisitor::Visit(const MultiPointModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
     AddMultiPointScreenLocationAttributes(model, xmlNode);

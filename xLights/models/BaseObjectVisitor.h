@@ -27,6 +27,7 @@ class DmxSkull;
 class ImageModel;
 class IciclesModel;
 class MatrixModel;
+class ModelGroup;
 class MultiPointModel;
 class SingleLineModel;
 class PolyLineModel;
@@ -61,6 +62,7 @@ struct BaseObjectVisitor {
     virtual void Visit(const ImageModel& model) = 0;
     virtual void Visit(const IciclesModel& model) = 0;
     virtual void Visit(const MatrixModel& model) = 0;
+    virtual void Visit(const ModelGroup& model) = 0;
     virtual void Visit(const MultiPointModel& model) = 0;
     virtual void Visit(const SingleLineModel& model) = 0;
     virtual void Visit(const PolyLineModel& model) = 0;
