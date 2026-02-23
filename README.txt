@@ -11,6 +11,35 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
+2026.03  February 23, 2026
+    -enh (dkulp)            Completely new method for managing Pictures for pictures effect
+                                - Images can now be embedded in the xsq
+                                - New "Images" tab is Sequence Settings to manage images the sequence uses
+                                - SUP imports now embed the 100's of images it creates
+                                - Picture Effect panel now shows the image
+                                - AI Generate button on Picture Effect Panel
+                                - Images are loaded at sequence load and cached for rendering
+    -enh (MrPierreB)        Several new patterns for Kaleidoscope effect
+    -enh (derwin12)         Allow naming the metronome timing tracks
+    -enh (dkulp)            Add support for WEBP Animated images
+    -enh (derwin12)         Add filter to Layout tab to filter model list by regex
+    -enh (derwin12)         Use shift key to retain aspect ratio on layout resizing
+    -enh (dkulp)            Allow user to resize and crop the AI generated image
+    -enh (dkulp)            Upload 3D object resource to FPP10 for 3D VirtualDisplay
+    -bug (dkulp)            Prevent Save As from allowing saving sequences outside show directory
+    -bug (derwin12)         Preserve camera selection on per Preview
+    -bug (derwin12)         Use Numeric Smart Remote IDs for Hinkspix
+    -bug (derwin12)         Dont perform backup if opening an xsqz file.
+    -bug (dkulp)            Fix display of images that have pixels with transparency set at less than 50%
+    -bug (derwin12)         Fix ability to delete last point of a polyline model
+    -bug (dkulp)            Fix some very minor visual glitches/lines on the tabs of the Layout tab
+    -bug (dkulp)            Fix some layout issues in the "New Sequence" wizard pages
+    -bug (derwin12)         Mask the Gemini and ChatGPT keys
+    -bug (derwin12)         Provide more randomness to Fire Effect
+    -bug (scott)            more error handling for falcon v4 upload
+    -bug (derwin12)         Retain Center offset when using Base Folder
+    -bug (derwin12)         Update the sequence if media is found elsewhere
+    -bug (dkulp)            Fix "TransparentBlackLevel" on pictures effect that never actually worked
 2026.02  February 10, 2026
     -change(scott)          Move from Ubuntu 22 to Ubuntu 24 for Linux
     -enh (dkulp)            Update to latest wxWidgets (fixes some issues with File selection on OSX, some Windows dark mode fixes, etc...)
