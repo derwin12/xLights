@@ -3295,7 +3295,7 @@ static void CreateController(Discovery &discovery, DiscoveredData *inst) {
         }
         created = true;
     }
-    if (inst->typeId < 0x80) {
+    if (inst->typeId > 0 && inst->typeId < 0x80) {
         if (inst->controller->GetProtocol() != OUTPUT_DDP) {
             inst->controller->SetProtocol(OUTPUT_DDP);
         }
@@ -4149,7 +4149,7 @@ void FPP::MapToFPPInstances(Discovery& discovery, std::list<FPP*>& instances, Ou
 }
 
 void FPP::TypeIDtoControllerType(int typeId, FPP* inst) {
-    if (typeId < 0x80) {
+    if (typeId > 0 && typeId < 0x80) {
         inst->fppType = FPP_TYPE::FPP;
     } else if (typeId >= 0x88 && typeId <= 0x9F) {
         inst->fppType = FPP_TYPE::FALCONV4V5;
