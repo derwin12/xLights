@@ -1622,6 +1622,20 @@ void xLightsFrame::SaveAsSequence()
             ok = false;
             DisplayError("File name cannot be empty", this);
         }
+        if (ok) {
+            wxFileName fnFile(newFilename);
+            fnFile.Normalize(wxPATH_NORM_DOTS | wxPATH_NORM_TILDE | wxPATH_NORM_ABSOLUTE | wxPATH_NORM_LONG | wxPATH_NORM_SHORTCUT);
+            wxFileName fnDir(CurrentDir, "");
+            fnFile.Normalize(wxPATH_NORM_DOTS | wxPATH_NORM_TILDE | wxPATH_NORM_ABSOLUTE | wxPATH_NORM_LONG | wxPATH_NORM_SHORTCUT);
+            wxString filePath = fnFile.GetPath(wxPATH_GET_VOLUME | wxPATH_GET_SEPARATOR);
+            wxString showPath = fnDir.GetPath(wxPATH_GET_VOLUME | wxPATH_GET_SEPARATOR);
+            if (!filePath.StartsWith(showPath)) {
+                ok = false;
+                DisplayWarning("Sequence files must be saved within the current show directory:\n" + showPath +
+                               "\n\nPlease choose a location inside the show directory.", this);
+                fd.SetDirectory(CurrentDir);
+            }
+        }
     } while (!ok);
 
     SaveAsSequence(newFilename);

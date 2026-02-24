@@ -28,6 +28,8 @@
 #include <map>
 #include <algorithm>
 
+#include "ExternalHooks.h"
+
 // ---------------------------------------------------------------------------
 // MediaViewModel
 // ---------------------------------------------------------------------------
@@ -632,6 +634,7 @@ std::string ManageMediaPanel::ExtractWithRename(const std::string& fullPath)
     if (dlg.ShowModal() != wxID_OK) return {};
 
     std::string newPath = dlg.GetPath().ToStdString();
+    ObtainAccessToURL(newPath);
 
     // Write data to disk and rename cache key
     if (!_sequenceMedia->ExtractImageToFile(fullPath, newPath)) {
@@ -877,8 +880,10 @@ void ManageMediaPanel::OnExtractAllButtonClick(wxCommandEvent& event)
                     wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
     if (dlg.ShowModal() != wxID_OK) return;
     wxString destDir = dlg.GetPath();
-    if (destDir.Last() != wxFileName::GetPathSeparator())
+    ObtainAccessToURL(destDir.ToStdString());
+    if (destDir.Last() != wxFileName::GetPathSeparator()) {
         destDir += wxFileName::GetPathSeparator();
+    }
 
     std::vector<std::string> paths = _sequenceMedia->GetImagePaths();
     int failed = 0;
@@ -893,7 +898,8 @@ void ManageMediaPanel::OnExtractAllButtonClick(wxCommandEvent& event)
 
         std::string oldPath = path;
         std::string newPath = destPath.ToStdString();
-
+        
+        ObtainAccessToURL(newPath);
         if (!_sequenceMedia->ExtractImageToFile(oldPath, newPath)) {
             ++failed;
             continue;

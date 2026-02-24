@@ -83,6 +83,7 @@ void ImageCacheEntry::LoadFromData(const std::string& data) {
     }
 }
 void ImageCacheEntry::LoadFromFile(const std::string& filepath) {
+    ObtainAccessToURL(filepath);
     FileExists(filepath, true);
     wxFileName fn(filepath);
     wxFileInputStream stream(filepath);
@@ -605,6 +606,7 @@ void SequenceMedia::ExtractAllImages()
 bool ImageCacheEntry::SaveToFile(const std::string& path) const
 {
     if (_embeddedData.empty()) return false;
+    ObtainAccessToURL(path);
     wxMemoryBuffer buf = wxBase64Decode(_embeddedData);
     if (buf.GetDataLen() == 0) return false;
     wxFile f;
@@ -621,6 +623,7 @@ bool SequenceMedia::ExtractImageToFile(const std::string& oldPath, const std::st
         if (it == _imageCache.end()) return false;
         entry = it->second;
     }
+    ObtainAccessToURL(newPath);
     if (!entry->SaveToFile(newPath)) return false;
     RenameImage(oldPath, newPath);
     ExtractImage(newPath);
