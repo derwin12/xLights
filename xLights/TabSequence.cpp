@@ -736,7 +736,7 @@ bool xLightsFrame::SaveEffectsFile(bool backup)
     if (backup) {
         effectsFile.SetFullName(_(XLIGHTS_RGBEFFECTS_FILE_BACKUP));
     } else {
-        effectsFile.SetFullName(_(XLIGHTS_RGBEFFECTS_FILE_NEW));
+        effectsFile.SetFullName(_(XLIGHTS_RGBEFFECTS_FILE));
     }
 
     wxFileOutputStream fout(effectsFile.GetFullPath());
