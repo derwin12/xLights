@@ -8,7 +8,11 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
-void XmlSerializingVisitor::SerializeViewsObject(wxXmlNode* node, xLightsFrame* xlights) {
+#include "XmlNodeKeys.h"
+#include "../LayoutGroup.h"
+#include "../xLightsMain.h"
+
+void SerializeViewsObject(wxXmlNode* node, xLightsFrame* xlights) {
     wxXmlNode* viewsNode = new wxXmlNode(wxXML_ELEMENT_NODE, "views");
     SequenceViewManager* seqViewMgr = xlights->GetViewsManager();
     std::list<SequenceView*> views = seqViewMgr->GetViews();
@@ -24,7 +28,7 @@ void XmlSerializingVisitor::SerializeViewsObject(wxXmlNode* node, xLightsFrame* 
     node->AddChild(viewsNode);
 }
 
-void XmlSerializingVisitor::SerializeColorsObject(wxXmlNode* node, xLightsFrame* xlights) {
+void SerializeColorsObject(wxXmlNode* node, xLightsFrame* xlights) {
     wxXmlNode* colorsNode = new wxXmlNode(wxXML_ELEMENT_NODE, "colors");
     ColorManager* colorMgr = new ColorManager(xlights);
     std::map<std::string, xlColor> colors = colorMgr->GetColors();
@@ -38,7 +42,7 @@ void XmlSerializingVisitor::SerializeColorsObject(wxXmlNode* node, xLightsFrame*
     node->AddChild(colorsNode);
 }
 
-void XmlSerializingVisitor::SerializeLayoutGroupsObject(wxXmlNode* node, xLightsFrame* xlights) {
+void SerializeLayoutGroupsObject(wxXmlNode* node, xLightsFrame* xlights) {
     std::vector<LayoutGroup*> layoutGroups = xlights->LayoutGroups;
     wxXmlNode* lgNode = new wxXmlNode(wxXML_ELEMENT_NODE, "layoutGroups");
     for (LayoutGroup* lg : layoutGroups) {
@@ -53,7 +57,7 @@ void XmlSerializingVisitor::SerializeLayoutGroupsObject(wxXmlNode* node, xLights
     node->AddChild(lgNode);
 }
 
-void XmlSerializingVisitor::SerializePerspectivesObject(wxXmlNode* node, xLightsFrame* xlights) {
+void SerializePerspectivesObject(wxXmlNode* node, xLightsFrame* xlights) {
     std::list<std::string> perspectives = xlights->GetPerspectives();
     wxXmlNode* perspectivesNode = new wxXmlNode(wxXML_ELEMENT_NODE, "perspectives");
     for (std::string p : perspectives) {
@@ -64,7 +68,7 @@ void XmlSerializingVisitor::SerializePerspectivesObject(wxXmlNode* node, xLights
     node->AddChild(perspectivesNode);
 }
 
-void XmlSerializingVisitor::SerializeSettingsObject(wxXmlNode* node, xLightsFrame* xlights) {
+void SerializeSettingsObject(wxXmlNode* node, xLightsFrame* xlights) {
     wxXmlNode* settings = new wxXmlNode(wxXML_ELEMENT_NODE, "settings");
     wxXmlNode* scaleimage = new wxXmlNode(wxXML_ELEMENT_NODE, "scaleImage");
     scaleimage->AddAttribute("value", std::to_string(xlights->GetDefaultPreviewBackgroundScaled()));

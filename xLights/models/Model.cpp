@@ -2354,6 +2354,47 @@ void Model::AddModelGroups(wxXmlNode* n, int w, int h, const wxString& name, boo
     modelManager.GetXLightsFrame()->AllModels.AddModelGroups(n, w, h, name, merge, ask);
 }
 
+void Model::ImportExtraModels(wxXmlNode* n, xLightsFrame* xlights, ModelPreview* modelPreview, const std::string& layoutGroup) {
+    static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+
+    int x = GetHcenterPos();
+    int y = GetVcenterPos();
+
+    // import the shadow models as well
+    for (auto m = n->GetChildren(); m != nullptr; m = m->GetNext()) {
+        bool cancelled = false;
+        Model* model = xlights->AllModels.CreateDefaultModel("Custom", "1"); // start with a custom model
+        model = model->CreateDefaultModelFromSavedModelNode(model, modelPreview, m, xlights, cancelled);
+        XmlSerializer serializer;
+        model = serializer.DeserializeModel(m, xlights, true);
+
+        if (!cancelled && model != nullptr) {
+            x += 20;
+            model->SetLayoutGroup(layoutGroup);
+            model->Selected = false;
+            model->SetHcenterPos(x);
+            model->SetVcenterPos(y);
+            model->SetWidth(GetWidth(), true);
+            model->SetHeight(GetHeight(), true);
+            if (dynamic_cast<BoxedScreenLocation*>(&model->GetModelScreenLocation()) != nullptr) {
+                BoxedScreenLocation* sl = dynamic_cast<BoxedScreenLocation*>(&model->GetModelScreenLocation());
+                sl->SetScale(1, 1);
+            }
+            model->SetControllerName(NO_CONTROLLER); // this will force the start channel to a non controller start channel ... then the user can associate them using visualiser
+            xlights->AllModels.AddModel(model);
+            AddASAPWork(OutputModelManager::WORK_MODELS_REWORK_STARTCHANNELS, "Model::ImportExtraModels");
+            AddASAPWork(OutputModelManager::WORK_CALCULATE_START_CHANNELS, "Model::ImportExtraModels");
+            AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "Model::ImportExtraModels");
+            AddASAPWork(OutputModelManager::WORK_MODELS_CHANGE_REQUIRING_RERENDER, "Model::ImportExtraModels");
+            AddASAPWork(OutputModelManager::WORK_UPDATE_PROPERTYGRID, "Model::ImportExtraModels");
+            AddASAPWork(OutputModelManager::WORK_RELOAD_MODELLIST, "Model::ImportExtraModels");
+            IncrementChangeCount();
+        } else {
+            logger_base.error("Unable to import %s. Create failed.", (const char*)m->GetName().c_str());
+        }
+    }
+}
+
 std::string Model::ComputeStringStartChannel(int i)
 {
     if (i == 0) {
@@ -5437,6 +5478,7 @@ Model* Model::CreateDefaultModelFromSavedModelNode(Model* model, ModelPreview* m
     auto lg = model->GetLayoutGroup();
 
     XmlSerializer serializer;
+    xlights->ClearUsedRuler();
 
     if (node->GetName() == "custommodel") {
         if (model != nullptr) { delete model; }
@@ -5464,7 +5506,7 @@ Model* Model::CreateDefaultModelFromSavedModelNode(Model* model, ModelPreview* m
         int b = ((BoxedScreenLocation&)model->GetModelScreenLocation()).GetBottom();
         if (model != nullptr) { delete model; }
         model = serializer.DeserializeModel(n, xlights, true);
-        if (model != nullptr) {
+        if (model != nullptr && !xlights->UsedRuler()) {
             ((ThreePointScreenLocation&)model->GetModelScreenLocation()).SetMWidth(std::abs(r - l));
             ((ThreePointScreenLocation&)model->GetModelScreenLocation()).SetRight(r);
             ((ThreePointScreenLocation&)model->GetModelScreenLocation()).SetLeft(l);
@@ -6241,7 +6283,7 @@ void Model::GetMinScreenXY(float& minx, float& miny) const
     }
 }
 
-void Model::ApplyDimensions(const std::string& units, float width, float height, float depth, float& min_x, float& max_x, float& min_y, float& max_y, float& min_z, float& max_z) {
+void Model::ApplyDimensions(const std::string& units, float width, float height, float depth) {
     auto ruler = RulerObject::GetRuler();
 
     if (ruler != nullptr && width != 0 && height != 0) {

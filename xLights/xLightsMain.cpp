@@ -10812,4 +10812,3 @@ void xLightsFrame::SetPaletteSizeString(const wxString& size) {
         }
     }
 }
-

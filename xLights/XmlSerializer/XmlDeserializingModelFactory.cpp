@@ -23,6 +23,7 @@
 #include "../models/MatrixModel.h"
 #include "../models/MultiPointModel.h"
 #include "../models/PolyLineModel.h"
+#include "../models/RulerObject.h"
 #include "../models/SingleLineModel.h"
 #include "../models/SphereModel.h"
 #include "../models/SpinnerModel.h"
@@ -49,6 +50,7 @@
 #include "../models/DMX/DmxSkull.h"
 #include "../models/DMX/Mesh.h"
 #include "../models/DMX/Servo.h"
+#include "../ModelPreview.h"
 #include "../xLightsMain.h"
 
 #include <wx/xml/xml.h>
@@ -118,7 +120,7 @@ Model* XmlDeserializingModelFactory::Deserialize(wxXmlNode* node, xLightsFrame* 
 
 void XmlDeserializingModelFactory::CommonDeserializeSteps(Model* model, wxXmlNode* node, xLightsFrame* xlights, bool importing) {
     DeserializeBaseObjectAttributes(model, node, xlights, importing);
-    DeserializeCommonModelAttributes(model, node, importing);
+    DeserializeCommonModelAttributes(model, node, xlights, importing);
     DeserializeModelScreenLocationAttributes(model, node, importing);
     DeserializeSuperStrings(model, node);
 }
@@ -176,7 +178,7 @@ void XmlDeserializingModelFactory::DeserializeBaseObjectAttributes(Model* model,
     model->SetFromBase(std::stoi(node->GetAttribute(XmlNodeKeys::FromBaseAttribute, "0").ToStdString()));
 }
 
-void XmlDeserializingModelFactory::DeserializeCommonModelAttributes(Model* model, wxXmlNode* node, bool importing) {
+void XmlDeserializingModelFactory::DeserializeCommonModelAttributes(Model* model, wxXmlNode* node, xLightsFrame* xlights, bool importing) {
     if (node->HasAttribute(XmlNodeKeys::StartSideAttribute)) {
         model->SetStartSide(node->GetAttribute(XmlNodeKeys::StartSideAttribute, "B"));
         model->SetIsBtoT(node->GetAttribute(XmlNodeKeys::StartSideAttribute, "B") == "B");
@@ -221,6 +223,11 @@ void XmlDeserializingModelFactory::DeserializeCommonModelAttributes(Model* model
         }
     }
 
+    bool importAliases = !importing;
+    bool skipImportAliases = false;
+    bool merge = false;
+    bool showPopup = true;
+
     wxXmlNode* f = node->GetChildren();
     while (f != nullptr) {
         if ("faceInfo" == f->GetName()) {
@@ -237,12 +244,41 @@ void XmlDeserializingModelFactory::DeserializeCommonModelAttributes(Model* model
             model->modelDimmingCurve = DimmingCurve::createFromXML(f);
         } else if ("subModel" == f->GetName()) {
             DeserializeSubModel(model, f);
+        } else if ("modelGroup" == f->GetName() && importing) {
+            model->AddModelGroups(f, xlights->GetLayoutPreview()->GetVirtualCanvasWidth(),
+                                     xlights->GetLayoutPreview()->GetVirtualCanvasHeight(),
+                                     model->GetName(), merge, showPopup);
+        } else if ("shadowmodels" == f->GetName().Lower() && importing) {
+            model->ImportExtraModels(f, xlights, xlights->GetLayoutPreview(), "Unassigned");
+        } else if ("dimensions" == f->GetName() && importing) {
+            if (RulerObject::GetRuler() != nullptr) {
+                std::string units = f->GetAttribute("units", "mm");
+                float width = wxAtof(f->GetAttribute("width", "1000"));
+                float height = wxAtof(f->GetAttribute("height", "1000"));
+                float depth = wxAtof(f->GetAttribute("depth", "0"));
+                model->ApplyDimensions(units, width, height, depth);
+                xlights->SetUsedRuler();
+            }
+        } else if ("associatedmodels" == f->GetName().Lower() && importing) {
+            model->ImportExtraModels(f, xlights, xlights->GetLayoutPreview(), model->GetLayoutGroup());
         } else if ("ControllerConnection" == f->GetName()) {
             if (!importing) {
                 DeserializeControllerConnection(model, node);
             }
         } else if (f->GetName() == XmlNodeKeys::AliasesAttribute) {
-            DeserializeAliases(model, f);
+            // can't be sure of the order of tags in xml and we don't want to ask twice, so setup breadcrumbs to ensure a single prompt
+            if (importAliases == false) {
+                if (skipImportAliases != true) {
+                    if (wxMessageBox("Should I import aliases from the base model?", "Import Aliases?", wxICON_QUESTION | wxYES_NO) == wxYES) {
+                        importAliases = true;
+                    } else {
+                        skipImportAliases = true;
+                    }
+                }
+            }
+            if (importAliases == true) {
+                DeserializeAliases(model, f);
+            }
         }
         f = f->GetNext();
     }

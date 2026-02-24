@@ -1785,6 +1785,11 @@ public:
     static xLightsFrame *GetFrame();
     void CallOnEffectBeforeSelected(std::function<bool(Effect *)> &&cb);
     void CallOnEffectAfterSelected(std::function<bool(Effect *)> &&cb);
+    
+    void ClearUsedRuler() { _usedRuler = false; }
+    void SetUsedRuler() { _usedRuler = true; }
+    bool UsedRuler() { return _usedRuler; }
+
 private:
 
     int _acParm1Intensity;
@@ -1820,6 +1825,7 @@ private:
     std::unique_ptr<ScriptsDialog> _scriptsDialog{ nullptr };
     std::unique_ptr<ServiceManager> _serviceManager{ nullptr };
     int mMediaLengthMS;
+    bool _usedRuler = false;
 
     bool mSequencerInitialize = false;
     wxFlexGridSizer* FlexGridEffects = nullptr;

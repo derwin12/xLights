@@ -182,7 +182,7 @@ public:
     [[nodiscard]] std::string GetPixelType() const;
     [[nodiscard]] std::string GetPixelSpacing() const;
     wxString ExportSuperStringColors() const;
-    void ApplyDimensions(const std::string& units, float width, float height, float depth, float& min_x, float& max_x, float& min_y, float& max_y, float& min_z, float& max_z);
+    void ApplyDimensions(const std::string& units, float width, float height, float depth);
     void ExportDimensions(wxFile& f) const;
     std::string GetRulerDim() const;
 
@@ -192,6 +192,7 @@ public:
     wxString SerialiseState() const;
     wxString SerialiseConnection() const;
     void AddModelGroups(wxXmlNode* n, int w, int h, const wxString& name, bool& merge, bool& ask);
+    void ImportExtraModels(wxXmlNode* n, xLightsFrame* xlights, ModelPreview* modelPreview, const std::string& layoutGroup);
 
     void UpdateFaceInfoNodes();
     void UpdateStateInfoNodes();

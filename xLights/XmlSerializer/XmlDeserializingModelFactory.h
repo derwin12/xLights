@@ -33,7 +33,7 @@ private:
     void CommonDeserializeSteps(Model* model, wxXmlNode* node, xLightsFrame* xlights, bool importing);
     void DeserializeControllerConnection(Model* model, wxXmlNode* node);
     void DeserializeBaseObjectAttributes(Model* model, wxXmlNode* node, xLightsFrame* xlights, bool importing);
-    void DeserializeCommonModelAttributes(Model* model, wxXmlNode* node, bool importing);
+    void DeserializeCommonModelAttributes(Model* model, wxXmlNode* node, xLightsFrame* xlights,bool importing);
     void DeserializeSubModel(Model* model, wxXmlNode* node);
     void DeserializeAliases(Model* model, wxXmlNode* node);
     void DeserializeSuperStrings(Model* model, wxXmlNode* node);
