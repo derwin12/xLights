@@ -37,7 +37,6 @@
 #include "SubModel.h"
 #include "TreeModel.h"
 #include "UtilFunctions.h"
-#include "WholeHouseModel.h"
 #include "WindowFrameModel.h"
 #include "WreathModel.h"
 #include "XmlSerializer/XmlSerializer.h"
