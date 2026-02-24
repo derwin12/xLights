@@ -139,14 +139,7 @@ public:
     }
 };
 
-static void CheckResult(bool value, bool old_value, DmxSkull* model, const std::string attribute, bool& change)
-{
-    if (value != old_value) {
-        model->GetModelXml()->DeleteAttribute(attribute);
-        model->GetModelXml()->AddAttribute(attribute, std::to_string(value));
-        change = true;
-    }
-}
+
 
 static const std::string CLICK_TO_EDIT("--Click To Edit--");
 class SkullConfigDialogAdapter : public wxPGEditorDialogAdapter
@@ -174,18 +167,43 @@ public:
         if (dlg.ShowModal() == wxID_OK) {
             bool changed = false;
 
-            CheckResult(dlg.CheckBox_Jaw->GetValue(), m_model->HasJaw(), m_model, "HasJaw", changed);
-            CheckResult(dlg.CheckBox_Pan->GetValue(), m_model->HasPan(), m_model, "HasPan", changed);
-            CheckResult(dlg.CheckBox_Tilt->GetValue(), m_model->HasTilt(), m_model, "HasTilt", changed);
-            CheckResult(dlg.CheckBox_Nod->GetValue(), m_model->HasNod(), m_model, "HasNod", changed);
-            CheckResult(dlg.CheckBox_EyeLR->GetValue(), m_model->HasEyeLR(), m_model, "HasEyeLR", changed);
-            CheckResult(dlg.CheckBox_EyeUD->GetValue(), m_model->HasEyeUD(), m_model, "HasEyeUD", changed);
-            CheckResult(dlg.CheckBox_Color->GetValue(), m_model->HasColor(), m_model, "HasColor", changed);
-            CheckResult(dlg.CheckBox_16bits->GetValue(), m_model->Is16Bit(), m_model, "Bits16", changed);
-            CheckResult(dlg.CheckBox_Skulltronix->GetValue(), false, m_model, "Skulltronix", changed);
+            // Direct comparison with member variables using existing setters
+            if (dlg.CheckBox_Jaw->GetValue() != m_model->HasJaw()) {
+                m_model->SetHasJaw(dlg.CheckBox_Jaw->GetValue());
+                changed = true;
+            }
+            if (dlg.CheckBox_Pan->GetValue() != m_model->HasPan()) {
+                m_model->SetHasPan(dlg.CheckBox_Pan->GetValue());
+                changed = true;
+            }
+            if (dlg.CheckBox_Tilt->GetValue() != m_model->HasTilt()) {
+                m_model->SetHasTilt(dlg.CheckBox_Tilt->GetValue());
+                changed = true;
+            }
+            if (dlg.CheckBox_Nod->GetValue() != m_model->HasNod()) {
+                m_model->SetHasNod(dlg.CheckBox_Nod->GetValue());
+                changed = true;
+            }
+            if (dlg.CheckBox_EyeLR->GetValue() != m_model->HasEyeLR()) {
+                m_model->SetHasEyeLR(dlg.CheckBox_EyeLR->GetValue());
+                changed = true;
+            }
+            if (dlg.CheckBox_EyeUD->GetValue() != m_model->HasEyeUD()) {
+                m_model->SetHasEyeUD(dlg.CheckBox_EyeUD->GetValue());
+                changed = true;
+            }
+            if (dlg.CheckBox_Color->GetValue() != m_model->HasColor()) {
+                m_model->SetHasColor(dlg.CheckBox_Color->GetValue());
+                changed = true;
+            }
+            if (dlg.CheckBox_16bits->GetValue() != m_model->Is16Bit()) {
+                m_model->SetIs16Bit(dlg.CheckBox_16bits->GetValue());
+                changed = true;
+            }
 
             if (dlg.CheckBox_Skulltronix->GetValue()) {
                 m_model->SetSkulltronix();
+                changed = true;
             }
 
             if (changed) {
