@@ -715,7 +715,7 @@ bool xLightsFrame::SaveEffectsFile(bool backup)
 
     wxXmlNode *child = EffectsXml.GetRoot()->GetChildren();
     while (child) {
-        if (child->GetName() == "models" || child->GetName() == "modelGroups") {
+        if (child->GetName() == "models" || child->GetName() == "modelGroups" || child->GetName() == "view_objects") {
             auto *a = child;
             child = child->GetNext();
             EffectsXml.GetRoot()->RemoveChild(a);

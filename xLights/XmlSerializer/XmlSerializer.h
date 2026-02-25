@@ -26,7 +26,7 @@ struct XmlSerializer {
         wxXmlNode* modelsNode = new wxXmlNode(wxXML_ELEMENT_NODE, XmlNodeKeys::ModelsNodeName);
         modelsNode->AddAttribute(XmlNodeKeys::TypeAttribute, XmlNodeKeys::RGBEffectsAttribute);
 
-        wxXmlNode* modelGroupNode = new wxXmlNode(wxXML_ELEMENT_NODE, XmlNodeKeys::GroupNodeName);
+        wxXmlNode* modelGroupNode = new wxXmlNode(wxXML_ELEMENT_NODE, XmlNodeKeys::GroupsNodeName);
         modelGroupNode->AddAttribute(XmlNodeKeys::TypeAttribute, XmlNodeKeys::RGBEffectsAttribute);
 
         XmlSerializingVisitor visitor{ modelsNode };

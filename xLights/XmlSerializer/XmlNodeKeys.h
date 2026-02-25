@@ -90,6 +90,7 @@ namespace XmlNodeKeys {
 
     // ModelGroup
     constexpr auto GroupNodeName            = "modelGroup";
+    constexpr auto GroupsNodeName           = "modelGroups";
     constexpr auto mgSelectedAttribute      = "selected";
     constexpr auto mgGridSizeAttribute      = "GridSize";
     constexpr auto mgCentreMinxAttribute    = "centreMinx";
