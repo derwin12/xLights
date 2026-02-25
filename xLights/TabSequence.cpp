@@ -719,6 +719,7 @@ bool xLightsFrame::SaveEffectsFile(bool backup)
             auto *a = child;
             child = child->GetNext();
             EffectsXml.GetRoot()->RemoveChild(a);
+            delete a;
         } else {
             child = child->GetNext();
         }

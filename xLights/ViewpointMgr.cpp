@@ -229,13 +229,12 @@ void ViewpointMgr::Save(wxXmlDocument* doc)
 	wxXmlNode* vp_node = nullptr;
 
 	// find an existing view node in the document and delete it
-	for (wxXmlNode* e = doc->GetRoot()->GetChildren(); e != nullptr; e = e->GetNext())
-	{
+	for (wxXmlNode* e = doc->GetRoot()->GetChildren(); e != nullptr; e = e->GetNext()) {
 		if (e->GetName() == "Viewpoints") vp_node = e;
 	}
-	if (vp_node != nullptr)
-	{
+	if (vp_node != nullptr) {
 		doc->GetRoot()->RemoveChild(vp_node);
+        delete vp_node;
 	}
 
 	wxXmlNode* newnode = Save();

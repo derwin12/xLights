@@ -193,13 +193,12 @@ void ColorManager::Save(wxXmlDocument* doc)
 	wxXmlNode* colors_node = nullptr;
 
 	// find an existing view node in the document and delete it
-	for (wxXmlNode* e = doc->GetRoot()->GetChildren(); e != nullptr; e = e->GetNext())
-	{
+	for (wxXmlNode* e = doc->GetRoot()->GetChildren(); e != nullptr; e = e->GetNext()) {
 		if (e->GetName() == "colors") colors_node = e;
 	}
-	if (colors_node != nullptr)
-	{
+	if (colors_node != nullptr) {
 		doc->GetRoot()->RemoveChild(colors_node);
+        delete colors_node;
 	}
 
 	wxXmlNode* newnode = Save();

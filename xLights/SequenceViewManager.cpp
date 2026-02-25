@@ -241,14 +241,13 @@ void SequenceViewManager::Save(wxXmlDocument* doc)
 	wxXmlNode* view = nullptr;
 
 	// find an existing view node in the document and delete it
-	for (wxXmlNode* e = doc->GetRoot()->GetChildren(); e != nullptr; e = e->GetNext())
-	{
+	for (wxXmlNode* e = doc->GetRoot()->GetChildren(); e != nullptr; e = e->GetNext()) {
 		if (e->GetName() == "palettes") palette = e;
 		if (e->GetName() == "views") view = e;
 	}
-	if (view != nullptr)
-	{
+    if (view != nullptr) {
 		doc->GetRoot()->RemoveChild(view);
+        delete view;
 	}
 
 	wxXmlNode* newnode = Save();
