@@ -198,6 +198,7 @@ namespace XmlNodeKeys {
 
     // Controller Attributes
     constexpr auto CtrlConnectionName       = "ControllerConnection";
+    constexpr auto ChannelAttribute         = "channel";
     constexpr auto ProtocolAttribute        = "Protocol";
     constexpr auto ProtocolSpeedAttribute   = "Speed";
     constexpr auto PortAttribute            = "Port";

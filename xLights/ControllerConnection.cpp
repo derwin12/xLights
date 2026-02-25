@@ -27,13 +27,6 @@ ControllerConnection::~ControllerConnection()
 
 int ControllerConnection::GetCtrlPort(int string) const
 {
-    // TODO:  Delete?  This looks like legacy attributes
-    //wxString p = wxString::Format("%d", string);
-    //if (GetControllerConnection()->HasAttribute(p)) {
-    //    wxString s = GetControllerConnection()->GetAttribute(p);
-    //    return wxAtoi(s);
-    //}
-
     int port;
     int sr;
     GetPortSR(string, port, sr);

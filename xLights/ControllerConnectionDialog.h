@@ -76,7 +76,7 @@ class ControllerConnectionDialog: public wxDialog
         wxSpinCtrlDouble *Gamma;
     
         void Set(Model *m);
-        void Get(wxXmlNode* controllerConnection, int strings);
+        void Get(ControllerConnection& cc, int strings);
 
 	protected:
 

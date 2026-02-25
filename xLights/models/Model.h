@@ -190,7 +190,6 @@ public:
     static void WriteFaceInfo(wxXmlNode* fiNode, const FaceStateData& faceInfo);
     wxString SerialiseFace() const;
     wxString SerialiseState() const;
-    wxString SerialiseConnection() const;
     void AddModelGroups(wxXmlNode* n, int w, int h, const wxString& name, bool& merge, bool& ask);
     void ImportExtraModels(wxXmlNode* n, xLightsFrame* xlights, ModelPreview* modelPreview, const std::string& layoutGroup);
 
@@ -414,7 +413,6 @@ protected:
     FaceStateNodes stateInfoNodes;
 
 public:
-    [[nodiscard]] wxXmlNode* GetControllerConnection() const;
     [[nodiscard]] std::string GetControllerConnectionString() const;
     [[nodiscard]] std::string GetControllerConnectionRangeString() const;
     [[nodiscard]] std::string GetControllerConnectionPortRangeString() const;

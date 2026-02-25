@@ -1784,7 +1784,7 @@ void LayoutPanel::BulkEditControllerConnection(int id)
 
         for (Model* model: modelsToEdit) {
             if (model != nullptr) {
-                dlg.Get(model->GetControllerConnection(), model->GetNumPhysicalStrings());
+                dlg.Get(model->GetCtrlConn(), model->GetNumPhysicalStrings());
             }
         }
 

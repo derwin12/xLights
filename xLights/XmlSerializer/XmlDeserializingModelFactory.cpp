@@ -129,6 +129,7 @@ void XmlDeserializingModelFactory::DeserializeControllerConnection(Model* model,
     for (wxXmlNode* p = node->GetChildren(); p != nullptr; p = p->GetNext()) {
         if (p->GetName() == "ControllerConnection") {
             auto& cc = model->GetCtrlConn();
+            cc.SetDMXChannel(std::stoi(p->GetAttribute(XmlNodeKeys::ChannelAttribute, "-1").ToStdString()));
             cc.SetProtocol(p->GetAttribute(XmlNodeKeys::ProtocolAttribute, xlEMPTY_STRING).ToStdString());
             cc.SetSerialProtocolSpeed(std::stoi(p->GetAttribute(XmlNodeKeys::ProtocolSpeedAttribute, std::to_string(CtrlDefs::DEFAULT_PROTOCOL_SPEED)).ToStdString()));
             cc.SetCtrlPort(std::stoi(p->GetAttribute(XmlNodeKeys::PortAttribute, std::to_string(CtrlDefs::DEFAULT_PORT)).ToStdString()));

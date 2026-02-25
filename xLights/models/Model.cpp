@@ -253,7 +253,7 @@ public:
     {
         ModelDimmingCurveDialog dlg(propGrid);
         if (m_model->dimmingInfo.empty()) {
-            wxString b = m_model->GetModelXml()->GetAttribute("ModelBrightness", "0");
+            wxString b = m_model->GetModelBrightness();
             if (b.empty()) {
                 b = "0";
             }
@@ -1187,8 +1187,7 @@ void Model::AddControllerProperties(wxPropertyGridInterface* grid)
             sp2->SetAttribute("Step", 0.1);
             sp2->SetEditor("SpinCtrl");
             
-            sp2 = grid->AppendIn(sp, new wxUIntProperty("Brightness", "ModelControllerConnectionPixelBrightness",
-                                                        wxAtoi(GetControllerConnection()->GetAttribute("brightness", "100"))));
+            sp2 = grid->AppendIn(sp, new wxUIntProperty("Brightness", "ModelControllerConnectionPixelBrightness", GetControllerBrightness()));
             sp2->SetAttribute("Min", 0);
             sp2->SetAttribute("Max", 100);
             sp2->SetEditor("SpinCtrl");
@@ -1721,8 +1720,8 @@ int Model::OnPropertyGridChange(wxPropertyGridInterface* grid, wxPropertyGridEve
         std::string newProtocol = GetControllerProtocol();
 
         if (!::IsPixelProtocol(newProtocol)) {
-            if (GetControllerConnection()->GetAttribute("channel", "-1") == "-1") {
-                GetControllerConnection()->AddAttribute("channel", "1");
+            if (_controllerConnection.GetDMXChannel() == -1) {
+                _controllerConnection.SetDMXChannel(1);
             }
         }
         if (
@@ -2332,19 +2331,6 @@ wxString Model::SerialiseState() const
     return res;
 }
 
-wxString Model::SerialiseConnection() const
-{
-    // Generally you dont want controller connection data in exported models
-    wxString res = "";
-
-    wxXmlNode* node = GetControllerConnection();
-    if (node->HasAttribute("zigZag")) {
-        res = "<ControllerConnection zigZag=\"" + node->GetAttribute("zigZag") + "\"/>";
-    }
-
-    return res;
-}
-
 void Model::AddModelGroups(wxXmlNode* n, int w, int h, const wxString& name, bool& merge, bool& ask)
 {
     auto grpModels = n->GetAttribute("models");
@@ -2893,23 +2879,6 @@ std::string Model::DecodeSmartRemote(int sr) const
     return std::string(1, ('A' + sr - 1));
 }
 
-
-wxXmlNode* Model::GetControllerConnection() const
-{
-    if (GetModelXml() == nullptr)
-        return nullptr;
-
-    wxXmlNode* n = GetModelXml()->GetChildren();
-    while (n != nullptr) {
-        if (n->GetName() == "ControllerConnection") {
-            return n;
-        }
-        n = n->GetNext();
-    }
-    n = new wxXmlNode(wxXML_ELEMENT_NODE, "ControllerConnection");
-    GetModelXml()->AddChild(n);
-    return n;
-}
 
 void Model::RemoveSubModel(const std::string& name)
 {
@@ -6395,8 +6364,8 @@ std::vector<PWMOutput> Model::GetPWMOutputs() const {
                 if (label.empty()) {
                     label = "LED-" + std::to_string(cur) + "-" + n->GetNodeType()[x];
                 }
-                float g = wxAtof(GetControllerConnection()->GetAttribute("gamma", "1.0"));
-                int b = wxAtoi(GetControllerConnection()->GetAttribute("brightness", "100"));
+                float g = _controllerConnection.GetGamma();
+                int b = _controllerConnection.GetBrightness();
                 ret.emplace_back(n->ActChan + 1, PWMOutput::Type::LED, 1, label, b, g);
             }
             cur++;
