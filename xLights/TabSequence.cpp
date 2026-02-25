@@ -713,23 +713,27 @@ bool xLightsFrame::SaveEffectsFile(bool backup)
     if (!lock.owns_lock())
         return false;
 
-    // New XML Serializer Code Section
-    wxXmlDocument doc;
-    wxXmlNode* root = new wxXmlNode( wxXML_ELEMENT_NODE, "xrgb" );
-    doc.SetRoot( root );
-    wxXmlDoctype dt("");
-    doc.SetDoctype(dt);
+    wxXmlNode *child = EffectsXml.GetRoot()->GetChildren();
+    while (child) {
+        if (child->GetName() == "models" || child->GetName() == "modelGroups") {
+            auto *a = child;
+            child = child->GetNext();
+            EffectsXml.GetRoot()->RemoveChild(a);
+        } else {
+            child = child->GetNext();
+        }
+    }
 
     XmlSerializer serializer;
-    serializer.SerializeAllModels(AllModels, this, root);
-    serializer.SerializeAllObjects(AllObjects, this, root);
+    serializer.SerializeAllModels(AllModels, this, EffectsXml.GetRoot());
+    serializer.SerializeAllObjects(AllObjects, this, EffectsXml.GetRoot());
 
     // Make sure the views are up to date before we save it
-    //_sequenceViewManager.Save(&EffectsXml);
+    _sequenceViewManager.Save(&EffectsXml);
 
-    //color_mgr.Save(&EffectsXml);
+    color_mgr.Save(&EffectsXml);
 
-    //viewpoint_mgr.Save(&EffectsXml);
+    viewpoint_mgr.Save(&EffectsXml);
 
     wxFileName effectsFile;
     effectsFile.AssignDir(CurrentDir);
@@ -742,7 +746,7 @@ bool xLightsFrame::SaveEffectsFile(bool backup)
     wxFileOutputStream fout(effectsFile.GetFullPath());
     wxBufferedOutputStream *bout = new wxBufferedOutputStream(fout, 2 * 1024 * 1024);
 
-    if (!doc.Save(*bout)) {
+    if (!EffectsXml.Save(*bout)) {
         if (backup) {
             logger_base.warn("Unable to save backup of RGB effects file");
         } else {
