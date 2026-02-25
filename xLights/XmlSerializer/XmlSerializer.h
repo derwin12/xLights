@@ -26,14 +26,23 @@ struct XmlSerializer {
         wxXmlNode* modelsNode = new wxXmlNode(wxXML_ELEMENT_NODE, XmlNodeKeys::ModelsNodeName);
         modelsNode->AddAttribute(XmlNodeKeys::TypeAttribute, XmlNodeKeys::RGBEffectsAttribute);
 
+        wxXmlNode* modelGroupNode = new wxXmlNode(wxXML_ELEMENT_NODE, XmlNodeKeys::GroupNodeName);
+        modelGroupNode->AddAttribute(XmlNodeKeys::TypeAttribute, XmlNodeKeys::RGBEffectsAttribute);
+
         XmlSerializingVisitor visitor{ modelsNode };
+        XmlSerializingVisitor groupVisitor{ modelGroupNode };
 
         for (auto m = allModels.begin(); m != allModels.end(); ++m) {
             Model* model = m->second;
-            model->Accept(visitor);
+            if (model->GetDisplayAs() == "ModelGroup") {
+                model->Accept(groupVisitor);
+            } else {
+                model->Accept(visitor);
+            }
         }
         
         root->AddChild(modelsNode);
+        root->AddChild(modelGroupNode);
     }
 
     // Serializes and Saves a single model into an XML document (only used for Export)
@@ -48,7 +57,7 @@ struct XmlSerializer {
     }
 
     // Serialize a single model into an XML document
-    wxXmlDocument SerializeModel(const Model* model, xLightsFrame* xlights, bool exporting = false) {
+    wxXmlDocument SerializeModel(const Model* model, xLightsFrame* xlights, bool includeGroups = false) {
         wxXmlDocument doc;
 
         wxXmlNode* docNode = new wxXmlNode(wxXML_ELEMENT_NODE, XmlNodeKeys::ModelsNodeName);
@@ -57,8 +66,9 @@ struct XmlSerializer {
         XmlSerializingVisitor visitor{ docNode };
 
         model->Accept(visitor);
-        
-        XmlSerialize::SerializeModelGroupsForModel(model, docNode);
+        if (includeGroups) {
+            XmlSerialize::SerializeModelGroupsForModel(model, docNode);
+        }
 
         doc.SetRoot(docNode);
 

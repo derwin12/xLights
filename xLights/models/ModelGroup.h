@@ -97,13 +97,10 @@ class ModelGroup : public ModelWithScreenLocation<BoxedScreenLocation>
         void SetLayout(const std::string& layout);
         void SetGridSize(int size);
         void SetDefaultCamera(const std::string& camera);
-        std::string GetTagColourAsString() const { return _modelTagColourString; };
-        wxColour GetTagColour() const { return _modelTagColour; }
         
         void SetName(const std::string& newName);
         void SetPreviewSize(int w, int h);
         void SetLayoutGroup(const std::string& group);
-        void SetTagColour(const wxColour& colour);
         void SetBaseModels(const std::vector<std::string>& baseModels);
         void SetModels(const std::vector<std::string>& models);
         

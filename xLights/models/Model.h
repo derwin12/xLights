@@ -421,7 +421,7 @@ public:
     std::string DecodeSmartRemote(int sr) const;
 
     void SetTagColour(wxColour colour);
-    void SetTagColourAsString(std::string const& colour) { _modelTagColourString = colour; } // used by XmlSerializer
+    void SetTagColourAsString(std::string const& colour);
     [[nodiscard]] wxColour GetTagColour();
     [[nodiscard]] std::string GetTagColourAsString() const; // used by XmlSerializer
     [[nodiscard]] int32_t GetStringStartChan(int x) const;

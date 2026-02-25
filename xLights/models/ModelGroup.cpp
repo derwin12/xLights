@@ -394,7 +394,6 @@ ModelGroup::ModelGroup(const ModelManager &manager) : ModelWithScreenLocation(ma
     centrey = 0;
     centreDefined = false;
     layout_group = "Unassigned";
-    _modelTagColour = wxColour("Black");
 }
 
 void ModelGroup::Accept(BaseObjectVisitor& visitor) const {
@@ -536,11 +535,6 @@ void ModelGroup::SetPreviewSize(int w, int h)
 void ModelGroup::SetLayoutGroup(const std::string& group)
 {
     layout_group = group;
-}
-
-void ModelGroup::SetTagColour(const wxColour& colour)
-{
-    _modelTagColour = colour;
 }
 
 void ModelGroup::SetBaseModels(const std::vector<std::string>& baseModels)

@@ -5915,11 +5915,7 @@ std::list<std::string> Model::CheckModelSettings()
 
 std::string Model::GetTagColourAsString() const
 {
-    if (!_modelTagColour.IsOk()) {
-        return "#000000";
-    } else {
-        return _modelTagColourString;
-    }
+    return _modelTagColourString;
 }
 
 wxColour Model::GetTagColour() {
@@ -5934,6 +5930,12 @@ wxColour Model::GetTagColour() {
     return _modelTagColour;
 }
 
+void Model::SetTagColourAsString(std::string const& colour) {
+    _modelTagColourString = colour;
+    if (_modelTagColour.IsOk()) {
+        _modelTagColour = wxNullColour;
+    }
+}
 void Model::SetTagColour(wxColour colour)
 {
     _modelTagColour = colour;

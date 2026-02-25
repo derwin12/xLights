@@ -77,7 +77,12 @@ void XmlSerializingVisitor::AddBaseObjectAttributes(const BaseObject& base, wxXm
     node->AddAttribute(XmlNodeKeys::NameAttribute, base.GetName());
     node->AddAttribute(XmlNodeKeys::DisplayAsAttribute, base.GetDisplayAs());
     node->AddAttribute(XmlNodeKeys::LayoutGroupAttribute, base.GetLayoutGroup());
-    node->AddAttribute(XmlNodeKeys::ActiveAttribute, std::to_string(base.IsActive()));
+    if (!base.IsActive()) {
+        node->AddAttribute(XmlNodeKeys::ActiveAttribute, "0");
+    }
+    if (base.IsFromBase()) {
+        node->AddAttribute(XmlNodeKeys::FromBaseAttribute, "1");
+    }
 }
 
 void XmlSerializingVisitor::AddCommonModelAttributes(const Model& model, wxXmlNode* node) {
@@ -93,7 +98,9 @@ void XmlSerializingVisitor::AddCommonModelAttributes(const Model& model, wxXmlNo
     node->AddAttribute(XmlNodeKeys::TransparencyAttribute, std::to_string(model.GetTransparency()));
     node->AddAttribute(XmlNodeKeys::BTransparencyAttribute, std::to_string(model.GetBlackTransparency()));
     node->AddAttribute(XmlNodeKeys::DescriptionAttribute, model.GetDescription());
-    node->AddAttribute(XmlNodeKeys::TagColourAttribute, model.GetTagColourAsString());
+    if (model.GetTagColourAsString() != "#000000") {
+        node->AddAttribute(XmlNodeKeys::TagColourAttribute, model.GetTagColourAsString());
+    }
     node->AddAttribute(XmlNodeKeys::StartChannelAttribute, model.GetModelStartChannel());
     node->AddAttribute(XmlNodeKeys::NodeNamesAttribute, model.GetNodeNames());
     node->AddAttribute(XmlNodeKeys::StrandNamesAttribute, model.GetStrandNames());
@@ -613,7 +620,9 @@ void XmlSerializingVisitor::Visit(const ModelGroup& model) {
 
     // Add base attributes
     AddBaseObjectAttributes(model, xmlNode);
-    AddModelScreenLocationAttributes(model, xmlNode);
+    
+    // ModelGroup does not have screen location attributes
+    //AddModelScreenLocationAttributes(model, xmlNode);
 
     // Phase 2: Use Phase 1 getters for ModelGroup-specific attributes
     xmlNode->AddAttribute("GridSize", std::to_string(model.GetGridSize()));
@@ -651,7 +660,9 @@ void XmlSerializingVisitor::Visit(const ModelGroup& model) {
     }
 
     // Add tag colour
-    xmlNode->AddAttribute("TagColour", model.GetTagColourAsString());
+    if (model.GetTagColourAsString() != "#000000") {
+        xmlNode->AddAttribute(XmlNodeKeys::TagColourAttribute, model.GetTagColourAsString());
+    }
 
     // Note: We don't call AddOtherElements because ModelGroups don't have
     // faces, states, controller connections, dimming curves, or submodels
