@@ -11,7 +11,7 @@
  **************************************************************/
 
 #include "../models/DMX/DmxMovingHeadComm.h"
-#include "ViewObject.h"
+#include "../models/ViewObject.h"
 #include <wx/xml/xml.h>
 
 class DmxBeamAbility;

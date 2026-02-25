@@ -555,9 +555,6 @@
     <ClCompile Include="models\WindowFrameModel.cpp">
       <Filter>Models</Filter>
     </ClCompile>
-    <ClCompile Include="models\WholeHouseModel.cpp">
-      <Filter>Models</Filter>
-    </ClCompile>
     <ClCompile Include="ModelChainDialog.cpp">
       <Filter>Models</Filter>
     </ClCompile>
@@ -1133,6 +1130,8 @@
     <ClCompile Include="models\DMX\DmxBeamAbility.cpp">
       <Filter>Models\DMX</Filter>
     </ClCompile>
+    <ClCompile Include="ManageMediaPanel.cpp" />
+    <ClCompile Include="XmlSerializer\GdtfParser.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="BatchRenderDialog.h" />
@@ -1700,9 +1699,6 @@
       <Filter>Effects</Filter>
     </ClInclude>
     <ClInclude Include="models\WindowFrameModel.h">
-      <Filter>Models</Filter>
-    </ClInclude>
-    <ClInclude Include="models\WholeHouseModel.h">
       <Filter>Models</Filter>
     </ClInclude>
     <ClInclude Include="ModelChainDialog.h">
@@ -2286,6 +2282,8 @@
     <ClInclude Include="models\DMX\DmxBeamAbility.h">
       <Filter>Models\DMX</Filter>
     </ClInclude>
+    <ClInclude Include="ManageMediaPanel.h" />
+    <ClInclude Include="XmlSerializer\GdtfParser.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Models">
