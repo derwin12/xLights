@@ -30,7 +30,7 @@
 #include "models/ThreePointScreenLocation.h"
 #include "models/PolyPointScreenLocation.h"
 #include "ExternalHooks.h"
-#include "XmlSerializeFunctions.h"
+#include "XmlSerializer/XmlSerializeFunctions.h"
 
 #include <log4cpp/Category.hh>
 

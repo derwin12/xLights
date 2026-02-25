@@ -682,7 +682,6 @@ xcopy "$(SolutionDir)..\bin64\Vamp\" "$(TargetDir)Vamp\" /e /y /i /r
     <ClCompile Include="models\TwoPointScreenLocation.cpp" />
     <ClCompile Include="models\ViewObject.cpp" />
     <ClCompile Include="models\ViewObjectManager.cpp" />
-    <ClCompile Include="models\WholeHouseModel.cpp" />
     <ClCompile Include="Mouse3DManager.cpp" />
     <ClCompile Include="MultiControllerUploadDialog.cpp" />
     <ClCompile Include="NoteRangeDialog.cpp" />
@@ -1011,6 +1010,7 @@ xcopy "$(SolutionDir)..\bin64\Vamp\" "$(TargetDir)Vamp\" /e /y /i /r
     <ClCompile Include="xLightsXmlFile.cpp" />
     <ClCompile Include="xlLockButton.cpp" />
     <ClCompile Include="xlSlider.cpp" />
+    <ClCompile Include="XmlSerializer\GdtfParser.cpp" />
     <ClCompile Include="XmlSerializer\XmlDeserializingModelFactory.cpp" />
     <ClCompile Include="XmlSerializer\XmlDeserializingObjectFactory.cpp" />
     <ClCompile Include="XmlSerializer\XmlSerializeFunctions.cpp" />
@@ -1229,7 +1229,6 @@ xcopy "$(SolutionDir)..\bin64\Vamp\" "$(TargetDir)Vamp\" /e /y /i /r
     <ClInclude Include="models\TwoPointScreenLocation.h" />
     <ClInclude Include="models\ViewObject.h" />
     <ClInclude Include="models\ViewObjectManager.h" />
-    <ClInclude Include="models\WholeHouseModel.h" />
     <ClInclude Include="Mouse3DManager.h" />
     <ClInclude Include="CustomTimingDialog.h" />
     <ClInclude Include="effects\CandleEffect.h" />
@@ -1564,6 +1563,7 @@ xcopy "$(SolutionDir)..\bin64\Vamp\" "$(TargetDir)Vamp\" /e /y /i /r
     <ClInclude Include="xLightsXmlFile.h" />
     <ClInclude Include="xlLockButton.h" />
     <ClInclude Include="xlSlider.h" />
+    <ClInclude Include="XmlSerializer\GdtfParser.h" />
     <ClInclude Include="XmlSerializer\XmlDeserializingModelFactory.h" />
     <ClInclude Include="XmlSerializer\XmlDeserializingObjectFactory.h" />
     <ClInclude Include="XmlSerializer\XmlNodeKeys.h" />

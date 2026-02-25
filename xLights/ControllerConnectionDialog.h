@@ -20,6 +20,8 @@
 #include <wx/stattext.h>
 //*)
 
+#include "ControllerConnection.h"
+
 enum class controller_connection_bulkedit
 {
     CEBE_CONTROLLERCONNECTION,
