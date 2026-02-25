@@ -610,15 +610,26 @@ void XmlSerializingVisitor::Visit(const MatrixModel& model) {
 
 void XmlSerializingVisitor::Visit(const ModelGroup& model) {
     wxXmlNode* xmlNode = new wxXmlNode(wxXML_ELEMENT_NODE, "modelGroup");
-    
+
     // Add base attributes
     AddBaseObjectAttributes(model, xmlNode);
     AddModelScreenLocationAttributes(model, xmlNode);
-    
-    // Add ModelGroup-specific attributes
+
+    // Phase 2: Use Phase 1 getters for ModelGroup-specific attributes
     xmlNode->AddAttribute("GridSize", std::to_string(model.GetGridSize()));
     xmlNode->AddAttribute("layout", model.GetLayout());
-    
+    xmlNode->AddAttribute("DefaultCamera", model.GetDefaultCamera());
+
+    // Add centre offset attributes
+    int xOffset = model.GetXCentreOffset();
+    int yOffset = model.GetYCentreOffset();
+    if (xOffset != 0) {
+        xmlNode->AddAttribute("XCentreOffset", std::to_string(xOffset));
+    }
+    if (yOffset != 0) {
+        xmlNode->AddAttribute("YCentreOffset", std::to_string(yOffset));
+    }
+
     // Add the list of models
     std::string modelsStr;
     const auto& modelNames = model.ModelNames();
@@ -627,7 +638,7 @@ void XmlSerializingVisitor::Visit(const ModelGroup& model) {
         modelsStr += modelNames[i];
     }
     xmlNode->AddAttribute("models", modelsStr);
-    
+
     // Add centre attributes if defined
     if (model.GetCentreDefined()) {
         xmlNode->AddAttribute("centreDefined", "1");
@@ -638,14 +649,14 @@ void XmlSerializingVisitor::Visit(const ModelGroup& model) {
         xmlNode->AddAttribute("centreMaxx", std::to_string(model.GetCentreMaxx()));
         xmlNode->AddAttribute("centreMaxy", std::to_string(model.GetCentreMaxy()));
     }
-    
+
     // Add tag colour
     xmlNode->AddAttribute("TagColour", model.GetTagColourAsString());
-    
+
     // Note: We don't call AddOtherElements because ModelGroups don't have
     // faces, states, controller connections, dimming curves, or submodels
     // They also don't need aliases as those are model-specific
-    
+
     SortAttributes(xmlNode);
     parentNode->AddChild(xmlNode);
 }

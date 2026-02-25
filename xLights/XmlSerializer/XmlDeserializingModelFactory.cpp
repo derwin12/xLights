@@ -12,6 +12,7 @@
 #include "XmlNodeKeys.h"
 #include "XmlSerializeFunctions.h"
 #include "../DimmingCurve.h"
+#include "../UtilFunctions.h"
 #include "../models/ArchesModel.h"
 #include "../models/CandyCaneModel.h"
 #include "../models/ChannelBlockModel.h"
@@ -21,6 +22,7 @@
 #include "../models/IciclesModel.h"
 #include "../models/ImageModel.h"
 #include "../models/MatrixModel.h"
+#include "../models/ModelGroup.h"
 #include "../models/MultiPointModel.h"
 #include "../models/PolyLineModel.h"
 #include "../models/RulerObject.h"
@@ -96,6 +98,8 @@ Model* XmlDeserializingModelFactory::Deserialize(wxXmlNode* node, xLightsFrame* 
         return DeserializeImage(node, xlights, importing);
     } else if (type.Contains(XmlNodeKeys::MatrixType) || node_name == "matrixmodel") {
         return DeserializeMatrix(node, xlights, importing);
+    } else if (type == XmlNodeKeys::ModelGroupType || node_name == "modelGroup") {
+        return DeserializeModelGroup(node, xlights, importing);
     } else if (type.Contains(XmlNodeKeys::MultiPointType) || node_name == "multipointmodel") {
         return DeserializeMultiPoint(node, xlights, importing);
     } else if (type == XmlNodeKeys::SingleLineType) {
@@ -673,6 +677,73 @@ Model* XmlDeserializingModelFactory::DeserializeWreath(wxXmlNode* node, xLightsF
     WreathModel* model = new WreathModel(xlights->AllModels);
     CommonDeserializeSteps(model, node, xlights, importing);
     model->Setup();
+    return model;
+}
+
+Model* XmlDeserializingModelFactory::DeserializeModelGroup(wxXmlNode* node, xLightsFrame* xlights, bool importing) {
+    // Phase 3: Use setters to configure ModelGroup instead of passing XML to constructor
+    // This removes the XML dependency from the ModelGroup constructor
+    
+    // Create ModelGroup with basic parameters (no XML)
+    ModelGroup* model = new ModelGroup(xlights->AllModels);
+    
+    // Deserialize base object attributes (name, layout group, active state)
+    DeserializeBaseObjectAttributes(model, node, xlights, importing);
+    
+    // Deserialize screen location (position, rotation, scale)
+    DeserializeModelScreenLocationAttributes(model, node, importing);
+    
+    // Deserialize ModelGroup-specific properties using Phase 1 setters
+    model->SetGridSize(std::stoi(node->GetAttribute("GridSize", "400").ToStdString()));
+    model->SetLayout(node->GetAttribute("layout", "minimalGrid").ToStdString());
+    model->SetDefaultCamera(node->GetAttribute("DefaultCamera", "2D").ToStdString());
+    
+    // Centre offset attributes
+    if (node->HasAttribute("XCentreOffset")) {
+        model->SetXCentreOffset(std::stof(node->GetAttribute("XCentreOffset", "0").ToStdString()));
+    }
+    if (node->HasAttribute("YCentreOffset")) {
+        model->SetYCentreOffset(std::stof(node->GetAttribute("YCentreOffset", "0").ToStdString()));
+    }
+    
+    // Centre position attributes
+    if (node->GetAttribute("centreDefined", "0") != "0") {
+        model->SetCentreDefined(true);
+        model->SetCentreX(std::stof(node->GetAttribute("centrex", "0").ToStdString()));
+        model->SetCentreY(std::stof(node->GetAttribute("centrey", "0").ToStdString()));
+        if (node->HasAttribute("centreMinx")) {
+            model->SetCentreMinx(std::stoi(node->GetAttribute("centreMinx", "0").ToStdString()));
+        }
+        if (node->HasAttribute("centreMiny")) {
+            model->SetCentreMiny(std::stoi(node->GetAttribute("centreMiny", "0").ToStdString()));
+        }
+        if (node->HasAttribute("centreMaxx")) {
+            model->SetCentreMaxx(std::stoi(node->GetAttribute("centreMaxx", "0").ToStdString()));
+        }
+        if (node->HasAttribute("centreMaxy")) {
+            model->SetCentreMaxy(std::stoi(node->GetAttribute("centreMaxy", "0").ToStdString()));
+        }
+    }
+    
+    // Tag colour
+    model->SetTagColourAsString(node->GetAttribute("TagColour", "Black"));
+    
+    // Parse and add models to the group
+    std::string modelsStr = node->GetAttribute("models", "").ToStdString();
+    if (!modelsStr.empty()) {
+        std::vector<std::string> modelNames;
+        Split(modelsStr, ',', modelNames, true);
+        for (const auto& modelName : modelNames) {
+            if (!modelName.empty()) {
+                model->AddModel(modelName);
+            }
+        }
+    }
+    
+    // Note: We call RebuildBuffers() to finalize the model group
+    // This handles node initialization and buffer setup
+    model->RebuildBuffers();
+    
     return model;
 }
 

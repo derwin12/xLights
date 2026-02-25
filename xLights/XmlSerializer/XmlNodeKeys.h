@@ -397,6 +397,7 @@ namespace XmlNodeKeys {
     constexpr auto IciclesType          = "Icicles";
     constexpr auto ImageType            = "Image";
     constexpr auto MatrixType           = "Matrix";
+    constexpr auto ModelGroupType       = "ModelGroup";
     constexpr auto MultiPointType       = "MultiPoint";
     constexpr auto SingleLineType       = "Single Line";
     constexpr auto PolyLineType         = "Poly Line";

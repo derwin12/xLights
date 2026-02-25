@@ -4986,7 +4986,7 @@ void LayoutPanel::OnPreviewModelPopup(wxCommandEvent& event)
         GetMouseLocation(m_previous_mouse_x, m_previous_mouse_y, ray_origin, ray_direction);
         auto mg = GetSelectedModelGroup();
         modelPreview->SetCenterOffset(mg, ray_origin.x, ray_origin.y);
-        mg->Reset();
+        mg->RebuildBuffers();
         xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "LayoutPanel::OnModelsPopup::ID_SET_CENTER_OFFSET");
         xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RELOAD_ALLMODELS, "LayoutPanel::OnModelsPopup::ID_SET_CENTER_OFFSET", nullptr, nullptr, GetSelectedModelName());
         xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "LayoutPanel::OnPreviewModelPopup::ID_SET_CENTER_OFFSET");

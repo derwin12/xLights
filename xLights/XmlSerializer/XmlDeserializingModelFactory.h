@@ -56,6 +56,9 @@ private:
     Model* DeserializeTree(wxXmlNode* node, xLightsFrame* xlights, bool importing);
     Model* DeserializeWindow(wxXmlNode* node, xLightsFrame* xlights, bool importing);
     Model* DeserializeWreath(wxXmlNode* node, xLightsFrame* xlights, bool importing);
+    
+    // Model Groups
+    Model* DeserializeModelGroup(wxXmlNode* node, xLightsFrame* xlights, bool importing);
 
     // ************************************************************************************************************
     // **********************                        DMX Section                           ************************

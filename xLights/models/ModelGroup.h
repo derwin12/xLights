@@ -26,8 +26,7 @@ class ModelGroup : public ModelWithScreenLocation<BoxedScreenLocation>
         static bool AllModelsExist(wxXmlNode* node, const ModelManager& models);
         static bool RemoveNonExistentModels(wxXmlNode* node, const std::set<std::string>& allmodels);
 
-        ModelGroup(wxXmlNode *node, const ModelManager &manager, int previewW, int previewH);
-        ModelGroup(wxXmlNode* node, const ModelManager& m, int w, int h, const std::string& mgname, const std::string& mname);
+        ModelGroup(const ModelManager &manager);
         virtual ~ModelGroup();
 
         // void TestNodeInit() const; // This function should be uncommented for testing issues where model group buffer styles create different numbers of nodes
@@ -75,8 +74,8 @@ class ModelGroup : public ModelWithScreenLocation<BoxedScreenLocation>
 
         void Accept(BaseObjectVisitor& visitor) const override;
 
-        bool Reset();
         void ResetModels();
+        bool RebuildBuffers();
 
         bool CheckForChanges() const;
 
@@ -94,15 +93,33 @@ class ModelGroup : public ModelWithScreenLocation<BoxedScreenLocation>
         int GetCentreMiny() const { return miny; }
         int GetCentreMaxx() const { return maxx; }
         int GetCentreMaxy() const { return maxy; }
-        std::string GetLayout() const { return layout_group; }
+        std::string GetLayout() const { return m_layout; }
+        void SetLayout(const std::string& layout);
+        void SetGridSize(int size);
+        void SetDefaultCamera(const std::string& camera);
         std::string GetTagColourAsString() const { return _modelTagColourString; };
         wxColour GetTagColour() const { return _modelTagColour; }
+        
+        void SetName(const std::string& newName);
+        void SetPreviewSize(int w, int h);
+        void SetLayoutGroup(const std::string& group);
+        void SetTagColour(const wxColour& colour);
+        void SetBaseModels(const std::vector<std::string>& baseModels);
+        void SetModels(const std::vector<std::string>& models);
+        
+        bool InitializeFromMembers();
 
     protected:
         static std::vector<std::string> GROUP_BUFFER_STYLES;
 
     private:
-
+        int m_gridSize = 400;
+        int m_xCentreOffset = 0;
+        int m_yCentreOffset = 0;
+        std::string m_defaultCamera = "2D";
+        std::string m_layout = "minimalGrid";
+        std::vector<std::string> m_baseModels;  // Models from base show
+        
         std::vector<std::string> modelNames;
         std::vector<Model *> models;
         std::vector<Model *> activeModels;

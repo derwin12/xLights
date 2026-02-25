@@ -40,6 +40,7 @@
 #include "WindowFrameModel.h"
 #include "WreathModel.h"
 #include "XmlSerializer/XmlSerializer.h"
+#include "XmlSerializer/XmlDeserializingModelFactory.h"
 #include "../ModelPreview.h"
 #include "../Pixels.h"
 #include "../controllers/ControllerCaps.h"
@@ -497,8 +498,35 @@ void ModelManager::AddModelGroups(wxXmlNode* n, int w, int h, const std::string&
     while (models.find(nn) != models.end()) {
         nn = wxString::Format("%s_%d", mgname, i++).ToStdString();
     }
-    ModelGroup* mg = new ModelGroup(n, *this, w, h, nn, mname);
-    AddModel(mg);
+    
+    // Create a temporary node with modified attributes to avoid using ModelXml
+    wxXmlNode tempNode(*n);
+    tempNode.DeleteAttribute("name");
+    tempNode.AddAttribute("name", nn);
+    
+    // Fix model names by replacing EXPORTEDMODEL with the actual model name
+    auto modelsList = Split(tempNode.GetAttribute("models").ToStdString(), ',');
+    std::string fixedModels;
+    for (auto& it : modelsList) {
+        if (!fixedModels.empty()) fixedModels += ",";
+        Replace(it, "EXPORTEDMODEL", mname);
+        fixedModels += it;
+    }
+    tempNode.DeleteAttribute("models");
+    tempNode.AddAttribute("models", fixedModels);
+    
+    // Use Deserialize to create the ModelGroup
+    XmlDeserializingModelFactory factory;
+    Model* model = factory.Deserialize(&tempNode, xlights, false);
+    if (model != nullptr) {
+        model->GetModelScreenLocation().previewW = w;
+        model->GetModelScreenLocation().previewH = h;
+        ModelGroup* mg = dynamic_cast<ModelGroup*>(model);
+        if (mg != nullptr) {
+            mg->RebuildBuffers();
+            AddModel(mg);
+        }
+    }
 }
 
 bool ModelManager::RecalcStartChannels() const
@@ -1055,13 +1083,12 @@ bool ModelManager::LoadGroups(wxXmlNode* groupNode, int previewW, int previewH)
 {
     // static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     // logger_base.debug("ModelManager loading groups.");
-
-    this->groupNode = groupNode;
+   this->groupNode = groupNode;
     bool changed = false;
-
     std::list<wxXmlNode*> toBeDone;
     std::set<std::string> allModels;
     std::lock_guard<std::recursive_mutex> lock(_modelMutex);
+    XmlDeserializingModelFactory factory;
 
     // do all the models without embedded groups first or where the model order means everything exists
     for (wxXmlNode* e = groupNode->GetChildren(); e != nullptr; e = e->GetNext()) {
@@ -1070,9 +1097,16 @@ bool ModelManager::LoadGroups(wxXmlNode* groupNode, int previewW, int previewH)
             if (!name.empty()) {
                 allModels.insert(name);
                 if (ModelGroup::AllModelsExist(e, *this)) {
-                    ModelGroup* model = new ModelGroup(e, *this, previewW, previewH);
-                    models[model->name] = model;
-                    model->SetLayoutGroup(e->GetAttribute("LayoutGroup", "Unassigned").ToStdString());
+                    Model* model = factory.Deserialize(e, xlights, false);
+                    if (model != nullptr) {
+                        model->GetModelScreenLocation().previewW = previewW;
+                        model->GetModelScreenLocation().previewH = previewH;
+                        ModelGroup* mg = dynamic_cast<ModelGroup*>(model);
+                        if (mg != nullptr) {
+                            mg->RebuildBuffers();
+                            models[model->name] = model;
+                        }
+                    }
                 } else {
                     toBeDone.push_back(e);
                 }
@@ -1102,11 +1136,17 @@ bool ModelManager::LoadGroups(wxXmlNode* groupNode, int previewW, int previewH)
         toBeDone.clear();
         for (const auto& it : processing) {
             if (ModelGroup::AllModelsExist(it, *this)) {
-                ModelGroup* model = new ModelGroup(it, *this, previewW, previewH);
-                bool reset = model->Reset();
-                wxASSERT(reset);
-                models[model->name] = model;
-                model->SetLayoutGroup(it->GetAttribute("LayoutGroup", "Unassigned").ToStdString());
+                Model* model = factory.Deserialize(it, xlights, false);
+                if (model != nullptr) {
+                    model->GetModelScreenLocation().previewW = previewW;
+                    model->GetModelScreenLocation().previewH = previewH;
+                    ModelGroup* mg = dynamic_cast<ModelGroup*>(model);
+                    if (mg != nullptr) {
+                        bool reset = mg->RebuildBuffers();
+                        wxASSERT(reset);
+                        models[model->name] = model;
+                    }
+                }
             } else {
                 toBeDone.push_back(it);
             }
@@ -1119,11 +1159,17 @@ bool ModelManager::LoadGroups(wxXmlNode* groupNode, int previewW, int previewH)
         std::string msg = "Could not process model group " + name + " likely due to model groups loops. See Check Sequence for details.";
         DisplayWarning(msg);
         wxASSERT(false);
-        ModelGroup* model = new ModelGroup(it, *this, previewW, previewH);
-        bool reset = model->Reset();
-        wxASSERT(!reset); // this should have failed
-        models[model->name] = model;
-        model->SetLayoutGroup(it->GetAttribute("LayoutGroup", "Unassigned").ToStdString());
+        Model* model = factory.Deserialize(it, xlights, false);
+        if (model != nullptr) {
+            model->GetModelScreenLocation().previewW = previewW;
+            model->GetModelScreenLocation().previewH = previewH;
+            ModelGroup* mg = dynamic_cast<ModelGroup*>(model);
+            if (mg != nullptr) {
+                bool reset = mg->RebuildBuffers();
+                wxASSERT(!reset);
+                models[model->name] = model;
+            }
+        }
     }
 
     return changed;
@@ -1304,9 +1350,8 @@ Model* ModelManager::CreateDefaultModel(const std::string& type, const std::stri
 Model* ModelManager::CreateModel(wxXmlNode* node, int previewW, int previewH) const
 {
     if (node->GetName() == "modelGroup") {
-        ModelGroup* grp = new ModelGroup(node, *this, previewWidth, previewHeight);
-        grp->Reset();
-        return grp;
+        XmlDeserializingModelFactory factory;
+        return factory.Deserialize(node, xlights, false);
     }
 
     Model* model;
