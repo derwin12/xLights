@@ -5805,22 +5805,50 @@ Model* Model::GetXlightsModel(Model* model, std::string& last_model, xLightsFram
 wxString Model::SerialiseSubmodel() const
 {
     wxString res = "";
-
-    wxXmlNode* root = GetModelXml();
-    wxXmlNode* child = root->GetChildren();
-    while (child != nullptr) {
-        if (child->GetName() == "subModel") {
-            wxXmlDocument new_doc;
-            new_doc.SetRoot(new wxXmlNode(*child));
-            wxStringOutputStream stream;
-            new_doc.Save(stream);
-            wxString s = stream.GetString();
-            s = s.SubString(s.Find("\n") + 1, s.Length()); // skip over xml format header
-            res += s;
+    
+    const std::vector<Model*>& submodelList = GetSubModels();
+    
+    for (Model* s : submodelList) {
+        const SubModel* submodel = dynamic_cast<const SubModel*>(s);
+        if (submodel == nullptr) {
+            continue; // Skip if not a valid SubModel
         }
-        child = child->GetNext();
+        
+        // Build the XML string manually
+        res += "    <subModel";
+        res += wxString::Format(" name=\"%s\"", XmlSafe(s->GetName()));
+        res += wxString::Format(" layout=\"%s\"", XmlSafe(submodel->GetSubModelLayout()));
+        res += wxString::Format(" type=\"%s\"", XmlSafe(submodel->GetSubModelType()));
+        
+        std::string bufferStyle = submodel->GetSubModelBufferStyle();
+        if (!bufferStyle.empty()) {
+            res += wxString::Format(" bufferstyle=\"%s\"", XmlSafe(bufferStyle));
+        }
+        
+        // Add range or buffer data
+        if (submodel->IsRanges()) {
+            for (int x = 0; x < submodel->GetNumRanges(); ++x) {
+                res += wxString::Format(" line%d=\"%s\"", x, XmlSafe(submodel->GetRange(x)));
+            }
+        } else {
+            res += wxString::Format(" subBuffer=\"%s\"", XmlSafe(submodel->GetSubModelLines()));
+        }
+        
+        // Check if we need to add aliases as child elements
+        const std::list<std::string>& aliases = s->GetAliases();
+        if (!aliases.empty()) {
+            res += ">\n";
+            res += "        <aliases>\n";
+            for (const auto& alias : aliases) {
+                res += wxString::Format("            <alias name=\"%s\"/>\n", XmlSafe(alias));
+            }
+            res += "        </aliases>\n";
+            res += "    </subModel>\n";
+        } else {
+            res += " />\n";
+        }
     }
-
+    
     return res;
 }
 

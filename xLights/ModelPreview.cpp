@@ -647,11 +647,10 @@ void ModelPreview::RenderModels(const std::vector<Model*>& models, bool isModelS
         } else {
             DrawGroupCentre( mg->GetCentreX(), mg->GetCentreY());
             // Check whether model group boundaries have changed
-            wxXmlNode* ModelXml = mg->GetModelXml();
-            int xminx = wxAtoi(ModelXml->GetAttribute("centreMinx", "0"));
-            int xminy = wxAtoi(ModelXml->GetAttribute("centreMiny", "0"));
-            int xmaxx = wxAtoi(ModelXml->GetAttribute("centreMaxx", "0"));
-            int xmaxy = wxAtoi(ModelXml->GetAttribute("centreMaxy", "0"));
+            int xminx = mg->GetCentreMinx();
+            int xminy = mg->GetCentreMiny();
+            int xmaxx = mg->GetCentreMaxx();
+            int xmaxy = mg->GetCentreMaxy();
             if (xminx != (int)minx || xminy != (int)miny || xmaxx != (int)maxx || xmaxy != (int)maxy) {
                 // need to calc new offsets
                 float cx = mg->GetCentreX();
