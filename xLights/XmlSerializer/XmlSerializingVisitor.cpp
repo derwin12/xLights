@@ -96,17 +96,29 @@ void XmlSerializingVisitor::AddCommonModelAttributes(const Model& model, wxXmlNo
     node->AddAttribute(XmlNodeKeys::RGBWHandleAttribute, model.GetRGBWHandling());
     node->AddAttribute(XmlNodeKeys::StringTypeAttribute, model.GetStringType());
     node->AddAttribute(XmlNodeKeys::TransparencyAttribute, std::to_string(model.GetTransparency()));
-    node->AddAttribute(XmlNodeKeys::BTransparencyAttribute, std::to_string(model.GetBlackTransparency()));
-    node->AddAttribute(XmlNodeKeys::DescriptionAttribute, model.GetDescription());
+    if (model.GetBlackTransparency() != 0) {
+        node->AddAttribute(XmlNodeKeys::BTransparencyAttribute, std::to_string(model.GetBlackTransparency()));
+    }
+    if (!model.GetDescription().empty()) {
+        node->AddAttribute(XmlNodeKeys::DescriptionAttribute, model.GetDescription());
+    }
     if (model.GetTagColourAsString() != "#000000") {
         node->AddAttribute(XmlNodeKeys::TagColourAttribute, model.GetTagColourAsString());
     }
     node->AddAttribute(XmlNodeKeys::StartChannelAttribute, model.GetModelStartChannel());
-    node->AddAttribute(XmlNodeKeys::NodeNamesAttribute, model.GetNodeNames());
-    node->AddAttribute(XmlNodeKeys::StrandNamesAttribute, model.GetStrandNames());
+    if (!model.GetNodeNames().empty()) {
+        node->AddAttribute(XmlNodeKeys::NodeNamesAttribute, model.GetNodeNames());
+    }
+    if (!model.GetStrandNames().empty()) {
+        node->AddAttribute(XmlNodeKeys::StrandNamesAttribute, model.GetStrandNames());
+    }
     node->AddAttribute(XmlNodeKeys::ControllerAttribute, model.GetControllerName());
     node->AddAttribute(XmlNodeKeys::versionNumberAttribute, CUR_MODEL_POS_VER);
     node->AddAttribute(XmlNodeKeys::xlightsVersionAttr, xlights_version_string);
+    
+    if (!model.GetModelChain().empty()) {
+        node->AddAttribute(XmlNodeKeys::ModelChainAttribute, model.GetModelChain());
+    }
 }
 
 void XmlSerializingVisitor::AddModelScreenLocationAttributes(const BaseObject& base, wxXmlNode* node) {
@@ -114,6 +126,12 @@ void XmlSerializingVisitor::AddModelScreenLocationAttributes(const BaseObject& b
     node->AddAttribute(XmlNodeKeys::WorldPosXAttribute, std::to_string(loc.x));
     node->AddAttribute(XmlNodeKeys::WorldPosYAttribute, std::to_string(loc.y));
     node->AddAttribute(XmlNodeKeys::WorldPosZAttribute, std::to_string(loc.z));
+    if (base.GetBaseObjectScreenLocation().IsLocked()) {
+        node->AddAttribute(XmlNodeKeys::LockedAttribute, "1");
+    }
+}
+
+void XmlSerializingVisitor::AddBoxedScreenLocationAttributes(const BaseObject& base, wxXmlNode* node) {
     glm::vec3 scale = base.GetBaseObjectScreenLocation().GetScaleMatrix();
     node->AddAttribute(XmlNodeKeys::ScaleXAttribute, std::to_string(scale.x));
     node->AddAttribute(XmlNodeKeys::ScaleYAttribute, std::to_string(scale.y));
@@ -122,9 +140,8 @@ void XmlSerializingVisitor::AddModelScreenLocationAttributes(const BaseObject& b
     node->AddAttribute(XmlNodeKeys::RotateXAttribute, std::to_string(rotate.x));
     node->AddAttribute(XmlNodeKeys::RotateYAttribute, std::to_string(rotate.y));
     node->AddAttribute(XmlNodeKeys::RotateZAttribute, std::to_string(rotate.z));
-    bool locked = base.GetBaseObjectScreenLocation().IsLocked();
-    node->AddAttribute(XmlNodeKeys::LockedAttribute, std::to_string(locked));
 }
+
 
 void XmlSerializingVisitor::AddTwoPointScreenLocationAttributes(const BaseObject& base, wxXmlNode* node) {
     const TwoPointScreenLocation& screenLoc = dynamic_cast<const TwoPointScreenLocation&>(base.GetBaseObjectScreenLocation());
@@ -251,6 +268,7 @@ void XmlSerializingVisitor::AddDmxModelAttributes(const DmxModel& dmx_model, wxX
     if (dmx_model.HasDimmerAbility()) {
         AddDimmerAbilityAttributes(dmx_model.GetDimmerAbility(), node);
     }
+    AddBoxedScreenLocationAttributes(dmx_model, node);
 }
 
 void XmlSerializingVisitor::AddColorAbilityRGBAttributes(const DmxColorAbilityRGB* colors, wxXmlNode* node) {
@@ -438,26 +456,30 @@ void XmlSerializingVisitor::AddControllerConnection(wxXmlNode* node, const Model
     if (p != 0) {
         wxXmlNode* xmlNode = new wxXmlNode(wxXML_ELEMENT_NODE, XmlNodeKeys::CtrlConnectionName);
         xmlNode->AddAttribute(XmlNodeKeys::ControllerAttribute, m->GetControllerName());
+        xmlNode->AddAttribute(XmlNodeKeys::PortAttribute, std::to_string(m->GetControllerPort()));
         xmlNode->AddAttribute(XmlNodeKeys::ProtocolAttribute, m->GetControllerProtocol());
-        xmlNode->AddAttribute(XmlNodeKeys::ProtocolSpeedAttribute, std::to_string(m->GetControllerProtocolSpeed()));
+        if (m->IsSerialProtocol()) {
+            xmlNode->AddAttribute(XmlNodeKeys::ProtocolSpeedAttribute, std::to_string(m->GetControllerProtocolSpeed()));
+        }
 
         // Save all the property checkbox active states
-        if (cc.IsPropertySet(CtrlProps::USE_SMART_REMOTE)) xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteAttribute, std::to_string(cc.GetSmartRemote()));
+        if (cc.IsPropertySet(CtrlProps::USE_SMART_REMOTE)) {
+            xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteAttribute, std::to_string(cc.GetSmartRemote()));
+            // Set all the Smart Remote values
+            xmlNode->AddAttribute(XmlNodeKeys::SRMaxCascadeAttribute, std::to_string(m->GetSRMaxCascade()));
+            xmlNode->AddAttribute(XmlNodeKeys::SRCascadeOnPortAttribute, std::to_string(m->GetSRMaxCascade()));
+            xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteTsAttribute, std::to_string(m->GetSmartTs()));
+            xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteTypeAttribute, m->GetSmartRemoteType());
+        }
         if (cc.IsPropertySet(CtrlProps::START_NULLS_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::StartNullAttribute, std::to_string(cc.GetStartNulls()));
         if (cc.IsPropertySet(CtrlProps::END_NULLS_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::EndNullAttribute, std::to_string(cc.GetEndNulls()));
-        if (cc.IsPropertySet(CtrlProps::BRIGHTNESS_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::BrightnessAttribute, std::to_string(cc.GetBrightness()));
+        if (cc.IsPropertySet(CtrlProps::BRIGHTNESS_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::DCBrightnessAttribute, std::to_string(cc.GetBrightness()));
         if (cc.IsPropertySet(CtrlProps::GAMMA_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::GammaAttribute, std::to_string(cc.GetGamma()));
         if (cc.IsPropertySet(CtrlProps::COLOR_ORDER_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::ColorOrderAttribute, cc.GetColorOrder());
         if (cc.IsPropertySet(CtrlProps::REVERSE_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::CReverseAttribute, std::to_string(cc.GetReverse()));
         if (cc.IsPropertySet(CtrlProps::GROUP_COUNT_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::GroupCountAttribute, std::to_string(cc.GetGroupCount()));
         if (cc.IsPropertySet(CtrlProps::ZIG_ZAG_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::CZigZagAttribute, std::to_string(cc.GetZigZag()));
         if (cc.IsPropertySet(CtrlProps::TS_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteTsAttribute, std::to_string(cc.GetSmartTs()));
-
-        // Set all the Smart Remote values
-        xmlNode->AddAttribute(XmlNodeKeys::SRMaxCascadeAttribute, std::to_string(m->GetSRMaxCascade()));
-        xmlNode->AddAttribute(XmlNodeKeys::SRCascadeOnPortAttribute, std::to_string(m->GetSRMaxCascade()));
-        xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteTsAttribute, std::to_string(m->GetSmartTs()));
-        xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteTypeAttribute, m->GetSmartRemoteType());
 
         node->AddChild(xmlNode);
     }
@@ -483,7 +505,6 @@ void XmlSerializingVisitor::AddOtherElements(wxXmlNode* xmlNode, const Model* m)
     AddDimmingCurve(xmlNode,m);
     AddAliases(xmlNode, m->GetAliases());
     AddSubmodels(xmlNode, m);
-    AddDimensions(xmlNode, m);
 }
 
 void XmlSerializingVisitor::AddSuperStrings(Model const& model, wxXmlNode* node) {
@@ -508,10 +529,14 @@ wxXmlNode* XmlSerializingVisitor::CommonVisitSteps(const Model& model) {
 void XmlSerializingVisitor::Visit(const ArchesModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
     AddThreePointScreenLocationAttributes(model, xmlNode);
-    xmlNode->AddAttribute(XmlNodeKeys::ZigZagAttribute, model.GetZigZag() ? "true": "false");
+    if (model.GetZigZag()) {
+        xmlNode->AddAttribute(XmlNodeKeys::ZigZagAttribute, "true");
+    }
     xmlNode->AddAttribute(XmlNodeKeys::HollowAttribute, std::to_string(model.GetHollow()));
-    xmlNode->AddAttribute(XmlNodeKeys::GapAttribute, std::to_string(model.GetGap()));
-    xmlNode->AddAttribute(XmlNodeKeys::ArcAttribute, std::to_string(model.GetArc()));
+    if (model.GetGap()) {
+        xmlNode->AddAttribute(XmlNodeKeys::GapAttribute, std::to_string(model.GetGap()));
+    }
+    xmlNode->AddAttribute(XmlNodeKeys::CArcAttribute, std::to_string(model.GetArc()));
     xmlNode->AddAttribute(XmlNodeKeys::LayerSizesAttribute, model.SerialiseLayerSizes());
     const Model* m = dynamic_cast<const Model*>(&model);
     AddOtherElements(xmlNode, m);
@@ -530,6 +555,7 @@ void XmlSerializingVisitor::Visit(const CandyCaneModel& model) {
 
 void XmlSerializingVisitor::Visit(const CircleModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
+    AddBoxedScreenLocationAttributes(model, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::InsideOutAttribute, model.IsInsideOut() ? "1" : "0");
     xmlNode->AddAttribute(XmlNodeKeys::LayerSizesAttribute,  model.SerialiseLayerSizes());
     const Model* m = dynamic_cast<const Model*>(&model);
@@ -549,6 +575,7 @@ void XmlSerializingVisitor::Visit(const ChannelBlockModel& model) {
 
 void XmlSerializingVisitor::Visit(const CubeModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
+    AddBoxedScreenLocationAttributes(model, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::StyleAttribute, model.GetCubeStyle());
     xmlNode->AddAttribute(XmlNodeKeys::CubeStartAttribute, model.GetCubeStart());
     xmlNode->AddAttribute(XmlNodeKeys::CubeStringsAttribute, std::to_string(model.GetCubeStrings()));
@@ -560,6 +587,7 @@ void XmlSerializingVisitor::Visit(const CubeModel& model) {
 
 void XmlSerializingVisitor::Visit(const CustomModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
+    AddBoxedScreenLocationAttributes(model, xmlNode);
     int depth = model.GetCustomDepth();
     xmlNode->AddAttribute(XmlNodeKeys::CMDepthAttribute, std::to_string(depth));
     std::string custom_data = model.GetCompressedData();
@@ -598,6 +626,7 @@ void XmlSerializingVisitor::Visit(const IciclesModel& model) {
 
 void XmlSerializingVisitor::Visit(const ImageModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
+    AddBoxedScreenLocationAttributes(model, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::ImageAttribute, model.GetImageFile());
     xmlNode->AddAttribute(XmlNodeKeys::WhiteAsAlphaAttribute, model.IsWhiteAsAlpha() ? "True" : "False");
     xmlNode->AddAttribute(XmlNodeKeys::OffBrightnessAttribute, std::to_string(model.GetOffBrightness()));
@@ -607,6 +636,7 @@ void XmlSerializingVisitor::Visit(const ImageModel& model) {
 
 void XmlSerializingVisitor::Visit(const MatrixModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
+    AddBoxedScreenLocationAttributes(model, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::VertMatrixAttribute, model.isVerticalMatrix() ? "true" : "false");
     xmlNode->AddAttribute(XmlNodeKeys::LowDefinitionAttribute, std::to_string(model.GetLowDefFactor()));
     xmlNode->AddAttribute(XmlNodeKeys::AlternateNodesAttribute, model.HasAlternateNodes() ? "true" : "false");
@@ -713,6 +743,7 @@ void XmlSerializingVisitor::Visit(const PolyLineModel& model) {
 
 void XmlSerializingVisitor::Visit(const SphereModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
+    AddBoxedScreenLocationAttributes(model, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::DegreesAttribute, std::to_string(model.GetSphereDegrees()));
     xmlNode->AddAttribute(XmlNodeKeys::StartLatAttribute, std::to_string(model.GetStartLatitude()));
     xmlNode->AddAttribute(XmlNodeKeys::EndLatAttribute, std::to_string(model.GetEndLatitude()));
@@ -723,6 +754,7 @@ void XmlSerializingVisitor::Visit(const SphereModel& model) {
 
 void XmlSerializingVisitor::Visit(const SpinnerModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
+    AddBoxedScreenLocationAttributes(model, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::AlternateAttribute, model.HasAlternateNodes() ? "true" : "false");
     xmlNode->AddAttribute(XmlNodeKeys::ZigZagAttribute, model.HasZigZag() ? "true" : "false");
     xmlNode->AddAttribute(XmlNodeKeys::HallowAttribute, std::to_string(model.GetHollowPercent()));
@@ -734,6 +766,7 @@ void XmlSerializingVisitor::Visit(const SpinnerModel& model) {
 
 void XmlSerializingVisitor::Visit(const StarModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
+    AddBoxedScreenLocationAttributes(model, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::LayerSizesAttribute, model.SerialiseLayerSizes());
     xmlNode->AddAttribute(XmlNodeKeys::StarStartLocationAttribute, model.GetStartLocation());
     xmlNode->AddAttribute(XmlNodeKeys::StarRatioAttribute, std::to_string(model.GetStarRatio()));
@@ -744,6 +777,7 @@ void XmlSerializingVisitor::Visit(const StarModel& model) {
 
 void XmlSerializingVisitor::Visit(const TreeModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
+    AddBoxedScreenLocationAttributes(model, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::AlternateNodesAttribute, model.HasAlternateNodes() ? "true" : "false");
     xmlNode->AddAttribute(XmlNodeKeys::NoZigZagAttribute, model.IsNoZigZag() ? "true" : "false");
     xmlNode->AddAttribute(XmlNodeKeys::TreeBottomTopRatioAttribute, std::to_string(model.GetBottomTopRatio()));
@@ -756,6 +790,7 @@ void XmlSerializingVisitor::Visit(const TreeModel& model) {
 
 void XmlSerializingVisitor::Visit(const WindowFrameModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
+    AddBoxedScreenLocationAttributes(model, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::RotationAttribute, model.GetRotation() ? "Counter Clockwise" : "Clockwise");
     const Model* m = dynamic_cast<const Model*>(&model);
     AddOtherElements(xmlNode, m);
@@ -763,6 +798,7 @@ void XmlSerializingVisitor::Visit(const WindowFrameModel& model) {
 
 void XmlSerializingVisitor::Visit(const WreathModel& model) {
     wxXmlNode* xmlNode = CommonVisitSteps(model);
+    AddBoxedScreenLocationAttributes(model, xmlNode);
     const Model* m = dynamic_cast<const Model*>(&model);
     AddOtherElements(xmlNode, m);
 }
@@ -896,6 +932,7 @@ wxXmlNode* XmlSerializingVisitor::CommonObjectVisitSteps(const ViewObject& objec
 void XmlSerializingVisitor::Visit(const GridlinesObject& object)
 {
     wxXmlNode* xmlNode = CommonObjectVisitSteps(object);
+    AddBoxedScreenLocationAttributes(object, xmlNode);
     xmlNode->AddAttribute("GridLineSpacing", std::to_string(object.GetGridLineSpacing()));
     xmlNode->AddAttribute("GridWidth", std::to_string(object.GetGridWidth()));
     xmlNode->AddAttribute("GridHeight", std::to_string(object.GetGridHeight()));
@@ -907,6 +944,7 @@ void XmlSerializingVisitor::Visit(const GridlinesObject& object)
 void XmlSerializingVisitor::Visit(const TerrainObject& object)
 {
     wxXmlNode* xmlNode = CommonObjectVisitSteps(object);
+    AddBoxedScreenLocationAttributes(object, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::ImageAttribute, object.GetImageFile());
     xmlNode->AddAttribute(XmlNodeKeys::TransparencyAttribute, std::to_string(object.GetTransparency()));
     xmlNode->AddAttribute(XmlNodeKeys::BrightnessAttribute, std::to_string(object.GetBrightness()));
@@ -924,6 +962,7 @@ void XmlSerializingVisitor::Visit(const TerrainObject& object)
 void XmlSerializingVisitor::Visit(const ImageObject& object)
 {
     wxXmlNode* xmlNode = CommonObjectVisitSteps(object);
+    AddBoxedScreenLocationAttributes(object, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::ImageAttribute, object.GetImageFile());
     xmlNode->AddAttribute(XmlNodeKeys::TransparencyAttribute, std::to_string(object.GetTransparency()));
     xmlNode->AddAttribute(XmlNodeKeys::BrightnessAttribute, std::to_string(object.GetBrightness()));
@@ -932,6 +971,7 @@ void XmlSerializingVisitor::Visit(const ImageObject& object)
 void XmlSerializingVisitor::Visit(const MeshObject& object)
 {
     wxXmlNode* xmlNode = CommonObjectVisitSteps(object);
+    AddBoxedScreenLocationAttributes(object, xmlNode);
     xmlNode->AddAttribute(XmlNodeKeys::ObjFileAttribute, object.GetObjFile());
     xmlNode->AddAttribute(XmlNodeKeys::MeshOnlyAttribute, object.IsMeshOnly() ? "1" : "0");
     xmlNode->AddAttribute(XmlNodeKeys::BrightnessAttribute, std::to_string(object.GetBrightness()));

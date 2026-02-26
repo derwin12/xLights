@@ -68,6 +68,7 @@ struct XmlSerializer {
         model->Accept(visitor);
         if (includeGroups) {
             XmlSerialize::SerializeModelGroupsForModel(model, docNode);
+            //TODO - add dimensions here
         }
 
         doc.SetRoot(docNode);

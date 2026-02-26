@@ -83,6 +83,7 @@ private:
     void AddThreePointScreenLocationAttributes(const BaseObject& base, wxXmlNode* node);
     void AddPolyPointScreenLocationAttributes(const BaseObject& base, wxXmlNode* node);
     void AddMultiPointScreenLocationAttributes(const BaseObject& base, wxXmlNode* node);
+    void AddBoxedScreenLocationAttributes(const BaseObject& base, wxXmlNode* node);
 
     void AddDmxMotorAttributes(const DmxMotor* motor, wxXmlNode* node);
     void AddMeshAttributes(const Mesh* mesh, wxXmlNode* node);

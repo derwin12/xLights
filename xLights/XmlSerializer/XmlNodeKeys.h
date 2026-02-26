@@ -32,6 +32,7 @@ namespace XmlNodeKeys {
 
     // Shared (by some) Attributes
     constexpr auto ArcAttribute            = "Arc";
+    constexpr auto CArcAttribute           = "arc";
     constexpr auto AlternateNodesAttribute = "AlternateNodes";
     constexpr auto BrightnessAttribute     = "Brightness";      //should fix
     constexpr auto DCBrightnessAttribute   = "brightness";      //should fix
