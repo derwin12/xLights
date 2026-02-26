@@ -973,9 +973,9 @@ void CubeModel::InitModel()
         {
             Nodes[0]->Coords[n].bufX = 0;
             Nodes[0]->Coords[n].bufY = 0;
-            Nodes[0]->Coords[n].screenX = std::get<0>(locations[n]) - width / 2.0f;
-            Nodes[0]->Coords[n].screenY = std::get<1>(locations[n]) - height / 2.0f;
-            Nodes[0]->Coords[n].screenZ = depth - std::get<2>(locations[n]) - 1 - depth / 2.0f;
+            Nodes[0]->Coords[n].screenX = std::get<0>(locations[n]) - width / 2;
+            Nodes[0]->Coords[n].screenY = std::get<1>(locations[n]) - height / 2;
+            Nodes[0]->Coords[n].screenZ = depth - std::get<2>(locations[n]) - 1 - depth / 2;
         }
     }
 
