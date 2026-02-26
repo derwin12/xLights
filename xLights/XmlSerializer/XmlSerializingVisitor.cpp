@@ -112,6 +112,15 @@ void XmlSerializingVisitor::AddCommonModelAttributes(const Model& model, wxXmlNo
     if (!model.GetStrandNames().empty()) {
         node->AddAttribute(XmlNodeKeys::StrandNamesAttribute, model.GetStrandNames());
     }
+    if (!model.GetPixelSpacing().empty()) {
+        node->AddAttribute(XmlNodeKeys::PixelSpacingAttribute, model.GetPixelSpacing());
+    }
+    if (!model.GetPixelCount().empty()) {
+        node->AddAttribute(XmlNodeKeys::PixelCountAttribute, model.GetPixelCount());
+    }
+    if (!model.GetPixelType().empty()) {
+        node->AddAttribute(XmlNodeKeys::PixelTypeAttribute, model.GetPixelType());
+    }
     node->AddAttribute(XmlNodeKeys::ControllerAttribute, model.GetControllerName());
     node->AddAttribute(XmlNodeKeys::versionNumberAttribute, CUR_MODEL_POS_VER);
     node->AddAttribute(XmlNodeKeys::xlightsVersionAttr, xlights_version_string);
@@ -599,6 +608,14 @@ void XmlSerializingVisitor::Visit(const CustomModel& model) {
     }
     xmlNode->AddAttribute(XmlNodeKeys::BkgImageAttribute, model.GetCustomBackground());
     xmlNode->AddAttribute(XmlNodeKeys::BkgLightnessAttribute, std::to_string(model.GetCustomLightness()));
+    
+    if (model.HasIndivStartNodes()) {
+        int cnt = model.GetIndivStartNodesCount();
+        xmlNode->AddAttribute(XmlNodeKeys::CustomStringsAttribute, std::to_string(cnt));
+        for (int x = 0; x < cnt; ++x) {
+            xmlNode->AddAttribute(model.StartNodeAttrName(x), std::to_string(model.GetIndivStartNode(x)));
+        }
+    }
 
     // If we have a ruler then also include the model dimensions so if imported we can bring them in as the right size
     if (RulerObject::GetRuler() != nullptr)

@@ -252,6 +252,7 @@ namespace XmlNodeKeys {
     constexpr auto NodesAttribute          = "Nodes";
     constexpr auto PixelTypeAttribute      = "PixelType";
     constexpr auto PixelSpacingAttribute   = "PixelSpacing";
+    constexpr auto PixelCountAttribute     = "PixelCount";
     constexpr auto PixelAttribute          = "Pixel";
     constexpr auto BkgLightnessAttribute   = "CustomBkgLightness";
     constexpr auto BkgImageAttribute       = "CustomBkgImage";

@@ -211,6 +211,9 @@ void XmlDeserializingModelFactory::DeserializeCommonModelAttributes(Model* model
     model->SetStrandNames(node->GetAttribute(XmlNodeKeys::StrandNamesAttribute).ToStdString());
     model->SetCustomColor(node->GetAttribute(XmlNodeKeys::CustomColorAttribute, "#000000").ToStdString());
     model->SetModelChain(node->GetAttribute(XmlNodeKeys::ModelChainAttribute,""));
+    model->SetPixelSpacing(node->GetAttribute(XmlNodeKeys::PixelSpacingAttribute, ""));
+    model->SetPixelCount(node->GetAttribute(XmlNodeKeys::PixelCountAttribute, ""));
+    model->SetPixelType(node->GetAttribute(XmlNodeKeys::PixelTypeAttribute, ""));
 
     if (!importing) {
         model->SetControllerName(node->GetAttribute(XmlNodeKeys::ControllerAttribute, xlEMPTY_STRING).Trim(true).Trim(false).ToStdString(), true);

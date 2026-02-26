@@ -178,9 +178,14 @@ public:
     // Getter methods for export functionality
     [[nodiscard]] std::string GetModelBrightness() const;
     [[nodiscard]] std::string GetAntialias() const;
-    [[nodiscard]] std::string GetPixelCount() const;
-    [[nodiscard]] std::string GetPixelType() const;
-    [[nodiscard]] std::string GetPixelSpacing() const;
+    [[nodiscard]] const std::string &GetPixelCount() const { return _pixelCount; }
+    [[nodiscard]] const std::string &GetPixelType() const { return _pixelType; }
+    [[nodiscard]] const std::string &GetPixelSpacing() const { return _pixelSpacing; }
+    
+    void SetPixelCount(const std::string &pc) { _pixelCount = pc; }
+    void SetPixelType(const std::string &pt) { _pixelType = pt; }
+    void SetPixelSpacing(const std::string &ps) { _pixelSpacing = ps; }
+
     wxString ExportSuperStringColors() const;
     void ApplyDimensions(const std::string& units, float width, float height, float depth);
     void ExportDimensions(wxFile& f) const;
@@ -325,6 +330,7 @@ public:
     [[nodiscard]] bool HasIndivStartNodes() const { return _hasIndivNodes; }
     void SetHasIndivStartNodes(bool indiv) { _hasIndivNodes = indiv; }
     [[nodiscard]] int GetIndivStartNode(size_t s) const { return _indivStartNodes[s]; }
+    [[nodiscard]] int GetIndivStartNodesCount() const { return _indivStartNodes.size(); }
     void AddIndivStartNode(int node) { _indivStartNodes.push_back(node); }
     void SetIndivStartNode(int index, int node) { _indivStartNodes[index] = node; }
     const std::string StartNodeAttrName(int idx) const { return ""; }
@@ -478,9 +484,9 @@ public:
     std::string ModelStartChannel{ "" };
     bool CouldComputeStartChannel = false;
     bool Overlapping = false;
-    //std::string _pixelCount{ "" };
-    //std::string _pixelType{ "" };
-    //std::string _pixelSpacing{ "" };
+    std::string _pixelCount{ "" };
+    std::string _pixelType{ "" };
+    std::string _pixelSpacing{ "" };
     std::string _shadowModelFor{ "" };
 
     void UpdateChannels();

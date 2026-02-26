@@ -6018,30 +6018,6 @@ std::string Model::GetAntialias() const
     return "";
 }
 
-std::string Model::GetPixelCount() const
-{
-    if (ModelXml) {
-        return ModelXml->GetAttribute("PixelCount", "").ToStdString();
-    }
-    return "";
-}
-
-std::string Model::GetPixelType() const
-{
-    if (ModelXml) {
-        return ModelXml->GetAttribute("PixelType", "").ToStdString();
-    }
-    return "";
-}
-
-std::string Model::GetPixelSpacing() const
-{
-    if (ModelXml) {
-        return ModelXml->GetAttribute("PixelSpacing", "").ToStdString();
-    }
-    return "";
-}
-
 void Model::SetPixelStyle(PIXEL_STYLE style)
 {
     if (_pixelStyle != style) {
