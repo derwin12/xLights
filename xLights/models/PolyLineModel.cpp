@@ -1116,18 +1116,13 @@ int PolyLineModel::NodesPerString() const
         if (SingleNode) {
             return 1;
         } else {
-            wxString nm = StartNodeAttrName(0);
-            bool hasIndivNodes = ModelXml->HasAttribute(nm);
+            bool hasIndivNodes = HasIndivStartNodes();
             int v1 = 0;
             int v2 = 0;
             if (hasIndivNodes) {
-                nm = StartNodeAttrName(string);
-                std::string val = ModelXml->GetAttribute(nm, "").ToStdString();
-                v1 = wxAtoi(val);
+                v1 = GetIndivStartNode(string);
                 if (string < _strings - 1) { // not last string
-                    nm = StartNodeAttrName(string + 1);
-                    val = ModelXml->GetAttribute(nm, "").ToStdString();
-                    v2 = wxAtoi(val);
+                    v2 = GetIndivStartNode(string + 1);
                 }
             } else {
                 v1 = ComputeStringStartNode(string);
