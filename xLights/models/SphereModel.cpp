@@ -50,12 +50,13 @@ void SphereModel::SetSphereCoord() {
     if (BufferWi < 1) return;
     if (BufferHt < 1) return; // June 27,2013. added check to not divide by zero
 
-    double RenderHt = (double)BufferHt / 1.8;
-    double RenderWi = (double)BufferWi / 1.8;
+    // BufferWi is the number of "spokes" and thus should not have any impact on the
+    // shape of the sphere.   We'll use the "max" of the two so we have
+    // the highest number of pixels to work  with
+    double RenderMx = ((double)std::max(BufferHt, BufferWi)) / 1.8;
 
-    double Hradians = toRadians(360);
-    double Hradius = RenderWi / 2.0;
-    double Vradius = RenderHt / 2.0;
+    double radians = toRadians(360);
+    double radius = RenderMx / 2.0;
 
     //logger_base.debug("Buffer %d,%d Render %f,%f Radius %f,%f",
     //    BufferWi, BufferHt,
@@ -64,8 +65,8 @@ void SphereModel::SetSphereCoord() {
 
     double remove = toRadians((360.0 - _sphereDegrees));
     double fudge = toRadians((360.0 - _sphereDegrees) / (double)BufferWi);
-    double HStartAngle = Hradians / 4.0 + 0.003 - remove / 2.0;
-    double HAngleIncr = (-Hradians + remove - fudge) / (double)BufferWi;
+    double HStartAngle = radians / 4.0 + 0.003 - remove / 2.0;
+    double HAngleIncr = (-radians + remove - fudge) / (double)BufferWi;
 
     //logger_base.debug("Horizontal Start %d: +%f x %d",
     //    (int)toDegrees(HStartAngle), (float)toDegrees(HAngleIncr), BufferWi);
@@ -86,9 +87,9 @@ void SphereModel::SetSphereCoord() {
             double vangle = VStartAngle + bufferY * VAngleIncr;
 
             double sv = sin(vangle);
-            Nodes[n]->Coords[c].screenX = Hradius * cos(hangle) * sv;
-            Nodes[n]->Coords[c].screenZ = Hradius * sin(hangle) * sv;
-            Nodes[n]->Coords[c].screenY = Vradius * cos(vangle);
+            Nodes[n]->Coords[c].screenX = radius * cos(hangle) * sv;
+            Nodes[n]->Coords[c].screenZ = radius * sin(hangle) * sv;
+            Nodes[n]->Coords[c].screenY = radius * cos(vangle);
 
             //logger_base.debug("%d: %d,%d -> hangle %d vangle %d -> %f,%f,%f",
             //    n,
@@ -97,7 +98,7 @@ void SphereModel::SetSphereCoord() {
             //    Nodes[n]->Coords[c].screenX, Nodes[n]->Coords[c].screenY, Nodes[n]->Coords[c].screenZ);
         }
     }
-    screenLocation.SetRenderSize(RenderWi, RenderHt, RenderWi);
+    screenLocation.SetRenderSize(RenderMx, RenderMx, RenderMx);
 }
 
 int SphereModel::OnPropertyGridChange(wxPropertyGridInterface *grid, wxPropertyGridEvent& event) {

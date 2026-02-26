@@ -591,6 +591,18 @@ Model* XmlDeserializingModelFactory::DeserializeSphere(wxXmlNode* node, xLightsF
     model->SetDegrees(std::stoi(node->GetAttribute(XmlNodeKeys::DegreesAttribute, "360").ToStdString()));
     model->SetAlternateNodes(node->GetAttribute(XmlNodeKeys::AlternateNodesAttribute, "false") == "true");
     model->SetNoZigZag(node->GetAttribute(XmlNodeKeys::NoZigZagAttribute, "false") == "true");
+    std::string version = node->GetAttribute(XmlNodeKeys::versionNumberAttribute).ToStdString();
+    if (version.empty() || std::stoi(version) < 8) {
+        // sphere scale was adjusted to be "round". Previously, on half the size was considered for X and Z, but
+        // full size for Y.
+        auto mtrx = model->GetModelScreenLocation().GetScaleMatrix();
+        mtrx.x *= 1.1; // to account for the 90% space or 1.8 in the code
+        mtrx.z *= 1.1;
+        mtrx.x /= 2.0; // x and z scale now need to be half
+        mtrx.z /= 2.0;
+        model->GetModelScreenLocation().SetScaleMatrix(mtrx);
+    }
+
     model->Setup();
     return model;
 }
