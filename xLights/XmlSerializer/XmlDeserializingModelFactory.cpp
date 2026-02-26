@@ -242,12 +242,12 @@ void XmlDeserializingModelFactory::DeserializeCommonModelAttributes(Model* model
     wxXmlNode* f = node->GetChildren();
     while (f != nullptr) {
         if ("faceInfo" == f->GetName()) {
-            FaceStateData newFaceInfo;
+            FaceStateData newFaceInfo(model->GetFaceInfo());
             XmlSerialize::DeserializeFaceInfo(f, newFaceInfo);
             model->SetFaceInfo(newFaceInfo);
             model->UpdateFaceInfoNodes();
         } else if ("stateInfo" == f->GetName()) {
-            FaceStateData newStateInfo;
+            FaceStateData newStateInfo(model->GetStateInfo());
             XmlSerialize::DeserializeStateInfo(f, newStateInfo);
             model->SetStateInfo(newStateInfo);
             model->UpdateStateInfoNodes();

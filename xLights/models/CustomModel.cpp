@@ -1342,12 +1342,10 @@ bool CustomModel::ChangeStringCount(long count, std::string& message)
         return true;
     }
 
-    ModelXml->DeleteAttribute("CustomStrings");
-    ModelXml->AddAttribute("CustomStrings", wxString::Format("%d", count));
-
-    if (count != 1) {    
-        _strings = count;
+    _strings = count;
+    if (count != 1) {
         if (_hasIndivNodes) {
+            _indivStartNodes.resize(count);
             for (int x = 0; x < count; x++) {
                 _indivStartNodes[x] = ComputeStringStartNode(x);
             }

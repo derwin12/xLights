@@ -1995,36 +1995,15 @@ int Model::OnPropertyGridChange(wxPropertyGridInterface* grid, wxPropertyGridEve
         AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "Model::OnPropertyGridChange::Description");
         return 0;
     } else if (event.GetPropertyName() == "ModelFaces") {
-        wxXmlNode* f = ModelXml->GetChildren();
-        while (f != nullptr) {
-            if ("faceInfo" == f->GetName()) {
-                ModelXml->RemoveChild(f);
-                delete f;
-                f = ModelXml->GetChildren();
-            } else {
-                f = f->GetNext();
-            }
-        }
-        Model::WriteFaceInfo(ModelXml, faceInfo);
         IncrementChangeCount();
         AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "Model::OnPropertyGridChange::ModelFaces");
         return 0;
     } else if (event.GetPropertyName() == "ModelStates") {
-        wxXmlNode* f = ModelXml->GetChildren();
-        while (f != nullptr) {
-            if ("stateInfo" == f->GetName()) {
-                ModelXml->RemoveChild(f);
-                delete f;
-                f = ModelXml->GetChildren();
-            } else {
-                f = f->GetNext();
-            }
-        }
-        Model::WriteStateInfo(ModelXml, stateInfo);
         IncrementChangeCount();
         AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "Model::OnPropertyGridChange::ModelStates");
         return 0;
     } else if (event.GetPropertyName() == "Aliases") {
+        IncrementChangeCount();
         AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "Model::OnPropertyGridChange::Aliases");
         return 0;
     } else if (event.GetPropertyName().StartsWith("SuperStringColours")) {
@@ -4399,7 +4378,7 @@ bool Model::ParseStateElement(const std::string& multi_str, std::vector<wxPoint>
 
 void Model::ExportAsCustomXModel() const
 {
-    wxString name = ModelXml->GetAttribute("name").Trim(true).Trim(false);
+    wxString name = wxString(GetName()).Trim(true).Trim(false);
     wxLogNull logNo; // kludge: avoid "error 0" message from wxWidgets after new file is written
     wxString filename = wxFileSelector(_("Choose output file"), wxEmptyString, name, wxEmptyString, "Custom Model files (*.xmodel)|*.xmodel", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
 
@@ -4477,17 +4456,16 @@ void Model::ExportAsCustomXModel() const
 
     wxString p1 = wxString::Format("%i", sizex);
     wxString p2 = wxString::Format("%i", sizey);
-    wxString st = ModelXml->GetAttribute("StringType");
-    wxString ps = ModelXml->GetAttribute("PixelSize");
-    wxString t = ModelXml->GetAttribute("Transparency", "0");
-    wxString mb = ModelXml->GetAttribute("ModelBrightness", "0");
-    wxString a = ModelXml->GetAttribute("Antialias");
-    wxString sn = ModelXml->GetAttribute("StrandNames");
-    wxString nn = ModelXml->GetAttribute("NodeNames");
-    wxString pc = ModelXml->GetAttribute("PixelCount");
-    wxString pt = ModelXml->GetAttribute("PixelType");
-    wxString psp = ModelXml->GetAttribute("PixelSpacing");
-    wxString lg = ModelXml->GetAttribute("LayoutGroup");
+    wxString st = GetStringType();
+    int ps = GetPixelSize();
+    int t = GetTransparency();
+    int a = (int)GetPixelStyle();
+    wxString sn = GetStrandNames();
+    wxString nn = GetNodeNames();
+    wxString pc = GetPixelCount();
+    wxString pt = GetPixelType();
+    wxString psp = GetPixelSpacing();
+    wxString lg = GetLayoutGroup();
 
     wxString v = xlights_version_string;
     f.Write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<custommodel \n");
@@ -4496,10 +4474,9 @@ void Model::ExportAsCustomXModel() const
     f.Write(wxString::Format("parm2=\"%s\" ", p2));
     f.Write("Depth=\"1\" ");
     f.Write(wxString::Format("StringType=\"%s\" ", st));
-    f.Write(wxString::Format("Transparency=\"%s\" ", t));
-    f.Write(wxString::Format("PixelSize=\"%s\" ", ps));
-    f.Write(wxString::Format("ModelBrightness=\"%s\" ", mb));
-    f.Write(wxString::Format("Antialias=\"%s\" ", a));
+    f.Write(wxString::Format("Transparency=\"%d\" ", t));
+    f.Write(wxString::Format("PixelSize=\"%d\" ", ps));
+    f.Write(wxString::Format("Antialias=\"%d\" ", a));
     f.Write(wxString::Format("StrandNames=\"%s\" ", sn));
     f.Write(wxString::Format("NodeNames=\"%s\" ", nn));
     if (pc != "")
