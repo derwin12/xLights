@@ -336,6 +336,9 @@ public:
     bool IsNodeInBufferRange(size_t nodeNum, int x1, int y1, int x2, int y2);
 
     static void ApplyTransparency(xlColor& color, int transparency, int blackTransparency);
+    
+    
+    virtual bool SupportsModelScreenLocation() const { return true; }
 protected:
     void AdjustStringProperties(wxPropertyGridInterface* grid, int newNum);
     std::string ComputeStringStartChannel(int x);

@@ -33,6 +33,8 @@ class SingleLineModel : public ModelWithScreenLocation<TwoPointScreenLocation>
         void Accept(BaseObjectVisitor& visitor) const override { return visitor.Visit(*this); }
 
         const Model *GetParent() { return parent; }
+        virtual bool SupportsModelScreenLocation() const override { return validLocation; }
+
     protected:
         static std::vector<std::string> LINE_BUFFER_STYLES;
         virtual void InitModel() override;
@@ -40,4 +42,5 @@ class SingleLineModel : public ModelWithScreenLocation<TwoPointScreenLocation>
 
     private:
         const Model *parent = nullptr;
+        bool validLocation = true;
 };

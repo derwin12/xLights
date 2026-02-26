@@ -3600,30 +3600,25 @@ void Model::InitRenderBufferNodes(const std::string& tp, const std::string& came
                 float sx = it2.screenX;
                 float sy = it2.screenY;
 
-                if (ModelXml == nullptr) {
-                    // if model xml is null then this isnt a real model which means it doesnt have a real location
-                    // which means translatePoint is going to do strange things ... so dont call it
-                } else {
+                if (SupportsModelScreenLocation()) {
                     if (pcamera == nullptr || camera == "2D") {
                         // Handle all of the 2D classic transformations
                         // float sz = 0;
                         // reintroducing the z coordinate as otherwise with some rotations we end up with a zero width buffer
                         float sz = it2.screenZ;
                         GetModelScreenLocation().TranslatePoint(sx, sy, sz);
-                    } else {
-                        if (GetDisplayAs() != "ModelGroup") { // ignore for groups since they will have already calculated their node positions from recursion call above
-                            // Handle 3D from an arbitrary camera position
-                            float sz = it2.screenZ;
-                            GetModelScreenLocation().TranslatePoint(sx, sy, sz);
+                    } else if (GetDisplayAs() != "ModelGroup") { // ignore for groups since they will have already calculated their node positions from recursion call above
+                        // Handle 3D from an arbitrary camera position
+                        float sz = it2.screenZ;
+                        GetModelScreenLocation().TranslatePoint(sx, sy, sz);
 
-                            // really not sure if 400,400 is the best thing to pass in here ... but it seems to work
-                            glm::vec2 loc = GetModelScreenLocation().GetScreenPosition(400, 400, modelPreview, pcamera, sx, sy, sz);
-                            loc.y *= -1.0f;
-                            sx = loc.x;
-                            sy = loc.y;
-                            it2.screenX = sx;
-                            it2.screenY = sy;
-                        }
+                        // really not sure if 400,400 is the best thing to pass in here ... but it seems to work
+                        glm::vec2 loc = GetModelScreenLocation().GetScreenPosition(400, 400, modelPreview, pcamera, sx, sy, sz);
+                        loc.y *= -1.0f;
+                        sx = loc.x;
+                        sy = loc.y;
+                        it2.screenX = sx;
+                        it2.screenY = sy;
                     }
                 }
 

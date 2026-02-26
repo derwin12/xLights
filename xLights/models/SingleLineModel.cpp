@@ -36,6 +36,8 @@ bool SingleLineModel::IsNodeFirst(int n) const
 
 void SingleLineModel::Reset(int lights, const Model &pbc, int strand, int node, bool forceDirection)
 {
+    // If this method is called, we're creating a SingleLineModel to represent raw data and will not have a proper screen location
+    validLocation = false;
     parent = &pbc;
     Nodes.clear();
     parm1 = lights;
