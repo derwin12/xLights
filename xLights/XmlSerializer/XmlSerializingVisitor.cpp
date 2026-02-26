@@ -741,11 +741,11 @@ void XmlSerializingVisitor::Visit(const PolyLineModel& model) {
     xmlNode->AddAttribute(XmlNodeKeys::DropPatternAttribute, model.GetDropPattern());
     std::vector<int> nodeSize = model.GetNodeSizes();
     for (auto i = 0; i < nodeSize.size(); i++) {
-        xmlNode->AddAttribute(model.SegAttrName(i), std::to_string(nodeSize[i]));
+        xmlNode->AddAttribute(model.StartNodeAttrName(i), std::to_string(nodeSize[i]));
     }
     std::vector<int> segSize = model.GetSegmentsSizes();
     for (auto i = 0; i < segSize.size(); i++) {
-        xmlNode->AddAttribute(model.StartNodeAttrName(i), std::to_string(segSize[i]));
+        xmlNode->AddAttribute(model.SegAttrName(i), std::to_string(segSize[i]));
     }
     std::vector<std::string> cSize = model.GetCorners();
     for (auto i = 0; i < cSize.size(); i++) {
