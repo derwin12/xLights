@@ -56,6 +56,7 @@ void XmlDeserializingObjectFactory::DeserializeBaseObjectAttributes(ViewObject* 
     object->SetName(name);
     object->SetDisplayAs(node->GetAttribute(XmlNodeKeys::DisplayAsAttribute).ToStdString());
     object->SetActive(std::stoi(node->GetAttribute(XmlNodeKeys::ActiveAttribute, "1").ToStdString()));
+    object->SetFromBase(std::stoi(node->GetAttribute(XmlNodeKeys::FromBaseAttribute, "0").ToStdString()));
 }
 
 void XmlDeserializingObjectFactory::DeserializeTerrainScreenLocationAttributes(ViewObject* object, wxXmlNode* node) {
