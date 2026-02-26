@@ -669,7 +669,6 @@ Model* XmlDeserializingModelFactory::DeserializeTree(wxXmlNode* node, xLightsFra
 Model* XmlDeserializingModelFactory::DeserializeWindow(wxXmlNode* node, xLightsFrame* xlights, bool importing) {
     WindowFrameModel* model = new WindowFrameModel(xlights->AllModels);
     CommonDeserializeSteps(model, node, xlights, importing);
-    model->SetRotation(std::stof(node->GetAttribute(XmlNodeKeys::RotationAttribute, "3.0").ToStdString()));
     model->SetRotation((node->GetAttribute("Rotation", "CW") == "Clockwise" || node->GetAttribute("Rotation", "CW") == "CW") ? 0 : 1);
     model->Setup();
     return model;

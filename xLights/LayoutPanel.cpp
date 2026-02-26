@@ -2238,27 +2238,35 @@ void LayoutPanel::AddSelectedToExistingGroups() {
         for (auto const& idx : dlg.GetSelections()) {
             std::string groupName = choices.at(idx).ToStdString();
 
-            Model* addToGroup = xlights->GetModel(groupName);
+            Model* addToGroupModel = xlights->GetModel(groupName);
 
-            if (addToGroup != nullptr) {
-                wxXmlNode* node = addToGroup->GetModelXml();
-                wxArrayString groupModels = wxSplit(node->GetAttribute("models", ""), ',');
-
-                bool groupChanged = false;
-                for (const auto& selModel : selectedModels) {
-                    // only add if model doesn't already exist in group
-                    if (groupModels.Index(selModel) == -1) {
-                        groupChanged = true;
-                        groupModels.Add(selModel);
+            if (addToGroupModel != nullptr && addToGroupModel->GetDisplayAs() == "ModelGroup") {
+                ModelGroup* addToGroup = dynamic_cast<ModelGroup*>(addToGroupModel);
+                
+                if (addToGroup != nullptr) {
+                    // Get current model names in the group
+                    const std::vector<std::string>& groupModelNames = addToGroup->ModelNames();
+                    
+                    // Build a new list with existing models plus selected models
+                    std::vector<std::string> updatedModelNames(groupModelNames);
+                    bool groupChanged = false;
+                    
+                    for (const auto& selModel : selectedModels) {
+                        std::string modelNameStr = selModel.ToStdString();
+                        // only add if model doesn't already exist in group
+                        if (std::find(updatedModelNames.begin(), updatedModelNames.end(), modelNameStr) == updatedModelNames.end()) {
+                            groupChanged = true;
+                            updatedModelNames.push_back(modelNameStr);
+                        }
                     }
-                }
 
-                if (groupChanged) {
-                    wxString xmlModels = wxJoin(groupModels, ',');
-                    node->DeleteAttribute("models");
-                    node->AddAttribute("models", xmlModels);
-                    reload = true;
-                    selectgroupName = groupName;
+                    if (groupChanged) {
+                        // Set the updated model list - this will update the internal state
+                        addToGroup->SetModels(updatedModelNames);
+                        
+                        reload = true;
+                        selectgroupName = groupName;
+                    }
                 }
             }
         }
@@ -2285,24 +2293,36 @@ void LayoutPanel::RemoveSelectedFromExistingGroups() {
             }
             wxMultiChoiceDialog dlg(this, "Select groups to remove model from", "Model in Groups", choices);
             OptimiseDialogPosition(&dlg);
-            
+
             bool reload = false;
             if (dlg.ShowModal() == wxID_OK) {
                 xlights->AbortRender();
                 for (auto const& idx : dlg.GetSelections()) {
                     std::string groupName = choices.at(idx).ToStdString();
                     Model* grp = xlights->GetModel(groupName);
-                    if (grp != nullptr) {
-                        wxXmlNode* node = grp->GetModelXml();
-                        wxArrayString models = wxSplit(node->GetAttribute("models", ""), ',');
-                        for (const auto& m : models) {
-                            if (m == selectedModel) {
-                                models.Remove(selectedModel);
-                                wxString xmlModels = wxJoin(models, ',');
-                                node->DeleteAttribute("models");
-                                node->AddAttribute("models", xmlModels);
+                    if (grp != nullptr && grp->GetDisplayAs() == "ModelGroup") {
+                        ModelGroup* modelGroup = dynamic_cast<ModelGroup*>(grp);
+
+                        if (modelGroup != nullptr) {
+                            // Get current model names in the group
+                            const std::vector<std::string>& groupModelNames = modelGroup->ModelNames();
+
+                            // Build a new list with the selected model removed
+                            std::vector<std::string> updatedModelNames;
+                            bool groupChanged = false;
+
+                            for (const auto& modelName : groupModelNames) {
+                                if (modelName != selectedModel) {
+                                    updatedModelNames.push_back(modelName);
+                                } else {
+                                    groupChanged = true;
+                                }
+                            }
+
+                            if (groupChanged) {
+                                // Set the updated model list - this will update the internal state
+                                modelGroup->SetModels(updatedModelNames);
                                 reload = true;
-                                break;
                             }
                         }
                     }
