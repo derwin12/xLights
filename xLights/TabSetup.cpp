@@ -425,8 +425,8 @@ bool xLightsFrame::SetDir(const wxString& newdir, bool permanent)
     kbf.SetFullName(XLIGHTS_KEYBINDING_FILE);
     mainSequencer->keyBindings.Load(kbf);
 
-    LoadEffectsFile();
-
+    // Merge controllers from base show folder before loading effects file
+    // (model/view object XML merging now happens inside LoadEffectsFile before LoadModels)
     if (_outputManager.IsAutoUpdateFromBaseShowDir() && _outputManager.GetBaseShowDir() != "") {
         logger_base.debug("Updating from base folder on show folder open.");
         if (!ObtainAccessToURL(_outputManager.GetBaseShowDir(), true)) {
@@ -434,8 +434,16 @@ bool xLightsFrame::SetDir(const wxString& newdir, bool permanent)
             PromptForDirectorySelection("Reselect Base Show Directory", dstr);
             _outputManager.SetBaseShowDir(dstr);
         }
-        UpdateFromBaseShowFolder(false);
+        if (_outputManager.MergeFromBase(false)) {
+            _outputModelManager.AddASAPWork(OutputModelManager::WORK_UPDATE_NETWORK_LIST, "SetDir-controller");
+            _outputModelManager.AddASAPWork(OutputModelManager::WORK_CALCULATE_START_CHANNELS, "SetDir-controller");
+            _outputModelManager.AddASAPWork(OutputModelManager::WORK_RESEND_CONTROLLER_CONFIG, "SetDir-controller");
+            _outputModelManager.AddASAPWork(OutputModelManager::WORK_NETWORK_CHANGE, "SetDir-controller");
+            _outputModelManager.AddASAPWork(OutputModelManager::WORK_NETWORK_CHANNELSCHANGE, "SetDir-controller");
+        }
     }
+
+    LoadEffectsFile();
 
     logger_base.debug("Get start channels right.");
     // make sure these won't refire

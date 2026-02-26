@@ -12,6 +12,7 @@
 #include <wx/msgdlg.h>
 
 #include "ViewObjectManager.h"
+#include "UtilFunctions.h"
 #include "GridlinesObject.h"
 #include "RulerObject.h"
 #include "ImageObject.h"
@@ -149,63 +150,182 @@ void ViewObjectManager::Delete(const std::string &name) {
     }
 }
 
-bool ViewObjectManager::MergeFromBase(const std::string& baseShowDir, bool prompt)
+// Helper: find a child XML node by tag name and "name" attribute
+static wxXmlNode* FindVOChildByNameAttr(wxXmlNode* parent, const wxString& childTag, const wxString& name)
+{
+    for (wxXmlNode* n = parent->GetChildren(); n != nullptr; n = n->GetNext()) {
+        if (n->GetName() == childTag && n->GetAttribute("name") == name) {
+            return n;
+        }
+    }
+    return nullptr;
+}
+
+// Helper: set attribute (delete + re-add)
+static void SetVOXmlAttribute(wxXmlNode* node, const wxString& attr, const wxString& value)
+{
+    if (node->HasAttribute(attr)) node->DeleteAttribute(attr);
+    node->AddAttribute(attr, value);
+}
+
+// Helper: compare name attributes on child nodes
+static bool CheckVONameAttrs(wxXmlNode* nn, wxXmlNode* cc)
+{
+    if (nn->HasAttribute("name")) {
+        return (cc->GetAttribute("name") == nn->GetAttribute("name"));
+    } else if (nn->HasAttribute("Name")) {
+        return (cc->GetAttribute("Name") == nn->GetAttribute("Name"));
+    }
+    return true;
+}
+
+// Helper: compare two XML nodes for changes
+static bool IsVOXmlNodeChanged(wxXmlNode* local, wxXmlNode* base)
+{
+    for (wxXmlAttribute* a = base->GetAttributes(); a != nullptr; a = a->GetNext()) {
+        if (!local->HasAttribute(a->GetName()) || local->GetAttribute(a->GetName()) != a->GetValue()) {
+            return true;
+        }
+    }
+    for (wxXmlNode* nn = base->GetChildren(); nn != nullptr; nn = nn->GetNext()) {
+        bool found = false;
+        for (wxXmlNode* cc = local->GetChildren(); cc != nullptr; cc = cc->GetNext()) {
+            if (cc->GetName() == nn->GetName() && CheckVONameAttrs(nn, cc)) {
+                found = true;
+                for (wxXmlAttribute* a = nn->GetAttributes(); a != nullptr; a = a->GetNext()) {
+                    if (!cc->HasAttribute(a->GetName()) || cc->GetAttribute(a->GetName()) != a->GetValue()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if (!found) return true;
+    }
+    return false;
+}
+
+// Shared method: merge base view objects XML into current XML, updating currentObjectsNode in-place.
+// Populates changedObjects with names of objects that were added or updated.
+static bool MergeBaseIntoCurrentObjectsXml(wxXmlNode* currentObjectsNode, wxXmlNode* baseObjectsNode,
+                                           std::vector<std::string>& changedObjects)
 {
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     bool changed = false;
 
-    wxXmlDocument doc;
-    doc.Load(baseShowDir + GetPathSeparator() + XLIGHTS_RGBEFFECTS_FILE);
-    if (!doc.IsOk()) {
-        return false;
+    if (baseObjectsNode == nullptr || currentObjectsNode == nullptr) return false;
+
+    for (wxXmlNode* bo = baseObjectsNode->GetChildren(); bo != nullptr; bo = bo->GetNext()) {
+        if (bo->GetName() != "view_object") continue;
+        auto name = bo->GetAttribute("name");
+        if (name.empty()) continue;
+
+        wxXmlNode* local = FindVOChildByNameAttr(currentObjectsNode, "view_object", name);
+
+        if (local == nullptr) {
+            // Object does not exist locally -- add it
+            wxXmlNode* copy = new wxXmlNode(*bo);
+            SetVOXmlAttribute(copy, "FromBase", "1");
+            currentObjectsNode->AddChild(copy);
+            changedObjects.push_back(name.ToStdString());
+            changed = true;
+            logger_base.debug("MergeBase: Adding view object from base: '%s'.", (const char*)name.c_str());
+        } else if (local->GetAttribute("FromBase") == "1") {
+            // Object exists and came from base -- update if changed
+            if (IsVOXmlNodeChanged(local, bo)) {
+                wxXmlNode* copy = new wxXmlNode(*bo);
+                SetVOXmlAttribute(copy, "FromBase", "1");
+
+                currentObjectsNode->InsertChildAfter(copy, local);
+                currentObjectsNode->RemoveChild(local);
+                delete local;
+                changedObjects.push_back(name.ToStdString());
+                changed = true;
+                logger_base.debug("MergeBase: Updating view object from base: '%s'.", (const char*)name.c_str());
+            }
+        }
+        // If object exists locally without FromBase, skip silently
     }
 
-    wxXmlNode* objects = nullptr;
+    return changed;
+}
+
+// Load base XML document and find <view_objects> node
+static bool LoadBaseObjectXmlNodes(const std::string& baseShowDir, wxXmlDocument& doc, wxXmlNode*& baseObjects)
+{
+    baseObjects = nullptr;
+    doc.Load(baseShowDir + GetPathSeparator() + XLIGHTS_RGBEFFECTS_FILE);
+    if (!doc.IsOk()) return false;
+
     for (wxXmlNode* m = doc.GetRoot(); m != nullptr; m = m->GetNext()) {
         for (wxXmlNode* mm = m->GetChildren(); mm != nullptr; mm = mm->GetNext()) {
-            if (mm->GetName() == "view_objects") {
-                objects = mm;
-            }
+            if (mm->GetName() == "view_objects") baseObjects = mm;
         }
     }
+    return true;
+}
 
-    if (objects != nullptr) {
-        // compare models and load changes/new models
-        for (wxXmlNode* o = objects->GetChildren(); o != nullptr; o = o->GetNext()) {
-            // we only update existing models that came from the base
-            auto name = o->GetAttribute("name");
+bool ViewObjectManager::MergeBaseXml(const std::string& baseShowDir, wxXmlNode* localViewObjectsNode)
+{
+    wxXmlDocument baseDoc;
+    wxXmlNode* baseObjects = nullptr;
+    if (!LoadBaseObjectXmlNodes(baseShowDir, baseDoc, baseObjects)) return false;
 
+    std::vector<std::string> changedObjects;
+    return MergeBaseIntoCurrentObjectsXml(localViewObjectsNode, baseObjects, changedObjects);
+}
+
+bool ViewObjectManager::MergeFromBase(const std::string& baseShowDir, bool prompt)
+{
+    wxXmlDocument baseDoc;
+    wxXmlNode* baseObjects = nullptr;
+    if (!LoadBaseObjectXmlNodes(baseShowDir, baseDoc, baseObjects)) return false;
+    if (baseObjects == nullptr) return false;
+
+    // Handle prompt mode: ask user about non-FromBase objects that clash with base
+    if (prompt) {
+        for (wxXmlNode* bo = baseObjects->GetChildren(); bo != nullptr; bo = bo->GetNext()) {
+            if (bo->GetName() != "view_object") continue;
+            auto name = bo->GetAttribute("name");
+            if (name.empty()) continue;
             auto curr = GetObject(name);
-
-            if (curr == nullptr) {
-                // model does not exist
-                changed = true;
-                if (o->HasAttribute("FromBase")) o->DeleteAttribute("FromBase");
-                o->AddAttribute("FromBase", "1");
-                createAndAddObject(new wxXmlNode(*o));
-                logger_base.debug("Adding object from base show folder: '%s'.", (const char*)name.c_str());
-            } else {
-                bool force = false;
-                if (prompt && !curr->IsFromBase()) {
-                    force = wxMessageBox(wxString::Format("Object %s found that clashes with base show directory. Do you want to take the base show directory version?", name), "Object clash", wxICON_QUESTION | wxYES_NO, xlights) == wxYES;
-                }
-
-                if (force || curr->IsFromBase()) {
-                    // model does exist ... update it
-                    if (force || curr->IsXmlChanged(o)) {
-                        if (o->HasAttribute("FromBase")) o->DeleteAttribute("FromBase");
-                        o->AddAttribute("FromBase", "1");
-                        changed = true;
-                        Delete(name);
-                        createAndAddObject(new wxXmlNode(*o));
-                        logger_base.debug("Updating object from base show folder: '%s'.", (const char*)name.c_str());
-                    }
-                } else {
-                    logger_base.debug("Object '%s' NOT updated from base show folder as it never came from there.", (const char*)name.c_str());
+            if (curr != nullptr && !curr->IsFromBase()) {
+                if (wxMessageBox(wxString::Format("Object %s found that clashes with base show directory. Do you want to take the base show directory version?", name),
+                                 "Object clash", wxICON_QUESTION | wxYES_NO, xlights) == wxYES) {
+                    curr->SetFromBase(true);
                 }
             }
         }
     }
+
+    // Serialize all current view objects to a temporary XML node for comparison
+    wxXmlNode* currentObjectsNode = new wxXmlNode(wxXML_ELEMENT_NODE, "view_objects");
+    {
+        XmlSerializingVisitor visitor{currentObjectsNode};
+        for (auto v = begin(); v != end(); ++v) {
+            ViewObject* obj = v->second;
+            obj->Accept(visitor);
+        }
+    }
+
+    // Run the shared merge
+    std::vector<std::string> changedObjects;
+    bool changed = MergeBaseIntoCurrentObjectsXml(currentObjectsNode, baseObjects, changedObjects);
+
+    // Apply changes: replace changed objects with new ones created from the updated XML
+    for (const auto& name : changedObjects) {
+        wxXmlNode* updatedNode = FindVOChildByNameAttr(currentObjectsNode, "view_object", name);
+        if (updatedNode != nullptr) {
+            wxXmlNode* copy = new wxXmlNode(*updatedNode);
+            auto curr = GetViewObject(name);
+            if (curr != nullptr) {
+                Delete(name);
+            }
+            createAndAddObject(copy);
+        }
+    }
+
+    // Clean up temporary XML node
+    delete currentObjectsNode;
 
     return changed;
 }

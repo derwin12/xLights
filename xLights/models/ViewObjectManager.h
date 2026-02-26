@@ -32,6 +32,7 @@ public:
     void Delete(const std::string &name);
     bool Rename(const std::string &oldName, const std::string &newName);
     bool MergeFromBase(const std::string& baseShowDir, bool prompt);
+    static bool MergeBaseXml(const std::string& baseShowDir, wxXmlNode* localViewObjectsNode);
 
     void LoadViewObjects(wxXmlNode *objectNode);
 

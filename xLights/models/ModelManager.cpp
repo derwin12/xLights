@@ -8,6 +8,8 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#include <cmath>
+
 #include <wx/msgdlg.h>
 #include <wx/stdpaths.h>
 #include <wx/xml/xml.h>
@@ -1387,25 +1389,7 @@ void ModelManager::ReplaceModel(const std::string &name, Model* nm) {
         std::lock_guard<std::recursive_mutex> _lock(_modelMutex);
         Model *oldm = models[name];
         models[nm->name] = nm;
-        ResetModelGroups();
-
-        if ("ModelGroup" == nm->GetDisplayAs()) {
-            if (nm->GetModelXml()->GetParent() != groupNode) {
-                if (nm->GetModelXml()->GetParent() != nullptr) {
-                    nm->GetModelXml()->GetParent()->RemoveChild(nm->GetModelXml());
-                }
-                groupNode->AddChild(nm->GetModelXml());
-            }
-        } else {
-            if (nm->GetModelXml()->GetParent() != modelNode) {
-                if (nm->GetModelXml()->GetParent() != nullptr) {
-                    nm->GetModelXml()->GetParent()->RemoveChild(nm->GetModelXml());
-                }
-                modelNode->AddChild(nm->GetModelXml());
-            }
-        }
-        oldm->GetModelXml()->GetParent()->RemoveChild(oldm->GetModelXml());
-        delete oldm->GetModelXml();
+        ResetModelGroups();       
         delete oldm;
     }
 }
@@ -1566,151 +1550,420 @@ std::string MergeModels(const std::string& ml1, const std::string& ml2)
     return res;
 }
 
-bool ModelManager::MergeFromBase(const std::string& baseShowDir, bool prompt)
+// Helper: find a child XML node with a given tag name and "name" attribute value
+static wxXmlNode* FindChildByNameAttr(wxXmlNode* parent, const wxString& childTag, const wxString& name)
+{
+    for (wxXmlNode* n = parent->GetChildren(); n != nullptr; n = n->GetNext()) {
+        if (n->GetName() == childTag && n->GetAttribute("name") == name) {
+            return n;
+        }
+    }
+    return nullptr;
+}
+
+// Helper: set an attribute on a node (delete + re-add pattern)
+static void SetXmlAttribute(wxXmlNode* node, const wxString& attr, const wxString& value)
+{
+    if (node->HasAttribute(attr)) node->DeleteAttribute(attr);
+    node->AddAttribute(attr, value);
+}
+
+// Helper: compare name attributes on child nodes for XML comparison
+static bool CheckNameAttrs(wxXmlNode* nn, wxXmlNode* cc)
+{
+    if (nn->HasAttribute("name")) {
+        return (cc->GetAttribute("name") == nn->GetAttribute("name"));
+    } else if (nn->HasAttribute("Name")) {
+        return (cc->GetAttribute("Name") == nn->GetAttribute("Name"));
+    }
+    return true;
+}
+
+
+static std::set<std::string> FLOAT_ATTRIBUTES = {
+    XmlNodeKeys::WorldPosXAttribute,
+    XmlNodeKeys::WorldPosYAttribute,
+    XmlNodeKeys::WorldPosZAttribute,
+    XmlNodeKeys::RotateXAttribute,
+    XmlNodeKeys::RotateYAttribute,
+    XmlNodeKeys::RotateZAttribute,
+    XmlNodeKeys::ScaleXAttribute,
+    XmlNodeKeys::ScaleYAttribute,
+    XmlNodeKeys::ScaleZAttribute,
+    XmlNodeKeys::LengthAttribute,
+    XmlNodeKeys::X2Attribute,
+    XmlNodeKeys::Y2Attribute,
+    XmlNodeKeys::Z2Attribute,
+};
+
+#ifdef DEBUG_MERGEFROMBASE
+static std::set<std::string> IGNORE_ATTRIBUTES = {
+    "ModelBrightness",
+    "RotateX",
+    "CustomModel"
+};
+#endif
+static std::set<std::string> BASE_EMPTY = {
+    "StrandNames",
+    "NodeNames",
+    "PixelSpacing",
+    "PixelCount",
+    "PixelType"
+};
+
+// Helper: compare two XML nodes to detect changes (standalone version operating on raw nodes)
+static bool IsXmlNodeChanged(wxXmlNode* local, wxXmlNode* base)
+{
+    // Check if base has attributes that differ from local
+    bool changed = false;
+    for (wxXmlAttribute* a = base->GetAttributes(); a != nullptr; a = a->GetNext()) {
+        if (!local->HasAttribute(a->GetName()) || local->GetAttribute(a->GetName()) != a->GetValue()) {
+            if (a->GetName() != "StartChannel" || !local->HasAttribute("Controller")) {
+                // For float attributes, compare rounded to 4 decimal places as older versions of xLights only output to 4 decimals
+                if (FLOAT_ATTRIBUTES.count(a->GetName().ToStdString()) > 0 && local->HasAttribute(a->GetName())) {
+                    double baseVal = 0.0, localVal = 0.0;
+                    a->GetValue().ToDouble(&baseVal);
+                    local->GetAttribute(a->GetName()).ToDouble(&localVal);
+                    if (std::round(baseVal * 10000.0) == std::round(localVal * 10000.0)) {
+                        continue;
+                    }
+                }
+                // In some cases, old versions of xLights would put an empty attribute but the new version will not put the attribute at all.
+                if (!(BASE_EMPTY.contains(a->GetName().ToStdString()) && a->GetValue().IsEmpty() && !local->HasAttribute(a->GetName()))) {
+#ifdef DEBUG_MERGEFROMBASE
+                    if (!changed) {
+                        printf("%s\n", local->GetAttribute("name").ToStdString().c_str());
+                    }
+                    printf("  %s:  %s\n", a->GetName().ToStdString().c_str(), a->GetValue().ToStdString().c_str());
+                    printf("          %s\n", local->GetAttribute(a->GetName()).ToStdString().c_str());
+                    changed = true;
+#else
+                    return true;
+#endif
+                }
+            }
+        }
+    }
+    if (changed) {
+        return true;
+    }
+
+    // Check child nodes
+    for (wxXmlNode* nn = base->GetChildren(); nn != nullptr; nn = nn->GetNext()) {
+        bool found = false;
+        for (wxXmlNode* cc = local->GetChildren(); cc != nullptr; cc = cc->GetNext()) {
+            if (cc->GetName() == nn->GetName() && CheckNameAttrs(nn, cc)) {
+                found = true;
+                for (wxXmlAttribute* a = nn->GetAttributes(); a != nullptr; a = a->GetNext()) {
+                    if (!cc->HasAttribute(a->GetName()) || cc->GetAttribute(a->GetName()) != a->GetValue()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if (!found) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Helper: copy preserved local controller attributes onto a new node replacing a FromBase model
+static void PreserveLocalControllerAttrs(wxXmlNode* localNode, wxXmlNode* newNode)
+{
+    // Find the local port from ControllerConnection child
+    wxString port;
+    for (wxXmlNode* p = localNode->GetChildren(); p != nullptr; p = p->GetNext()) {
+        if (p->GetName() == "ControllerConnection") {
+            port = p->GetAttribute("Port");
+        }
+    }
+
+    if (!port.empty()) {
+        // Preserve ModelChain if local has one
+        wxString modelChain = localNode->GetAttribute("ModelChain");
+        if (!modelChain.empty()) {
+            SetXmlAttribute(newNode, "ModelChain", modelChain);
+        }
+        SetXmlAttribute(newNode, "StartChannel", localNode->GetAttribute("StartChannel"));
+        SetXmlAttribute(newNode, "Controller", localNode->GetAttribute("Controller"));
+    }
+}
+
+// Helper: copy the local ControllerConnection port onto the new node's ControllerConnection child if it has no port
+static void PreserveLocalControllerPort(wxXmlNode* localNode, wxXmlNode* newNode)
+{
+    wxString port;
+    for (wxXmlNode* p = localNode->GetChildren(); p != nullptr; p = p->GetNext()) {
+        if (p->GetName() == "ControllerConnection") {
+            port = p->GetAttribute("Port");
+        }
+    }
+    if (!port.empty()) {
+        for (wxXmlNode* bp = newNode->GetChildren(); bp != nullptr; bp = bp->GetNext()) {
+            if (bp->GetName() == "ControllerConnection") {
+                if (!bp->HasAttribute("Port")) {
+                    bp->AddAttribute("Port", port);
+                }
+            }
+        }
+    }
+}
+static void RemoveControllerConnection(wxXmlNode *node) {
+    for (wxXmlNode* p = node->GetChildren(); p != nullptr; p = p->GetNext()) {
+        if (p->GetName() == "ControllerConnection") {
+            node->RemoveChild(p);
+            return;
+        }
+    }
+}
+
+// Shared method: merge base XML into current XML, updating currentModelsNode and currentGroupsNode in-place.
+// Populates changedModels and changedGroups with names of models/groups that were added or updated.
+// Only updates models/groups that are new or have FromBase="1" on the current side.
+static bool MergeBaseIntoCurrentXml(wxXmlNode* currentModelsNode, wxXmlNode* currentGroupsNode,
+                                    wxXmlNode* baseModelsNode, wxXmlNode* baseGroupsNode,
+                                    std::vector<std::string>& changedModels,
+                                    std::vector<std::string>& changedGroups)
 {
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     bool changed = false;
 
-    wxXmlDocument doc;
-    doc.Load(baseShowDir + GetPathSeparator() + XLIGHTS_RGBEFFECTS_FILE);
-    if (!doc.IsOk()) {
-        return false;
+    if (baseModelsNode != nullptr && currentModelsNode != nullptr) {
+        for (wxXmlNode* bm = baseModelsNode->GetChildren(); bm != nullptr; bm = bm->GetNext()) {
+            if (bm->GetName() != "model") continue;
+            auto name = bm->GetAttribute("name");
+            if (name.empty()) continue;
+
+            wxXmlNode* local = FindChildByNameAttr(currentModelsNode, "model", name);
+
+            if (local == nullptr) {
+                // Model does not exist locally -- add it
+                wxXmlNode* copy = new wxXmlNode(*bm);
+                SetXmlAttribute(copy, "FromBase", "1");
+                currentModelsNode->AddChild(copy);
+                changedModels.push_back(name.ToStdString());
+                changed = true;
+                logger_base.debug("MergeBase: Adding model from base: '%s'.", (const char*)name.c_str());
+            } else if (local->GetAttribute("FromBase") == "1") {
+                // Model exists and came from base -- update if changed
+                if (IsXmlNodeChanged(local, bm)) {
+                    wxXmlNode* copy = new wxXmlNode(*bm);
+                    SetXmlAttribute(copy, "FromBase", "1");
+                    PreserveLocalControllerAttrs(local, copy);
+                    PreserveLocalControllerPort(local, copy);
+
+                    currentModelsNode->InsertChildAfter(copy, local);
+                    currentModelsNode->RemoveChild(local);
+                    delete local;
+                    changedModels.push_back(name.ToStdString());
+                    changed = true;
+                    logger_base.debug("MergeBase: Updating model from base: '%s'.", (const char*)name.c_str());
+                }
+            }
+            // If model exists locally without FromBase, skip silently
+        }
     }
 
-    // TODO may also want to bring in some show level things
+    if (baseGroupsNode != nullptr && currentGroupsNode != nullptr) {
+        for (wxXmlNode* bg = baseGroupsNode->GetChildren(); bg != nullptr; bg = bg->GetNext()) {
+            if (bg->GetName() != "modelGroup") continue;
+            auto name = bg->GetAttribute("name");
+            if (name.empty()) continue;
 
-    wxXmlNode* models = nullptr;
-    wxXmlNode* modelgroups = nullptr;
+            wxXmlNode* local = FindChildByNameAttr(currentGroupsNode, "modelGroup", name);
+
+            if (local == nullptr) {
+                // Group does not exist locally -- add it
+                wxXmlNode* copy = new wxXmlNode(*bg);
+                SetXmlAttribute(copy, "FromBase", "1");
+                currentGroupsNode->AddChild(copy);
+                changedGroups.push_back(name.ToStdString());
+                changed = true;
+                logger_base.debug("MergeBase: Adding model group from base: '%s'.", (const char*)name.c_str());
+            } else if (local->GetAttribute("FromBase") == "1") {
+                // Group exists and came from base -- merge model lists and update if changed
+                auto baseModelList = bg->GetAttribute("models");
+                auto localModelList = local->GetAttribute("models");
+                std::string mergedList = MergeModels(baseModelList.ToStdString(), localModelList.ToStdString());
+
+                // Create a temp copy with merged model list to compare
+                wxXmlNode* copy = new wxXmlNode(*bg);
+                SetXmlAttribute(copy, "models", mergedList);
+                SetXmlAttribute(copy, "FromBase", "1");
+                copy->DeleteAttribute("selected");
+                copy->DeleteAttribute("BaseModels");
+
+                RemoveControllerConnection(copy);
+
+                // Remove ControllerConnection from local copy for comparison purposes only
+                wxXmlNode localCopy(*local);
+                RemoveControllerConnection(&localCopy);
+
+                if (IsXmlNodeChanged(&localCopy, copy)) {
+                    SetXmlAttribute(copy, "BaseModels", baseModelList);
+                    // Preserve local X/Y centre offsets
+                    wxString xOffset = local->GetAttribute("GridCentreX", "");
+                    wxString yOffset = local->GetAttribute("GridCentreY", "");
+                    if (!xOffset.empty()) SetXmlAttribute(copy, "GridCentreX", xOffset);
+                    if (!yOffset.empty()) SetXmlAttribute(copy, "GridCentreY", yOffset);
+
+                    currentGroupsNode->InsertChildAfter(copy, local);
+                    currentGroupsNode->RemoveChild(local);
+                    delete local;
+                    changedGroups.push_back(name.ToStdString());
+                    changed = true;
+                    logger_base.debug("MergeBase: Updating model group from base: '%s'.", (const char*)name.c_str());
+                } else {
+                    delete copy;
+                }
+            }
+            // If group exists locally without FromBase, skip silently
+        }
+    }
+
+    return changed;
+}
+
+// Load base XML document and find <models> and <modelGroups> nodes
+static bool LoadBaseXmlNodes(const std::string& baseShowDir, wxXmlDocument& doc,
+                             wxXmlNode*& baseModels, wxXmlNode*& baseGroups)
+{
+    baseModels = nullptr;
+    baseGroups = nullptr;
+    doc.Load(baseShowDir + GetPathSeparator() + XLIGHTS_RGBEFFECTS_FILE);
+    if (!doc.IsOk()) return false;
+
     for (wxXmlNode* m = doc.GetRoot(); m != nullptr; m = m->GetNext()) {
         for (wxXmlNode* mm = m->GetChildren(); mm != nullptr; mm = mm->GetNext()) {
-            if (mm->GetName() == "models") {
-                models = mm;
-            } else if (mm->GetName() == "modelGroups") {
-                modelgroups = mm;
-            }
+            if (mm->GetName() == "models") baseModels = mm;
+            else if (mm->GetName() == "modelGroups") baseGroups = mm;
         }
     }
+    return true;
+}
 
-    if (models != nullptr) {
-        // compare models and load changes/new models
-        for (wxXmlNode* m = models->GetChildren(); m != nullptr; m = m->GetNext()) {
-            // we only update existing models that came from the base
-            auto name = m->GetAttribute("name");
+bool ModelManager::MergeBaseXml(const std::string& baseShowDir, wxXmlNode* localModelsNode, wxXmlNode* localGroupsNode)
+{
+    wxXmlDocument baseDoc;
+    wxXmlNode* baseModels = nullptr;
+    wxXmlNode* baseGroups = nullptr;
+    if (!LoadBaseXmlNodes(baseShowDir, baseDoc, baseModels, baseGroups)) return false;
 
+    std::vector<std::string> changedModels;
+    std::vector<std::string> changedGroups;
+    return MergeBaseIntoCurrentXml(localModelsNode, localGroupsNode,
+                                   baseModels, baseGroups,
+                                   changedModels, changedGroups);
+}
+
+bool ModelManager::MergeFromBase(const std::string& baseShowDir, bool prompt)
+{
+    bool changed = false;
+
+    wxXmlDocument baseDoc;
+    wxXmlNode* baseModels = nullptr;
+    wxXmlNode* baseGroups = nullptr;
+    if (!LoadBaseXmlNodes(baseShowDir, baseDoc, baseModels, baseGroups)) return false;
+    if (baseModels == nullptr) return false;
+
+    // Handle prompt mode: ask user about non-FromBase models that clash with base
+    if (prompt) {
+        for (wxXmlNode* bm = baseModels->GetChildren(); bm != nullptr; bm = bm->GetNext()) {
+            if (bm->GetName() != "model") continue;
+            auto name = bm->GetAttribute("name");
+            if (name.empty()) continue;
             auto curr = GetModel(name);
-
-            if (curr == nullptr) {
-                // model does not exist
-                changed = true;
-                if (m->HasAttribute("FromBase")) m->DeleteAttribute("FromBase");
-                m->AddAttribute("FromBase", "1");
-                createAndAddModel(new wxXmlNode(*m), xlights->modelPreview->getWidth(), xlights->modelPreview->getHeight());
-                logger_base.debug("Adding model from base show folder: '%s'.", (const char*)name.c_str());
-            } else {
-                bool force = false;
-                if (prompt && !curr->IsFromBase()) {
-                    force = wxMessageBox(wxString::Format("Model %s found that clashes with base show directory. Do you want to take the base show directory version?", name), "Model clash", wxICON_QUESTION | wxYES_NO, xlights) == wxYES;
-                }
-
-                if (force || curr->IsFromBase()) {
-                    // model does exist ... update it
-                    if (force || curr->IsXmlChanged(m)) {
-                        if (m->HasAttribute("FromBase")) m->DeleteAttribute("FromBase");
-                        m->AddAttribute("FromBase", "1");
-                        wxString port = "";
-                        for (wxXmlNode* p = curr->GetModelXml()->GetChildren(); p != nullptr; p = p->GetNext()) {
-                            if (p->GetName() == "ControllerConnection") port = p->GetAttribute("Port");
-                        }
-                        if (!port.empty()) {
-                            if (curr->GetModelXml()->GetAttribute("ModelChain") != "") {
-                                m->DeleteAttribute("ModelChain");
-                                m->AddAttribute("ModelChain", curr->GetModelXml()->GetAttribute("ModelChain"));
-                            }
-                            m->DeleteAttribute("StartChannel");
-                            m->AddAttribute("StartChannel", curr->GetModelXml()->GetAttribute("StartChannel"));
-                            m->DeleteAttribute("Controller");
-                            m->AddAttribute("Controller", curr->GetModelXml()->GetAttribute("Controller"));
-                        }
-                        changed = true;
-                        Model* newm = CreateModel(new wxXmlNode(*m));
-                        for (wxXmlNode* bp = m->GetChildren(); bp != nullptr; bp = bp->GetNext()) {
-                            if (bp->GetName() == "ControllerConnection") {
-                                if (!bp->HasAttribute("Port")) newm->SetControllerPort(wxAtoi(port));
-                            }
-                        }
-                        ReplaceModel(name, newm);
-                        RecalcStartChannels();
-                        logger_base.debug("Updating model from base show folder: '%s'.", (const char*)name.c_str());
-                    }
-                } else {
-                    logger_base.debug("Model '%s' NOT updated from base show folder as it never came from there.", (const char*)name.c_str());
+            if (curr != nullptr && !curr->IsFromBase()) {
+                if (wxMessageBox(wxString::Format("Model %s found that clashes with base show directory. Do you want to take the base show directory version?", name),
+                                 "Model clash", wxICON_QUESTION | wxYES_NO, xlights) == wxYES) {
+                    curr->SetFromBase(true);
                 }
             }
         }
-        if (modelgroups != nullptr) {
-            // compare model groups and load changes/new model groups
-            for (wxXmlNode* m = modelgroups->GetChildren(); m != nullptr; m = m->GetNext()) {
-                auto name = m->GetAttribute("name");
-
+        if (baseGroups != nullptr) {
+            for (wxXmlNode* bg = baseGroups->GetChildren(); bg != nullptr; bg = bg->GetNext()) {
+                if (bg->GetName() != "modelGroup") continue;
+                auto name = bg->GetAttribute("name");
+                if (name.empty()) continue;
                 auto curr = GetModel(name);
-
-                if (curr == nullptr) {
-                    changed = true;
-                    if (m->HasAttribute("FromBase"))
-                        m->DeleteAttribute("FromBase");
-                    m->AddAttribute("FromBase", "1");
-                    createAndAddModel(new wxXmlNode(*m), xlights->modelPreview->getWidth(), xlights->modelPreview->getHeight());
-                    logger_base.debug("Adding model group from base show folder: '%s'.", (const char*)name.c_str());
-                } else {
-                    bool force = false;
-                    if (prompt && !curr->IsFromBase()) {
-                        force = wxMessageBox(wxString::Format("Model Group %s found that clashes with base show directory. Do you want to take the base show directory version?", name), "Model group clash", wxICON_QUESTION | wxYES_NO, xlights) == wxYES;
-                    }
-
-                    // we only update existing models that came from the base via a previous import
-                    if (force || curr->IsFromBase()) {
-                        auto mg = dynamic_cast<ModelGroup*>(curr);
-
-                        if (mg != nullptr) {
-                            // we need to merge in any models in the current rgbeffects file after the ones inhereted from the base
-                            auto models1 = m->GetAttribute("models");
-                            auto models2 = mg->ModelNames();
-                            std::string mm2 = "";
-                            for (const auto& it : models2) {
-                                if (mm2 != "")
-                                    mm2 += ",";
-                                mm2 += it;
-                            }
-                            m->DeleteAttribute("models");
-                            m->AddAttribute("models", MergeModels(models1, mm2));
-                            if (force || curr->IsXmlChanged(m)) {
-                                if (m->HasAttribute("FromBase"))
-                                    m->DeleteAttribute("FromBase");
-                                m->AddAttribute("FromBase", "1");
-                                m->AddAttribute("BaseModels", models1); // keep a copy of the models from the base show folder as we may want to prevent these being removed
-                                changed = true;
-
-                                int currentOffsetX = mg->GetXCentreOffset();
-                                int currentOffsetY = mg->GetYCentreOffset();
-                                Model* newm = CreateModel(new wxXmlNode(*m));
-                                auto newmg = dynamic_cast<ModelGroup*>(newm);
-                                if (newmg != nullptr) {
-                                    newmg->SetXCentreOffset(currentOffsetX);
-                                    newmg->SetYCentreOffset(currentOffsetY);
-                                    logger_base.debug("Restored offsets after replace - X: %d, Y: %d", currentOffsetX, currentOffsetY);
-                                }
-
-                                ReplaceModel(name, newm);
-                                logger_base.debug("Updating model group from base show folder: '%s'.", (const char*)name.c_str());
-                            }
-                        }
-                    } else {
-                        logger_base.debug("Model Group '%s' NOT updated from base show folder as it never came from there.", (const char*)name.c_str());
+                if (curr != nullptr && !curr->IsFromBase()) {
+                    if (wxMessageBox(wxString::Format("Model Group %s found that clashes with base show directory. Do you want to take the base show directory version?", name),
+                                     "Model group clash", wxICON_QUESTION | wxYES_NO, xlights) == wxYES) {
+                        curr->SetFromBase(true);
                     }
                 }
             }
         }
     }
+
+    // Serialize all current models to a temporary XML document for comparison
+    XmlSerializer serializer;
+    wxXmlNode* currentModelsNode = new wxXmlNode(wxXML_ELEMENT_NODE, "models");
+    wxXmlNode* currentGroupsNode = new wxXmlNode(wxXML_ELEMENT_NODE, "modelGroups");
+
+    {
+        XmlSerializingVisitor visitor{currentModelsNode};
+        for (auto m = begin(); m != end(); ++m) {
+            Model* model = m->second;
+            if (model->GetDisplayAs() != "ModelGroup") {
+                model->Accept(visitor);
+            }
+        }
+    }
+    {
+        XmlSerializingVisitor visitor{currentGroupsNode};
+        for (auto m = begin(); m != end(); ++m) {
+            Model* model = m->second;
+            if (model->GetDisplayAs() == "ModelGroup") {
+                model->Accept(visitor);
+            }
+        }
+    }
+
+    // Run the shared merge
+    std::vector<std::string> changedModels;
+    std::vector<std::string> changedGroups;
+    changed = MergeBaseIntoCurrentXml(currentModelsNode, currentGroupsNode,
+                                       baseModels, baseGroups,
+                                       changedModels, changedGroups);
+
+    // Apply changes: replace changed models with new ones created from the updated XML
+    for (const auto& name : changedModels) {
+        wxXmlNode* updatedNode = FindChildByNameAttr(currentModelsNode, "model", name);
+        if (updatedNode != nullptr) {
+            wxXmlNode* copy = new wxXmlNode(*updatedNode);
+            auto curr = GetModel(name);
+            if (curr != nullptr) {
+                Model* newm = CreateModel(copy, previewWidth, previewHeight);
+                ReplaceModel(name, newm);
+            } else {
+                createAndAddModel(copy, previewWidth, previewHeight);
+            }
+        }
+    }
+    for (const auto& name : changedGroups) {
+        wxXmlNode* updatedNode = FindChildByNameAttr(currentGroupsNode, "modelGroup", name);
+        if (updatedNode != nullptr) {
+            wxXmlNode* copy = new wxXmlNode(*updatedNode);
+            auto curr = GetModel(name);
+            if (curr != nullptr) {
+                Model* newm = CreateModel(copy, previewWidth, previewHeight);
+                ReplaceModel(name, newm);
+            } else {
+                createAndAddModel(copy, previewWidth, previewHeight);
+            }
+        }
+    }
+
+    if (changed) {
+        RecalcStartChannels();
+    }
+
+    // Clean up temporary XML nodes
+    delete currentModelsNode;
+    delete currentGroupsNode;
+
     return changed;
 }
 

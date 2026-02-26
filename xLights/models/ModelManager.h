@@ -89,6 +89,7 @@ class ModelManager : public ObjectManager
         int GetPreviewWidth() const { return previewWidth; }
         int GetPreviewHeight() const { return previewHeight; }
         bool MergeFromBase(const std::string& baseShowDir, bool prompt);
+        static bool MergeBaseXml(const std::string& baseShowDir, wxXmlNode* localModelsNode, wxXmlNode* localGroupsNode);
         std::string GetLastGeneratedModelName() const { return lastGeneratedModelName; }
 
         std::map<std::string, Model *> GetModels() const { return models; }

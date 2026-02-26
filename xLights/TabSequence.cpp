@@ -427,8 +427,7 @@ void xLightsFrame::LoadEffectsFile()
     wxString filename = LoadEffectsFileNoCheck();
     // check version, do we need to convert?
     wxString version = EffectsNode->GetAttribute("version", "0000");
-    if (version < "0004")
-    {
+    if (version < "0004") {
         // fix tags
         xLightsXmlFile::FixVersionDifferences(filename);
 
@@ -550,7 +549,17 @@ void xLightsFrame::LoadEffectsFile()
 
     displayElementsPanel->SetSequenceElementsModelsViews(&_seqData, &_sequenceElements, ModelsNode, ModelGroupsNode, &_sequenceViewManager);
     layoutPanel->ClearUndo();
-    
+
+    // Merge base show folder XML into local XML tree before creating models
+    if (_outputManager.IsAutoUpdateFromBaseShowDir() && !_outputManager.GetBaseShowDir().empty()) {
+        bool xmlChanged = false;
+        xmlChanged |= ModelManager::MergeBaseXml(_outputManager.GetBaseShowDir(), ModelsNode, ModelGroupsNode);
+        xmlChanged |= ViewObjectManager::MergeBaseXml(_outputManager.GetBaseShowDir(), ViewObjectsNode);
+        if (xmlChanged) {
+            UnsavedRgbEffectsChanges = true;
+        }
+    }
+
     LoadModels();
 
     mSequencerInitialize = false;
