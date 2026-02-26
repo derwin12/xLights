@@ -1636,88 +1636,40 @@ void LayoutPanel::UpdateModelsForPreview(const std::string &group, LayoutGroup* 
 void LayoutPanel::BulkEditDimmingCurves()
 {
     std::vector<Model*> modelsToEdit = GetSelectedModelsForEdit();
-
-    // get the first dimming curve
     ModelDimmingCurveDialog dlg(this);
     std::map<std::string, std::map<std::string, std::string>> dimmingInfo;
-
-    for (Model* model: modelsToEdit) {
+    // Get the first non-empty dimming curve from selected models
+    for (Model* model : modelsToEdit) {
         if (model != nullptr) {
-            wxXmlNode *f = model->GetModelXml()->GetChildren();
-            while (f != nullptr) {
-                if ("dimmingCurve" == f->GetName()) {
-                    wxXmlNode *dc = f->GetChildren();
-                    while (dc != nullptr) {
-                        std::string name = dc->GetName().ToStdString();
-                        wxXmlAttribute *att = dc->GetAttributes();
-                        while (att != nullptr) {
-                            dimmingInfo[name][att->GetName().ToStdString()] = att->GetValue();
-                            att = att->GetNext();
-                        }
-                        dc = dc->GetNext();
-                    }
-                }
-                f = f->GetNext();
-            }
-
-            if (model->GetModelXml()->GetAttribute("ModelBrightness", "-1") != "-1")
-            {
-                wxString b = model->GetModelXml()->GetAttribute("ModelBrightness", "0");
-                dimmingInfo["all"]["gamma"] = "1.0";
-                dimmingInfo["all"]["brightness"] = b;
-            }
-
+            dimmingInfo = model->GetDimmingInfo();
             if (!dimmingInfo.empty()) {
                 break;
             }
         }
     }
-
+    // If no dimming curve found, use default values
     if (dimmingInfo.empty()) {
         dimmingInfo["all"]["gamma"] = "1.0";
         dimmingInfo["all"]["brightness"] = "0";
     }
-
     dlg.Init(dimmingInfo);
     OptimiseDialogPosition(&dlg);
     if (dlg.ShowModal() == wxID_OK) {
         dimmingInfo.clear();
         dlg.Update(dimmingInfo);
-
-        // remember selected tree models and paths for reselect
+        // Remember selected tree models and paths for reselect
         std::vector<std::list<std::string>> selectedModelPaths = GetSelectedTreeModelPaths();
-
+        // Apply the dimming curve to all selected models
         for (Model* model : modelsToEdit) {
             if (model != nullptr) {
-                wxXmlNode *f1 = model->GetModelXml()->GetChildren();
-                while (f1 != nullptr) {
-                    if ("dimmingCurve" == f1->GetName()) {
-                        model->GetModelXml()->RemoveChild(f1);
-                        delete f1;
-                        f1 = model->GetModelXml()->GetChildren();
-                    }
-                    else {
-                        f1 = f1->GetNext();
-                    }
-                }
-                f1 = new wxXmlNode(wxXML_ELEMENT_NODE, "dimmingCurve");
-                model->GetModelXml()->AddChild(f1);
+                model->SetDimmingInfo(dimmingInfo);
                 model->IncrementChangeCount();
-                for (const auto& it : dimmingInfo) {
-                    wxXmlNode *dc = new wxXmlNode(wxXML_ELEMENT_NODE, it.first);
-                    f1->AddChild(dc);
-                    for (const auto& it2 : it.second) {
-                        dc->AddAttribute(it2.first, it2.second);
-                    }
-                }
             }
         }
-
         // If we don't do these as ImmediateWork then the Model Tree is still frozen and models don't get reselected after refresh
         xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "BulkEditDimmingCurves");
         xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_MODELS_CHANGE_REQUIRING_RERENDER, "BulkEditDimmingCurves");
         xlights->GetOutputModelManager()->AddImmediateWork(OutputModelManager::WORK_RELOAD_ALLMODELS, "BulkEditDimmingCurves");
-
         ReselectTreeModels(selectedModelPaths);
     }
 }

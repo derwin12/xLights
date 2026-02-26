@@ -251,6 +251,7 @@ public:
     bool skipImportAliases = false;
 
     [[nodiscard]] std::map<std::string, std::map<std::string, std::string>> GetDimmingInfo() const;
+    void SetDimmingInfo(const std::map<std::string, std::map<std::string, std::string>>& info);
     [[nodiscard]] virtual std::list<std::string> CheckModelSettings() override;
     [[nodiscard]] virtual const std::vector<std::string>& GetBufferStyles() const {
         return DEFAULT_BUFFER_STYLES;

@@ -241,6 +241,37 @@ std::map<std::string, std::map<std::string, std::string>> Model::GetDimmingInfo(
     return dimmingInfo;
 }
 
+void Model::SetDimmingInfo(const std::map<std::string, std::map<std::string, std::string>>& info)
+{
+    dimmingInfo = info;
+    wxXmlNode* modelXml = GetModelXml();
+    if (modelXml == nullptr) {
+        return;
+    }
+    // Remove existing dimmingCurve nodes
+    wxXmlNode* child = modelXml->GetChildren();
+    while (child != nullptr) {
+        wxXmlNode* next = child->GetNext();
+        if ("dimmingCurve" == child->GetName()) {
+            modelXml->RemoveChild(child);
+            delete child;
+        }
+        child = next;
+    }
+    // Add new dimmingCurve node with updated info
+    if (!info.empty()) {
+        wxXmlNode* dimmingCurveNode = new wxXmlNode(wxXML_ELEMENT_NODE, "dimmingCurve");
+        modelXml->AddChild(dimmingCurveNode);
+        for (const auto& colorInfo : info) {
+            wxXmlNode* colorNode = new wxXmlNode(wxXML_ELEMENT_NODE, colorInfo.first);
+            dimmingCurveNode->AddChild(colorNode);
+            for (const auto& attribute : colorInfo.second) {
+                colorNode->AddAttribute(attribute.first, attribute.second);
+            }
+        }
+    }
+}
+
 class DimmingCurveDialogAdapter : public wxPGEditorDialogAdapter
 {
 public:
