@@ -10704,6 +10704,14 @@ void xLightsFrame::UpdateFromBaseShowFolder(bool prompt)
 {
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     logger_base.debug("Updating from base show folder.");
+    
+    ObtainAccessToURL(_outputManager.GetBaseShowDir());
+    if (!ObtainAccessToURL(_outputManager.GetBaseShowDir() + GetPathSeparator() + XLIGHTS_RGBEFFECTS_FILE)) {
+        std::string dstr = _outputManager.GetBaseShowDir() ;
+        PromptForDirectorySelection("Reselect Base Show Directory", dstr);
+        ObtainAccessToURL(_outputManager.GetBaseShowDir());
+    }
+    
 
     // bring in any controllers overwriting some of their properties ... but not all of them
     if (_outputManager.MergeFromBase(prompt)) {
