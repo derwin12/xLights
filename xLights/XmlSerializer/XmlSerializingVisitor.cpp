@@ -472,13 +472,13 @@ void XmlSerializingVisitor::AddControllerConnection(wxXmlNode* node, const Model
         }
 
         // Save all the property checkbox active states
-        if (cc.IsPropertySet(CtrlProps::USE_SMART_REMOTE)) {
+        if (m->GetSmartRemote() && cc.IsPropertySet(CtrlProps::USE_SMART_REMOTE)) {
             xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteAttribute, std::to_string(cc.GetSmartRemote()));
             // Set all the Smart Remote values
             xmlNode->AddAttribute(XmlNodeKeys::SRMaxCascadeAttribute, std::to_string(m->GetSRMaxCascade()));
             xmlNode->AddAttribute(XmlNodeKeys::SRCascadeOnPortAttribute, std::to_string(m->GetSRMaxCascade()));
-            xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteTsAttribute, std::to_string(m->GetSmartTs()));
             xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteTypeAttribute, m->GetSmartRemoteType());
+            if (cc.IsPropertySet(CtrlProps::TS_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteTsAttribute, std::to_string(cc.GetSmartTs()));
         }
         if (cc.IsPropertySet(CtrlProps::START_NULLS_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::StartNullAttribute, std::to_string(cc.GetStartNulls()));
         if (cc.IsPropertySet(CtrlProps::END_NULLS_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::EndNullAttribute, std::to_string(cc.GetEndNulls()));
@@ -488,7 +488,6 @@ void XmlSerializingVisitor::AddControllerConnection(wxXmlNode* node, const Model
         if (cc.IsPropertySet(CtrlProps::REVERSE_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::CReverseAttribute, std::to_string(cc.GetReverse()));
         if (cc.IsPropertySet(CtrlProps::GROUP_COUNT_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::GroupCountAttribute, std::to_string(cc.GetGroupCount()));
         if (cc.IsPropertySet(CtrlProps::ZIG_ZAG_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::CZigZagAttribute, std::to_string(cc.GetZigZag()));
-        if (cc.IsPropertySet(CtrlProps::TS_ACTIVE)) xmlNode->AddAttribute(XmlNodeKeys::SmartRemoteTsAttribute, std::to_string(cc.GetSmartTs()));
 
         node->AddChild(xmlNode);
     }

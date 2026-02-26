@@ -147,7 +147,6 @@ void XmlDeserializingModelFactory::DeserializeControllerConnection(Model* model,
             cc.SetZigZag(std::stoi(p->GetAttribute(XmlNodeKeys::CZigZagAttribute, std::to_string(CtrlDefs::DEFAULT_ZIGZAG)).ToStdString()));
             
             // Set all the property checkbox active states
-            cc.UpdateProperty(CtrlProps::USE_SMART_REMOTE,   p->HasAttribute(XmlNodeKeys::SmartRemoteAttribute));
             cc.UpdateProperty(CtrlProps::START_NULLS_ACTIVE, p->HasAttribute(XmlNodeKeys::StartNullAttribute));
             cc.UpdateProperty(CtrlProps::END_NULLS_ACTIVE,   p->HasAttribute(XmlNodeKeys::EndNullAttribute));
             cc.UpdateProperty(CtrlProps::BRIGHTNESS_ACTIVE,  p->HasAttribute(XmlNodeKeys::DCBrightnessAttribute));
@@ -164,6 +163,8 @@ void XmlDeserializingModelFactory::DeserializeControllerConnection(Model* model,
             cc.SetSRCascadeOnPort(p->GetAttribute(XmlNodeKeys::SRCascadeOnPortAttribute, "FALSE").ToStdString() == "TRUE");
             cc.SetSmartRemoteTs(std::stoi(p->GetAttribute(XmlNodeKeys::SmartRemoteTsAttribute, "0").ToStdString()));
             cc.SetSmartRemoteType(p->GetAttribute(XmlNodeKeys::SmartRemoteTypeAttribute, ""));
+            
+            cc.UpdateProperty(CtrlProps::USE_SMART_REMOTE,  cc.GetSmartRemote());
         }
     }
 }

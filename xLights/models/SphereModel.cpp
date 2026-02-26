@@ -258,8 +258,7 @@ void SphereModel::ExportAsCustomXModel3D() const
     wxString st = GetStringType();
     wxString ps = std::to_string(GetPixelSize());
     wxString t = GetTransparency() ? "1" : "0";
-    wxString mb = GetModelBrightness();
-    wxString a = GetAntialias();
+    int a = (int)GetPixelStyle();
     wxString sn = GetStrandNames();
     wxString nn = GetNodeNames();
     wxString pc = GetPixelCount();
@@ -281,8 +280,7 @@ void SphereModel::ExportAsCustomXModel3D() const
     f.Write(wxString::Format("StringType=\"%s\" ", st));
     f.Write(wxString::Format("Transparency=\"%s\" ", t));
     f.Write(wxString::Format("PixelSize=\"%s\" ", ps));
-    f.Write(wxString::Format("ModelBrightness=\"%s\" ", mb));
-    f.Write(wxString::Format("Antialias=\"%s\" ", a));
+    f.Write(wxString::Format("Antialias=\"%d\" ", a));
     f.Write(wxString::Format("StrandNames=\"%s\" ", sn));
     f.Write(wxString::Format("NodeNames=\"%s\" ", nn));
     f.Write(wxString::Format("StartLatitude=\"%s\" ", sl));

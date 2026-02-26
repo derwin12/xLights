@@ -1080,13 +1080,13 @@ void CubeModel::ExportAsCustomXModel3D() const
     wxString st = GetStringType();
     wxString ps = std::to_string(GetPixelSize());
     wxString t = GetTransparency() ? "1" : "0";
-    wxString mb = GetModelBrightness();
-    wxString a = GetAntialias();
     wxString sn = GetStrandNames();
     wxString nn = GetNodeNames();
     wxString pc = GetPixelCount();
     wxString pt = GetPixelType();
     wxString psp = GetPixelSpacing();
+    
+    auto a = GetPixelStyle();
 
     wxString v = xlights_version_string;
     f.Write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<custommodel \n");
@@ -1097,8 +1097,7 @@ void CubeModel::ExportAsCustomXModel3D() const
     f.Write(wxString::Format("StringType=\"%s\" ", st));
     f.Write(wxString::Format("Transparency=\"%s\" ", t));
     f.Write(wxString::Format("PixelSize=\"%s\" ", ps));
-    f.Write(wxString::Format("ModelBrightness=\"%s\" ", mb));
-    f.Write(wxString::Format("Antialias=\"%s\" ", a));
+    f.Write(wxString::Format("Antialias=\"%d\" ", (int)a));
     f.Write(wxString::Format("StrandNames=\"%s\" ", sn));
     f.Write(wxString::Format("NodeNames=\"%s\" ", nn));
     if (!pc.empty())

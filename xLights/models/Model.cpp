@@ -284,12 +284,8 @@ public:
     {
         ModelDimmingCurveDialog dlg(propGrid);
         if (m_model->dimmingInfo.empty()) {
-            wxString b = m_model->GetModelBrightness();
-            if (b.empty()) {
-                b = "0";
-            }
             m_model->dimmingInfo["all"]["gamma"] = "1.0";
-            m_model->dimmingInfo["all"]["brightness"] = b;
+            m_model->dimmingInfo["all"]["brightness"] = "0";
         }
         dlg.Init(m_model->dimmingInfo);
         if (dlg.ShowModal() == wxID_OK) {
@@ -2552,35 +2548,6 @@ bool Model::IsValidStartChannelString() const
     }
 
     return false;
-}
-
-bool Model::UpdateStartChannelFromChannelString(std::map<std::string, Model*>& models, std::list<std::string>& used)
-{
-    bool valid = false;
-
-    used.push_back(GetName());
-
-    std::string dependsonmodel;
-    ModelStartChannel = ModelXml->GetAttribute("StartChannel");
-    int32_t StartChannel = GetNumberFromChannelString(ModelStartChannel, valid, dependsonmodel);
-    while (!valid && dependsonmodel != "" && std::find(used.begin(), used.end(), dependsonmodel) == used.end()) {
-        Model* m = models[dependsonmodel];
-        if (m != nullptr) {
-            valid = m->UpdateStartChannelFromChannelString(models, used);
-        }
-        if (valid) {
-            StartChannel = GetNumberFromChannelString(ModelStartChannel, valid, dependsonmodel);
-        }
-    }
-
-    if (valid) {
-        size_t NumberOfStrings = HasOneString(DisplayAs) ? 1 : parm1;
-        int ChannelsPerString = CalcChannelsPerString();
-        SetStringStartChannels(NumberOfStrings, StartChannel, ChannelsPerString);
-    }
-
-    CouldComputeStartChannel = valid;
-    return valid;
 }
 
 int Model::GetNumberFromChannelString(const std::string& sc) const
@@ -6002,22 +5969,6 @@ void Model::SetBlackTransparency(int t)
 }
 
 // Getter methods for export functionality
-std::string Model::GetModelBrightness() const
-{
-    if (ModelXml) {
-        return ModelXml->GetAttribute("ModelBrightness", "0").ToStdString();
-    }
-    return "0";
-}
-
-std::string Model::GetAntialias() const
-{
-    if (ModelXml) {
-        return ModelXml->GetAttribute("Antialias", "").ToStdString();
-    }
-    return "";
-}
-
 void Model::SetPixelStyle(PIXEL_STYLE style)
 {
     if (_pixelStyle != style) {

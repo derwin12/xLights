@@ -615,8 +615,8 @@ int CustomModel::GetCustomMaxChannel() const
         for (const auto& r : l) {
             size_t col = 0;
             for (const auto& c : r) {
-                if (_locations[layer][row][col] > maxval) {
-                    maxval = _locations[layer][row][col];
+                if (c > maxval) {
+                    maxval = c;
                 }
                 ++col;
             }

@@ -420,8 +420,7 @@ static void WriteCustomModelAttributes(wxFile& f, const Model* model,
     wxString st = model->GetStringType();
     wxString ps = std::to_string(model->GetPixelSize());
     wxString t = model->GetTransparency() ? "1" : "0";
-    wxString mb = model->GetModelBrightness();
-    wxString a = model->GetAntialias();
+    int a = (int)model->GetPixelStyle();
     wxString sn = model->GetStrandNames();
     wxString nn = model->GetNodeNames();
     wxString pc = model->GetPixelCount();
@@ -438,8 +437,7 @@ static void WriteCustomModelAttributes(wxFile& f, const Model* model,
     f.Write(wxString::Format("StringType=\"%s\" ", st));
     f.Write(wxString::Format("Transparency=\"%s\" ", t));
     f.Write(wxString::Format("PixelSize=\"%s\" ", ps));
-    f.Write(wxString::Format("ModelBrightness=\"%s\" ", mb));
-    f.Write(wxString::Format("Antialias=\"%s\" ", a));
+    f.Write(wxString::Format("Antialias=\"%d\" ", a));
     f.Write(wxString::Format("StrandNames=\"%s\" ", sn));
     f.Write(wxString::Format("NodeNames=\"%s\" ", nn));
     if (!pc.empty())

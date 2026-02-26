@@ -176,8 +176,6 @@ public:
     void SetBlackTransparency(int t);
     
     // Getter methods for export functionality
-    [[nodiscard]] std::string GetModelBrightness() const;
-    [[nodiscard]] std::string GetAntialias() const;
     [[nodiscard]] const std::string &GetPixelCount() const { return _pixelCount; }
     [[nodiscard]] const std::string &GetPixelType() const { return _pixelType; }
     [[nodiscard]] const std::string &GetPixelSpacing() const { return _pixelSpacing; }
@@ -510,7 +508,6 @@ public:
     uint32_t GetNumChannels() const;
     uint32_t GetNodeNumber(size_t nodenum) const;
     uint32_t GetNodeNumber(int bufY, int bufX) const;
-    bool UpdateStartChannelFromChannelString(std::map<std::string, Model*>& models, std::list<std::string>& used);
     int GetNumberFromChannelString(const std::string& sc) const;
     int GetNumberFromChannelString(const std::string& sc, bool& valid, std::string& dependsonmodel) const;
 
