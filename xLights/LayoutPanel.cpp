@@ -7116,11 +7116,12 @@ void LayoutPanel::DoPaste(wxCommandEvent& event) {
                         // is there a model in the same location of the same type ... if so offset the pasting of the model
                         for (const auto& it : xlights->AllModels)
                         {
-                            if (nda == it.second->GetModelXml()->GetAttribute("DisplayAs"))
+                            if (nda == it.second->GetDisplayAs())
                             {
-                                auto x = (int)wxAtof(it.second->GetModelXml()->GetAttribute("WorldPosX"));
-                                auto y = (int)wxAtof(it.second->GetModelXml()->GetAttribute("WorldPosY"));
-                                auto z = (int)wxAtof(it.second->GetModelXml()->GetAttribute("WorldPosZ"));
+                                auto pos = it.second->GetBaseObjectScreenLocation().GetWorldPosition();
+                                auto x = (int)pos.x;
+                                auto y = (int)pos.y;
+                                auto z = (int)pos.z;
                                 if (nx == x &&
                                     ny == y &&
                                     nz == z)
