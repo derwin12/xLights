@@ -335,8 +335,8 @@ void PolyLineModel::InitModel()
             pPos[i].curve = new BezierCurveCubic3D();
             pPos[i].curve->set_p0(pPos[i].x, pPos[i].y, pPos[i].z);
             pPos[i].curve->set_p1(pPos[i + 1].x, pPos[i + 1].y, pPos[i + 1].z);
-            pPos[i].curve->set_cp0(screenLocation.mPos[i].curve->get_p0x(),screenLocation.mPos[i].curve->get_p0y(),screenLocation.mPos[i].curve->get_p0z());
-            pPos[i].curve->set_cp1(screenLocation.mPos[i].curve->get_p1x(),screenLocation.mPos[i].curve->get_p1y(),screenLocation.mPos[i].curve->get_p1z());
+            pPos[i].curve->set_cp0(screenLocation.mPos[i].curve->get_cp0x(),screenLocation.mPos[i].curve->get_cp0y(),screenLocation.mPos[i].curve->get_cp0z());
+            pPos[i].curve->set_cp1(screenLocation.mPos[i].curve->get_cp1x(),screenLocation.mPos[i].curve->get_cp1y(),screenLocation.mPos[i].curve->get_cp1z());
             pPos[i].curve->SetPositioning(def_scaling, def_pos);
             pPos[i].curve->UpdatePoints();
             pPos[i].curve->UpdateMatrices();
