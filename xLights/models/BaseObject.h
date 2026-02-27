@@ -72,7 +72,6 @@ public:
     bool Rotate(ModelScreenLocation::MSLAXIS axis, float factor);
     void FlipHorizontal(bool ignoreLock = false);
     void FlipVertical(bool ignoreLock = false);
-    bool IsXmlChanged(wxXmlNode* n) const;
 
     [[nodiscard]] float GetTop();
     [[nodiscard]] float GetBottom();

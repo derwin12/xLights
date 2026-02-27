@@ -234,39 +234,6 @@ static inline bool checkNameAttributes(wxXmlNode* nn, wxXmlNode* cc) {
     return true;
 }
 
-bool BaseObject::IsXmlChanged(wxXmlNode* n) const
-{
-    for (wxXmlAttribute* a = n->GetAttributes(); a != nullptr; a = a->GetNext()) {
-        if (!ModelXml->HasAttribute(a->GetName()) || ModelXml->GetAttribute(a->GetName()) != a->GetValue()) {
-            if (a->GetName() != "StartChannel" || !ModelXml->HasAttribute("Controller")) {
-                return true;
-            }
-        }
-    }
-
-    // This part assumes the nodes under the model only exist once or if they exist twice they have a "Name" attribute that distinguishes them
-    // it also assumes one level of child nodes only
-    for (wxXmlNode* nn = n->GetChildren(); nn != nullptr; nn = nn->GetNext()) {
-        bool found = false;
-        for (wxXmlNode* cc = ModelXml->GetChildren(); cc != nullptr; cc = cc->GetNext()) {
-            if (cc->GetName() == nn->GetName() && checkNameAttributes(nn, cc)) {
-                found = true;
-                for (wxXmlAttribute* a = cc->GetAttributes(); a != nullptr; a = a->GetNext()) {
-                    if (!cc->HasAttribute(a->GetName()) || nn->GetAttribute(a->GetName()) != a->GetValue()) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        if (!found) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 float BaseObject::GetTop() {
     return GetBaseObjectScreenLocation().GetTop();
 }
