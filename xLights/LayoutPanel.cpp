@@ -8094,11 +8094,11 @@ void LayoutPanel::ImportModelsFromPreview(std::list<impTreeItemData*> models, wx
             if (xlights->AllModels.GetModel(newName) != nullptr) {
                 newName = xlights->AllModels.GenerateModelName(it2->GetName());
             }
-            it2->GetModelXml()->DeleteAttribute("name");
-            it2->GetModelXml()->DeleteAttribute("LayoutGroup");
-            it2->GetModelXml()->AddAttribute("name", newName);
-            it2->GetModelXml()->AddAttribute("LayoutGroup", layoutGroup);
-            xlights->AllModels.createAndAddModel(it2->GetModelXml(), modelPreview->getWidth(), modelPreview->getHeight());
+            it2->GetModelNode()->DeleteAttribute("name");
+            it2->GetModelNode()->DeleteAttribute("LayoutGroup");
+            it2->GetModelNode()->AddAttribute("name", newName);
+            it2->GetModelNode()->AddAttribute("LayoutGroup", layoutGroup);
+            xlights->AllModels.createAndAddModel(it2->GetModelNode(), modelPreview->getWidth(), modelPreview->getHeight());
             logger_base.debug("Imported model '%s' as '%s'.", (const char*)it2->GetName().c_str(), (const char*)newName.c_str());
         }
     }
@@ -8108,7 +8108,7 @@ void LayoutPanel::ImportModelsFromPreview(std::list<impTreeItemData*> models, wx
     {
         if (it2->IsModelGroup())//if a group, try to add models if exist
         {
-            wxString const smodels = it2->GetModelXml()->GetAttribute("models");
+            wxString const smodels = it2->GetModelNode()->GetAttribute("models");
             auto models = wxSplit(smodels, ',');
 
             models.erase(std::remove_if(models.begin(), models.end(), [&](std::string const& s)
@@ -8124,9 +8124,9 @@ void LayoutPanel::ImportModelsFromPreview(std::list<impTreeItemData*> models, wx
             wxString const name = it2->GetName();
             Model* model = xlights->AllModels.GetModel(name);
             if (model == nullptr) {//if group doesnt exist, create it
-                it2->GetModelXml()->DeleteAttribute("LayoutGroup");
-                it2->GetModelXml()->AddAttribute("LayoutGroup", layoutGroup);
-                model = xlights->AllModels.createAndAddModel(it2->GetModelXml(), modelPreview->getWidth(), modelPreview->getHeight());
+                it2->GetModelNode()->DeleteAttribute("LayoutGroup");
+                it2->GetModelNode()->AddAttribute("LayoutGroup", layoutGroup);
+                model = xlights->AllModels.createAndAddModel(it2->GetModelNode(), modelPreview->getWidth(), modelPreview->getHeight());
                 logger_base.debug("Imported model group '%s'.", (const char*)name.c_str());
             }
 
