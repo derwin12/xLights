@@ -244,32 +244,13 @@ std::map<std::string, std::map<std::string, std::string>> Model::GetDimmingInfo(
 void Model::SetDimmingInfo(const std::map<std::string, std::map<std::string, std::string>>& info)
 {
     dimmingInfo = info;
-    wxXmlNode* modelXml = GetModelXml();
-    if (modelXml == nullptr) {
-        return;
+    if (modelDimmingCurve != nullptr) {
+        delete modelDimmingCurve;
+        modelDimmingCurve = nullptr;
     }
-    // Remove existing dimmingCurve nodes
-    wxXmlNode* child = modelXml->GetChildren();
-    while (child != nullptr) {
-        wxXmlNode* next = child->GetNext();
-        if ("dimmingCurve" == child->GetName()) {
-            modelXml->RemoveChild(child);
-            delete child;
-        }
-        child = next;
-    }
-    // Add new dimmingCurve node with updated info
-    if (!info.empty()) {
-        wxXmlNode* dimmingCurveNode = new wxXmlNode(wxXML_ELEMENT_NODE, "dimmingCurve");
-        modelXml->AddChild(dimmingCurveNode);
-        for (const auto& colorInfo : info) {
-            wxXmlNode* colorNode = new wxXmlNode(wxXML_ELEMENT_NODE, colorInfo.first);
-            dimmingCurveNode->AddChild(colorNode);
-            for (const auto& attribute : colorInfo.second) {
-                colorNode->AddAttribute(attribute.first, attribute.second);
-            }
-        }
-    }
+    if (!dimmingInfo.empty()) {
+        modelDimmingCurve = DimmingCurve::createFromInfo(dimmingInfo);
+    }    
 }
 
 class DimmingCurveDialogAdapter : public wxPGEditorDialogAdapter
@@ -283,14 +264,16 @@ public:
                               wxPGProperty* WXUNUSED(property)) override
     {
         ModelDimmingCurveDialog dlg(propGrid);
-        if (m_model->dimmingInfo.empty()) {
-            m_model->dimmingInfo["all"]["gamma"] = "1.0";
-            m_model->dimmingInfo["all"]["brightness"] = "0";
+        auto di = m_model->GetDimmingInfo();
+        if (di.empty()) {
+            di["all"]["gamma"] = "1.0";
+            di["all"]["brightness"] = "0";
         }
-        dlg.Init(m_model->dimmingInfo);
+        dlg.Init(di);
         if (dlg.ShowModal() == wxID_OK) {
-            m_model->dimmingInfo.clear();
-            dlg.Update(m_model->dimmingInfo);
+            di.clear();
+            dlg.Update(di);
+            m_model->SetDimmingInfo(di);
             wxVariant v(CLICK_TO_EDIT);
             SetValue(v);
             return true;

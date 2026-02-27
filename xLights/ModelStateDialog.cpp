@@ -622,8 +622,8 @@ void ModelStateDialog::GetValue(wxGrid *grid, const int row, const int col, std:
 void ModelStateDialog::ClearNodeColor(Model* m) {
     xlColor c(xlDARK_GREY);
     int nn = m->GetNodeCount();
-    if (m->modelDimmingCurve) {
-        m->modelDimmingCurve->apply(c);
+    if (m->GetDimmingCurve()) {
+        m->GetDimmingCurve()->apply(c);
     }
     for (int node = 0; node < nn; node++) {
         m->SetNodeColor(node, c);
@@ -709,8 +709,8 @@ bool ModelStateDialog::SetNodeColor(wxGrid* grid, int const row, xlColor const& 
     }
 
     xlColor cc(c);
-    if (model->modelDimmingCurve) {
-        model->modelDimmingCurve->apply(cc);
+    if (model->GetDimmingCurve()) {
+        model->GetDimmingCurve()->apply(cc);
     }
 
     bool found = false;

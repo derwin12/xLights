@@ -252,7 +252,7 @@ void XmlDeserializingModelFactory::DeserializeCommonModelAttributes(Model* model
             model->SetStateInfo(newStateInfo);
             model->UpdateStateInfoNodes();
         } else if (XmlNodeKeys::DimmingCurveName == f->GetName()) {
-            model->modelDimmingCurve = DimmingCurve::createFromXML(f);
+            DeserializeDimmingCurve(model, f);
         } else if ("subModel" == f->GetName()) {
             DeserializeSubModel(model, f);
         } else if ("modelGroup" == f->GetName() && importing) {
@@ -294,16 +294,34 @@ void XmlDeserializingModelFactory::DeserializeCommonModelAttributes(Model* model
         f = f->GetNext();
     }
     
-    if (node->HasAttribute(XmlNodeKeys::ModelBrightnessAttribute) && model->modelDimmingCurve == nullptr) {
+    if (node->HasAttribute(XmlNodeKeys::ModelBrightnessAttribute) && model->GetDimmingCurve() == nullptr) {
         std::string mb = node->GetAttribute(XmlNodeKeys::ModelBrightnessAttribute, "0").ToStdString();
         if (mb.empty()) {
             mb = "0";
         }
         int b = std::stoi(mb);
         if (b != 0) {
-            model->modelDimmingCurve = DimmingCurve::createBrightnessGamma(b, 1.0);
+            std::map<std::string, std::map<std::string, std::string>> dimmingInfo;
+            dimmingInfo["all"]["gamma"] = "1.0";
+            dimmingInfo["all"]["brightness"] = mb;
+            model->SetDimmingInfo(dimmingInfo);
         }
     }
+}
+void XmlDeserializingModelFactory::DeserializeDimmingCurve(Model* model, wxXmlNode* node) {
+    std::map<std::string, std::map<std::string, std::string>> dimmingInfo;
+    wxXmlNode *child = node->GetChildren();
+    while (child) {
+        std::string key = child->GetName();
+        if (child->HasAttribute("filename")) {
+            dimmingInfo[key]["filename"] = child->GetAttribute("filename").ToStdString();
+        } else {
+            dimmingInfo[key]["brightness"] = child->GetAttribute("brightness", "100").ToStdString();
+            dimmingInfo[key]["gamma"] = child->GetAttribute("gamma", "1.0").ToStdString();
+        }
+        child = child->GetNext();
+    }
+    model->SetDimmingInfo(dimmingInfo);
 }
 
 void XmlDeserializingModelFactory::DeserializeSubModel(Model* model, wxXmlNode* node)

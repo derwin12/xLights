@@ -167,7 +167,6 @@ public:
     virtual bool ChangeStringCount(long count,  std::string& message) { return false; };
 
     std::string description;
-    DimmingCurve* modelDimmingCurve = nullptr;
     int _controller = 0; // this is used to pass the selected controller name between property create and property change only
 
     int GetPixelSize() const { return pixelSize; }
@@ -255,6 +254,7 @@ public:
 
     [[nodiscard]] std::map<std::string, std::map<std::string, std::string>> GetDimmingInfo() const;
     void SetDimmingInfo(const std::map<std::string, std::map<std::string, std::string>>& info);
+    DimmingCurve *GetDimmingCurve() const { return modelDimmingCurve; }
     [[nodiscard]] virtual std::list<std::string> CheckModelSettings() override;
     [[nodiscard]] virtual const std::vector<std::string>& GetBufferStyles() const {
         return DEFAULT_BUFFER_STYLES;
@@ -407,8 +407,10 @@ protected:
     std::vector<int> _indivStartNodes;
 
     mutable std::list<std::string> aliases;
-    friend class DimmingCurveDialogAdapter; // let this class alter dimmingInfo
+
     std::map<std::string, std::map<std::string, std::string>> dimmingInfo;
+    DimmingCurve* modelDimmingCurve = nullptr;
+    
     std::vector<Model*> subModels;
     std::map<std::string, Model*> sortedSubModels;
     std::string _modelChain = "";

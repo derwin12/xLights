@@ -37,6 +37,7 @@ private:
     void DeserializeSubModel(Model* model, wxXmlNode* node);
     void DeserializeAliases(Model* model, wxXmlNode* node);
     void DeserializeSuperStrings(Model* model, wxXmlNode* node);
+    void DeserializeDimmingCurve(Model* model, wxXmlNode* node);
 
     Model* DeserializeArches(wxXmlNode* node, xLightsFrame* xlights, bool importing);
     Model* DeserializeCandyCane(wxXmlNode* node, xLightsFrame* xlights, bool importing);

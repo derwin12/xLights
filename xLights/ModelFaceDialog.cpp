@@ -1012,9 +1012,9 @@ void ModelFaceDialog::UpdatePreview(const std::string& channels, wxColor c)
     int nn = model->GetNodeCount();
     xlColor cb(xlDARK_GREY);
     xlColor cc(c);
-    if (model->modelDimmingCurve) {
-        model->modelDimmingCurve->apply(cb);
-        model->modelDimmingCurve->apply(cc);
+    if (model->GetDimmingCurve()) {
+        model->GetDimmingCurve()->apply(cb);
+        model->GetDimmingCurve()->apply(cc);
     }
     for (int node = 0; node < nn; ++node) {
         model->SetNodeColor(node, cb);

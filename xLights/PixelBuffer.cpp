@@ -2445,7 +2445,7 @@ void PixelBufferClass::GetColors(unsigned char* fdata, const std::vector<bool>& 
                 size_t start = n->ActChan;
                 if (IsInRange(restrictRange, start)) {
                     if (n->model != nullptr) { // nor this
-                        DimmingCurve* curve = n->model->modelDimmingCurve;
+                        DimmingCurve* curve = n->model->GetDimmingCurve();
                         if (curve != nullptr) {
                             if (n->GetChanCount() == 1) {
                                 uint8_t buf[3] = { 0, 0, 0 };
@@ -2472,7 +2472,7 @@ void PixelBufferClass::GetColors(unsigned char* fdata, const std::vector<bool>& 
                     size_t start = n->ActChan;
                     if (IsInRange(restrictRange, start)) {
                         if (n->model != nullptr) { // nor this
-                            DimmingCurve* curve = n->model->modelDimmingCurve;
+                            DimmingCurve* curve = n->model->GetDimmingCurve();
                             if (curve != nullptr) {
                                 if (n->GetChanCount() == 1) {
                                     uint8_t buf[3] = { 0, 0, 0 };
@@ -2509,7 +2509,7 @@ void PixelBufferClass::SetColors(int layer, const unsigned char* fdata) {
             n->SetFromChannels(&fdata[start]);
             n->GetColor(color);
 
-            DimmingCurve* curve = n->model->modelDimmingCurve;
+            DimmingCurve* curve = n->model->GetDimmingCurve();
             if (curve != nullptr) {
                 curve->reverse(color);
             }
@@ -2526,7 +2526,7 @@ void PixelBufferClass::SetColors(int layer, const unsigned char* fdata) {
                 n->SetFromChannels(&fdata[start]);
                 n->GetColor(color);
 
-                DimmingCurve* curve = n->model->modelDimmingCurve;
+                DimmingCurve* curve = n->model->GetDimmingCurve();
                 if (curve != nullptr) {
                     curve->reverse(color);
                 }

@@ -2493,8 +2493,8 @@ void SubModelsDialog::DisplayRange(const wxString &range)
 
     int nn = model->GetNodeCount();
     xlColor c(xlDARK_GREY);
-    if (model->modelDimmingCurve) {
-        model->modelDimmingCurve->apply(c);
+    if (model->GetDimmingCurve()) {
+        model->GetDimmingCurve()->apply(c);
     }
     for (int node = 0; node < nn; node++) {
         if (model->IsNodeInBufferRange(node, x1, y1, x2, y2)) {
@@ -2511,8 +2511,8 @@ void SubModelsDialog::ClearNodeColor(Model *m)
 {
     xlColor c(xlDARK_GREY);
     int nn = m->GetNodeCount();
-    if (m->modelDimmingCurve) {
-        m->modelDimmingCurve->apply(c);
+    if (m->GetDimmingCurve()) {
+        m->GetDimmingCurve()->apply(c);
     }
     for (int node = 0; node < nn; node++) {
         m->SetNodeColor(node, c);
