@@ -51,5 +51,4 @@ public:
 
 private:
     std::vector<PresetSetting> _presets;
-    void WriteXMLSettings(wxXmlNode* ModelXml) const;
 };

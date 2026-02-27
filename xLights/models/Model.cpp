@@ -250,7 +250,7 @@ void Model::SetDimmingInfo(const std::map<std::string, std::map<std::string, std
     }
     if (!dimmingInfo.empty()) {
         modelDimmingCurve = DimmingCurve::createFromInfo(dimmingInfo);
-    }    
+    }
 }
 
 class DimmingCurveDialogAdapter : public wxPGEditorDialogAdapter
@@ -2707,7 +2707,6 @@ void Model::Setup()
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     wxStopWatch sw;
 
-    ModelXml = nullptr;  // lets let this crash until we can get it fully removed
     StrobeRate = 0;
 
     SingleNode = HasSingleNode(StringType);

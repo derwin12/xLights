@@ -17,7 +17,7 @@
 #include "../xLightsApp.h"
 
 BaseObject::BaseObject()
-: ModelXml(nullptr), changeCount(0), _active(true)
+: changeCount(0), _active(true)
 {
     //ctor
 }
@@ -25,11 +25,6 @@ BaseObject::BaseObject()
 BaseObject::~BaseObject()
 {
     //dtor
-}
-
-wxXmlNode* BaseObject::GetModelXml() const {
-    wxASSERT(TRUE);  // This flags code to be deleted/reworked
-    return this->ModelXml;
 }
 
 void BaseObject::SetName(std::string const& newname)
