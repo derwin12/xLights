@@ -175,6 +175,10 @@ void XmlSerializingVisitor::AddThreePointScreenLocationAttributes(const BaseObje
 
 void XmlSerializingVisitor::AddPolyPointScreenLocationAttributes(const BaseObject& base, wxXmlNode* node) {
     const PolyPointScreenLocation& screenLoc = dynamic_cast<const PolyPointScreenLocation&>(base.GetBaseObjectScreenLocation());
+    glm::vec3 scale = base.GetBaseObjectScreenLocation().GetScaleMatrix();
+    node->AddAttribute(XmlNodeKeys::ScaleXAttribute, std::to_string(scale.x));
+    node->AddAttribute(XmlNodeKeys::ScaleYAttribute, std::to_string(scale.y));
+    node->AddAttribute(XmlNodeKeys::ScaleZAttribute, std::to_string(scale.z));
     node->AddAttribute(XmlNodeKeys::NumPointsAttribute, std::to_string(screenLoc.GetNumPoints()));
     node->AddAttribute(XmlNodeKeys::PointDataAttribute, screenLoc.GetPointDataAsString());
     node->AddAttribute(XmlNodeKeys::cPointDataAttribute, screenLoc.GetCurveDataAsString());
