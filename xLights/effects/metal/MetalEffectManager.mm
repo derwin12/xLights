@@ -118,6 +118,8 @@ RenderableEffect* CreateMetalEffect(EffectManager::RGB_EFFECTS_e eff) {
             return new MetalShockwaveEffect(eff);
         case EffectManager::eff_KALEIDOSCOPE:
             return new MetalKaleidoscopeEffect(eff);
+        case EffectManager::eff_FAN:
+            return new MetalFanEffect(eff);
         default:
             return nullptr;
         }

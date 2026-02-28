@@ -6,6 +6,7 @@
 #include "../PinwheelEffect.h"
 #include "../ShockwaveEffect.h"
 #include "../KaleidoscopeEffect.h"
+#include "../FanEffect.h"
 
 class MetalButterflyEffectData;
 
@@ -80,6 +81,20 @@ public:
 
 private:
     MetalShockwaveEffectData *data;
+};
+
+
+class MetalFanEffectData;
+
+class MetalFanEffect : public FanEffect {
+public:
+    MetalFanEffect(int i);
+    virtual ~MetalFanEffect();
+
+    virtual void Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) override;
+
+private:
+    MetalFanEffectData *data;
 };
 
 

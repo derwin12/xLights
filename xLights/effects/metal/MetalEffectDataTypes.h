@@ -128,6 +128,38 @@ struct TransitionData {
     bool out;
 };
 
+// Fan effect — max 8 palette colors (no spatial support on GPU)
+#define MAX_METAL_FAN_COLORS 8
+
+struct MetalFanData {
+    uint32_t width;
+    uint32_t height;
+
+    int32_t  xc_adj;        // center offset from middle (pixels)
+    int32_t  yc_adj;
+
+    float    radius1;       // effective inner radius (after ramp-up/down applied)
+    float    radius2;       // effective outer radius
+    float    max_radius;    // max(start_radius, end_radius) — used for twist calc
+
+    float    blade_div_angle;   // 360 / num_blades
+    float    blade_width_angle; // blade_div_angle * blade_width%
+    float    color_angle;       // blade_width_angle / num_colors
+    float    element_angle;     // color_angle / num_elements
+    float    element_size;      // element_angle * element_width%
+    float    angle_offset;      // eff_pos_adj * revolutions
+    float    start_angle;       // start_angle parameter (degrees)
+    float    blade_angle;       // twist angle (degrees)
+
+    int32_t  reverse_dir;
+    int32_t  blend_edges;
+    int32_t  allowAlpha;
+    int32_t  num_colors;
+
+    simd::uchar4  colorsAsRGBA[MAX_METAL_FAN_COLORS];
+    simd::float3  colorsAsHSV[MAX_METAL_FAN_COLORS];   // (h, s, v)
+};
+
 // Kaleidoscope effect type enum (must match KaleidoscopeStyleType in MetalKaleidoscopeEffect.mm)
 #define KALEIDOSCOPE_STYLE_SQUARE2   0
 #define KALEIDOSCOPE_STYLE_6FOLD     1
