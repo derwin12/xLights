@@ -5,6 +5,7 @@
 #include "../WarpEffect.h"
 #include "../PinwheelEffect.h"
 #include "../ShockwaveEffect.h"
+#include "../KaleidoscopeEffect.h"
 
 class MetalButterflyEffectData;
 
@@ -79,4 +80,18 @@ public:
 
 private:
     MetalShockwaveEffectData *data;
+};
+
+
+class MetalKaleidoscopeEffectData;
+
+class MetalKaleidoscopeEffect : public KaleidoscopeEffect {
+public:
+    MetalKaleidoscopeEffect(int i);
+    virtual ~MetalKaleidoscopeEffect();
+
+    virtual void Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) override;
+
+private:
+    MetalKaleidoscopeEffectData *data;
 };

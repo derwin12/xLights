@@ -128,6 +128,34 @@ struct TransitionData {
     bool out;
 };
 
+// Kaleidoscope effect type enum (must match KaleidoscopeStyleType in MetalKaleidoscopeEffect.mm)
+#define KALEIDOSCOPE_STYLE_SQUARE2   0
+#define KALEIDOSCOPE_STYLE_6FOLD     1
+#define KALEIDOSCOPE_STYLE_8FOLD     2
+#define KALEIDOSCOPE_STYLE_12FOLD    3
+#define KALEIDOSCOPE_STYLE_RADIAL    4
+
+struct KaleidoscopeTriangleVertex {
+    float x;
+    float y;
+};
+
+struct KaleidoscopeData {
+    uint32_t width;
+    uint32_t height;
+
+    float cx;
+    float cy;
+    float size;       // halfSize for Square2, size for triangle types, segments for Radial
+    float rotRad;
+
+    int32_t style;    // one of KALEIDOSCOPE_STYLE_* above
+    int32_t maxIter;  // max iterations for triangle types
+
+    // Triangle vertices (used for 6-fold, 8-fold, 12-fold)
+    KaleidoscopeTriangleVertex v[3];
+};
+
 struct LayerBlendingData {
     int32_t nodeCount;
     uint32_t bufferWi;
