@@ -188,6 +188,31 @@ struct KaleidoscopeData {
     KaleidoscopeTriangleVertex v[3];
 };
 
+// Spirals effect — max 8 palette colors (no spatial/blend support on GPU)
+#define MAX_METAL_SPIRALS_COLORS 8
+
+struct MetalSpiralsData {
+    uint32_t width;
+    uint32_t height;
+
+    // Per-spiral strand parameters
+    int32_t  spiralCount;       // total number of spirals = colorcnt * PaletteRepeat
+    int32_t  colorCount;        // number of palette colors
+    int32_t  paletteRepeat;     // PaletteRepeat
+
+    float    deltaStrands;      // width / spiralCount
+    float    spiralThickness;   // width of each spiral band (in x units)
+    float    spiralState;       // SpiralState = position * BufferWi * 10 * Direction  (x10 units)
+    float    rotation;          // pixels of x-shift per BufferHt rows
+
+    int32_t  show3D;
+    int32_t  allowAlpha;
+    float    rotation_sign;     // +1 if rotation >= 0, -1 otherwise (for 3D direction)
+
+    simd::uchar4  colorsAsRGBA[MAX_METAL_SPIRALS_COLORS];
+    simd::float3  colorsAsHSV[MAX_METAL_SPIRALS_COLORS];
+};
+
 struct LayerBlendingData {
     int32_t nodeCount;
     uint32_t bufferWi;

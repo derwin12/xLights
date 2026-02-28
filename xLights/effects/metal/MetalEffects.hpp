@@ -7,6 +7,7 @@
 #include "../ShockwaveEffect.h"
 #include "../KaleidoscopeEffect.h"
 #include "../FanEffect.h"
+#include "../SpiralsEffect.h"
 
 class MetalButterflyEffectData;
 
@@ -110,3 +111,17 @@ public:
 private:
     MetalKaleidoscopeEffectData *data;
 };
+
+class MetalSpiralsEffectData;
+
+class MetalSpiralsEffect : public SpiralsEffect {
+public:
+    MetalSpiralsEffect(int i);
+    virtual ~MetalSpiralsEffect();
+
+    virtual void Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) override;
+
+private:
+    MetalSpiralsEffectData *data;
+};
+
