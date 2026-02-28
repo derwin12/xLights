@@ -10,6 +10,7 @@
 #include "../SpiralsEffect.h"
 #include "../ColorWashEffect.h"
 #include "../BarsEffect.h"
+#include "../CirclesEffect.h"
 
 class MetalButterflyEffectData;
 
@@ -153,5 +154,19 @@ public:
 private:
     MetalBarsEffectData *data;
 };
+
+
+class MetalCirclesEffectData;
+class MetalCirclesEffect : public CirclesEffect {
+public:
+    MetalCirclesEffect(int i);
+    virtual ~MetalCirclesEffect();
+
+    virtual void Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) override;
+
+private:
+    MetalCirclesEffectData *data;
+};
+
 
 

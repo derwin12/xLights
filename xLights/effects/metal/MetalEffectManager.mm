@@ -126,6 +126,8 @@ RenderableEffect* CreateMetalEffect(EffectManager::RGB_EFFECTS_e eff) {
             return new MetalColorWashEffect(eff);
         case EffectManager::eff_BARS:
             return new MetalBarsEffect(eff);
+        case EffectManager::eff_CIRCLES:
+            return new MetalCirclesEffect(eff);
         default:
             return nullptr;
         }

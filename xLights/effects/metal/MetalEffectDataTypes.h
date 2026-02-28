@@ -238,6 +238,46 @@ struct MetalBarsData {
     simd::uchar4  highlightColor;   // white or first palette color
 };
 
+// Circles effect
+#define MAX_METAL_CIRCLES_BALLS   20
+#define MAX_METAL_CIRCLES_COLORS   8
+
+// mode constants
+#define CIRCLES_MODE_RADIAL        0
+#define CIRCLES_MODE_RADIAL_3D     1
+#define CIRCLES_MODE_METABALLS     2
+#define CIRCLES_MODE_REGULAR       3   // solid filled, last-writer wins
+#define CIRCLES_MODE_FADING        4   // fading filled disc
+
+struct MetalCirclesBall {
+    float x, y, radius;
+    int   colorIdx;
+};
+
+struct MetalCirclesData {
+    uint32_t width;
+    uint32_t height;
+
+    int32_t  mode;         // CIRCLES_MODE_*
+    int32_t  numBalls;
+    int32_t  colorCount;
+    int32_t  allowAlpha;
+
+    // Radial / Radial3D params
+    int32_t  cx, cy;       // center pixel
+    int32_t  barSize;      // barht
+    int32_t  blockSize;    // colorCnt * barht
+    int32_t  f_offset;     // animation offset
+    int32_t  maxRadius;
+    int32_t  number;       // used for radial_3D hue cycling
+    int32_t  effectState;  // used for radial_3D hue
+
+    MetalCirclesBall balls[MAX_METAL_CIRCLES_BALLS];
+
+    simd::uchar4 colorsAsRGBA[MAX_METAL_CIRCLES_COLORS];
+    simd::float3 colorsAsHSV[MAX_METAL_CIRCLES_COLORS];
+};
+
 // Spirals effect — max 8 palette colors (no spatial/blend support on GPU)
 #define MAX_METAL_SPIRALS_COLORS 8
 
