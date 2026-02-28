@@ -188,6 +188,56 @@ struct KaleidoscopeData {
     KaleidoscopeTriangleVertex v[3];
 };
 
+// ColorWash effect
+struct MetalColorWashData {
+    uint32_t width;
+    uint32_t height;
+
+    simd::uchar4 color;     // base blended color (RGBA)
+    simd::float3 colorHSV;  // base color as HSV (h,s,v in [0,1])
+
+    int32_t  horizFade;
+    int32_t  vertFade;
+    int32_t  reverseFades;
+    int32_t  shimmerBlack;   // 1 = shimmer odd frame → render black (skip draw)
+    int32_t  allowAlpha;
+};
+
+// Bars effect — max 8 palette colors (no spatial/custom-dir support on GPU)
+#define MAX_METAL_BARS_COLORS 8
+
+// direction constants (must match GetDirection() in BarsEffect.cpp)
+#define BARS_DIR_UP           0
+#define BARS_DIR_DOWN         1
+#define BARS_DIR_EXPAND       2
+#define BARS_DIR_COMPRESS     3
+#define BARS_DIR_LEFT         4
+#define BARS_DIR_RIGHT        5
+#define BARS_DIR_HEXPAND      6
+#define BARS_DIR_HCOMPRESS    7
+// Alternate Up/Down map to 0/1 after f_offset adjustment; Alternate Left/Right to 4/5
+
+struct MetalBarsData {
+    uint32_t width;
+    uint32_t height;
+
+    int32_t  direction;      // 0-7 after remapping alternates; custom falls back to CPU
+    int32_t  barSize;        // barHt (vertical) or barWi (horizontal) in pixels
+    int32_t  blockSize;      // colorcnt * barSize
+    int32_t  f_offset;       // animation offset in pixels
+    int32_t  newCenter;      // center pixel for expand/compress modes
+    int32_t  colorCount;     // actual number of palette colors used
+    int32_t  highlight;
+    int32_t  show3D;
+    int32_t  gradient;
+    int32_t  allowAlpha;
+    int32_t  useFirstColorForHighlight;
+
+    simd::uchar4  colorsAsRGBA[MAX_METAL_BARS_COLORS];
+    simd::float3  colorsAsHSV[MAX_METAL_BARS_COLORS];
+    simd::uchar4  highlightColor;   // white or first palette color
+};
+
 // Spirals effect — max 8 palette colors (no spatial/blend support on GPU)
 #define MAX_METAL_SPIRALS_COLORS 8
 

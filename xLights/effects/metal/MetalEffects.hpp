@@ -8,6 +8,8 @@
 #include "../KaleidoscopeEffect.h"
 #include "../FanEffect.h"
 #include "../SpiralsEffect.h"
+#include "../ColorWashEffect.h"
+#include "../BarsEffect.h"
 
 class MetalButterflyEffectData;
 
@@ -124,4 +126,32 @@ public:
 private:
     MetalSpiralsEffectData *data;
 };
+
+class MetalColorWashEffectData;
+
+class MetalColorWashEffect : public ColorWashEffect {
+public:
+    MetalColorWashEffect(int i);
+    virtual ~MetalColorWashEffect();
+
+    virtual void Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) override;
+
+private:
+    MetalColorWashEffectData *data;
+};
+
+
+class MetalBarsEffectData;
+
+class MetalBarsEffect : public BarsEffect {
+public:
+    MetalBarsEffect(int i);
+    virtual ~MetalBarsEffect();
+
+    virtual void Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) override;
+
+private:
+    MetalBarsEffectData *data;
+};
+
 

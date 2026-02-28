@@ -122,6 +122,10 @@ RenderableEffect* CreateMetalEffect(EffectManager::RGB_EFFECTS_e eff) {
             return new MetalFanEffect(eff);
         case EffectManager::eff_SPIRALS:
             return new MetalSpiralsEffect(eff);
+        case EffectManager::eff_COLORWASH:
+            return new MetalColorWashEffect(eff);
+        case EffectManager::eff_BARS:
+            return new MetalBarsEffect(eff);
         default:
             return nullptr;
         }
