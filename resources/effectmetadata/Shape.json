@@ -266,7 +266,8 @@
             "options": [],
             "default": "",
             "description": "Selects which timing track to use for triggering new shapes when Fire with timing track is enabled.",
-            "dynamicOptions": "timingTracks"
+            "dynamicOptions": "timingTracks",
+            "expandToFill": true
         },
         {
             "id": "Shape_FilterLabel",
