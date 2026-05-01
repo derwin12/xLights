@@ -349,10 +349,6 @@ void XmlDeserializingModelFactory::DeserializeCommonModelChildElements(Model* mo
                     selectedGroups.insert(s);
                 }
             }
-            if (!selectedGroups.empty()) {
-                merge = true;
-                showPopup = false;
-            }
         }
     }
 
