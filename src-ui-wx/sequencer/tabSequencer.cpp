@@ -3638,7 +3638,7 @@ std::map<int, std::vector<float>> xLightsFrame::LoadAudacityFile(std::string fil
     std::map<int, std::vector<float>> res;
 
     spdlog::debug("Processing audacity file " + file);
-    spdlog::debug("Interval %d.", intervalMS);
+    spdlog::debug("Interval {}.", intervalMS);
     spdlog::debug("Start,End,midinote");
 
     wxTextFile f(file);

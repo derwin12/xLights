@@ -5384,13 +5384,24 @@ void xLightsFrame::ValidateEffectAssets()
     std::string missing;
     for (const auto& it : _sequenceElements.GetAllReferencedFiles()) {
         auto f = FileUtils::FixFile("", it);
+        ObtainAccessToURL(f);
         if (!FileExists(f, false)) {
             missing += it + "\n";
         }
     }
 
-    if (missing != "" && (_promptBatchRenderIssues || (!_renderMode && !_checkSequenceMode))) {
-        wxMessageBox("Sequence references files which cannot be found:\nShow Folder: " + showDirectory + "\n" + missing + "\n Use Tools/Check Sequence for more details.", "Missing assets");
+    std::string relocated;
+    for (const auto& [orig, resolved] : _sequenceElements.GetSequenceMedia().GetImageRelocations()) {
+        relocated += orig + " -> " + resolved + "\n";
+    }
+
+    if ((!_renderMode && !_checkSequenceMode) || _promptBatchRenderIssues) {
+        if (missing != "") {
+            wxMessageBox("Sequence references files which cannot be found:\nShow Folder: " + showDirectory + "\n\n" + missing + "\n Use Tools/Check Sequence for more details.", "Missing assets");
+        }
+        if (relocated != "") {
+            wxMessageBox("Sequence references files which have been moved. Paths will be updated on save:\nShow Folder: " + showDirectory + "\n\n" + relocated, "Relocated assets");
+        }
     }
 }
 
