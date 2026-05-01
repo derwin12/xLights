@@ -339,7 +339,7 @@ void XmlDeserializingModelFactory::DeserializeCommonModelChildElements(Model* mo
             UICallbacks* uiCb = modelManager.GetUICallbacks();
             if (uiCb) {
                 std::vector<std::string> chosen = uiCb->ChooseFromList(
-                    "Select Groups to Import",
+                    "Select Groups to Import (Cancel to import no groups)",
                     allGroupNames, allGroupNames);
                 for (const auto& s : chosen) {
                     selectedGroups.insert(s);
