@@ -717,7 +717,7 @@ bool GLContextManager::MakeCurrent(ContextHandle ctx) {
         if (gle == ERROR_INVALID_HANDLE) {
             // Dummy window was destroyed (e.g. after Shutdown/reinit).
             // Caller should release this handle and acquire a fresh one.
-            spdlog::error("GLContextManager: wglMakeCurrent invalid handle — "
+            spdlog::error("GLContextManager: wglMakeCurrent invalid handle - "
                           "hwnd_valid={} dc_type={} hglrc={:p}",
                           (int)IsWindow(info->hwnd),
                           (int)GetObjectType(info->hdc),
