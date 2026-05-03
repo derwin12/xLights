@@ -54,6 +54,25 @@
 
 #include <log.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+#endif
+
+static void LogMemoryUsage(const std::string& label)
+{
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS_EX pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
+        spdlog::debug("Memory [{}]: WorkingSet={}MB, Private={}MB",
+            label,
+            pmc.WorkingSetSize / (1024 * 1024),
+            pmc.PrivateUsage / (1024 * 1024));
+    }
+#endif
+}
+
 void xLightsFrame::DisplayXlightsFilename(const wxString& filename) const
 {
     xlightsFilename = filename;
@@ -1435,6 +1454,7 @@ void xLightsFrame::OpenRenderAndSaveSequences(const wxArrayString &origFilenames
 
     printf("Processing file %s\n", (const char *)seq.c_str());
     spdlog::debug("Batch Render Processing file {}\n", seq.ToStdString());
+    LogMemoryUsage("batch-render sequence start: " + seq.ToStdString());
     OpenSequence(seq, nullptr);
     EnableSequenceControls(false);
 
@@ -1471,6 +1491,7 @@ void xLightsFrame::OpenRenderAndSaveSequences(const wxArrayString &origFilenames
 
         if (!aborted || alreadyRetried) {
             spdlog::info("Saving fseq file.");
+            LogMemoryUsage("batch-render fseq save: " + xlightsFilename.ToStdString());
             SetStatusText(_("Saving ") + xlightsFilename + _(" ... Writing fseq."));
             WriteFalconPiFile(xlightsFilename);
             spdlog::info("fseq file done.");
@@ -1494,7 +1515,7 @@ void xLightsFrame::OpenRenderAndSaveSequences(const wxArrayString &origFilenames
 
 void xLightsFrame::SaveSequence()
 {
-    
+    LogMemoryUsage("SaveSequence start: " + xlightsFilename.ToStdString());
 
     if (_seqData.NumFrames() == 0)
     {
@@ -1637,7 +1658,7 @@ void xLightsFrame::SaveSequence()
             GaugeSizer->Layout();
 
             spdlog::info("Saving fseq file.");
-
+            LogMemoryUsage("SaveSequence fseq save: " + xlightsFilename.ToStdString());
             SetStatusText(_("Saving ") + xlightsFilename + _(" ... Writing fseq."));
             WriteFalconPiFile(xlightsFilename);
             spdlog::info("fseq file done.", true);
@@ -1654,6 +1675,7 @@ void xLightsFrame::SaveSequence()
     }
     wxString display_name;
     if (mSaveFseqOnSave) {
+        LogMemoryUsage("SaveSequence fseq save (no render): " + xlightsFilename.ToStdString());
         SetStatusText(_("Saving ") + xlightsFilename + _(" ... Writing fseq."));
         WriteFalconPiFile(xlightsFilename, true);
         spdlog::info("fseq file done.");
