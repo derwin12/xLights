@@ -3272,6 +3272,42 @@ void xLightsFrame::DoLoadPerspective(Perspective* perspective)
         m_mgr->Update();
     }
 
+    // After a perspective load creates a floating House Preview / Model Preview
+    // frame, the embedded Metal canvas comes up gray until the user manually
+    // docks and re-floats the pane. The exact root cause is in MTKView /
+    // CAMetalLayer state set up during AUI's initial reparent, but the user
+    // workaround is reliable, so apply it programmatically: dock the pane and
+    // re-float it at the same position. The original perspective string is
+    // untouched — only the live layout cycles.
+    {
+        std::vector<std::string> recoverNames;
+        std::vector<wxPoint> recoverPos;
+        std::vector<wxSize> recoverSize;
+        wxAuiPaneInfoArray& panes = m_mgr->GetAllPanes();
+        for (size_t x = 0; x < panes.size(); ++x) {
+            if (!panes[x].IsFloating() || !panes[x].IsShown() || panes[x].frame == nullptr) continue;
+            std::string name = panes[x].name.ToStdString();
+            if (name != "HousePreview" && name != "ModelPreview") continue;
+            recoverNames.push_back(name);
+            recoverPos.push_back(panes[x].frame->GetPosition());
+            recoverSize.push_back(panes[x].frame->GetSize());
+        }
+        if (!recoverNames.empty()) {
+            for (const auto& nm : recoverNames) {
+                wxAuiPaneInfo& pane = m_mgr->GetPane(nm);
+                if (pane.IsOk()) pane.Dock();
+            }
+            m_mgr->Update();
+            for (size_t i = 0; i < recoverNames.size(); ++i) {
+                wxAuiPaneInfo& pane = m_mgr->GetPane(recoverNames[i]);
+                if (pane.IsOk()) {
+                    pane.Float().FloatingPosition(recoverPos[i]).FloatingSize(recoverSize[i]);
+                }
+            }
+            m_mgr->Update();
+        }
+    }
+
     if (m_mgr->GetPane("EffectPresets").IsShown() && !_effectPresetsInitialized && EffectTreeDlg != nullptr) {
         EffectTreeDlg->InitItems(_effectPresetManager);
         _effectPresetsInitialized = true;
