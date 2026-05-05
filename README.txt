@@ -11,6 +11,9 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.08  May ??, 2026
+    -bug (dkulp)                Fix status bar stuck showing "Batch Rendering ... ## sequences left to render"
+                                after cancelling a batch render or batch check-sequence with Escape. Also
+                                resets _renderMode / _checkSequenceMode state that was being left dirty.
     -bug (MrPierreB)            Fix house-preview video export producing dark/washed-out colors on Windows
                                 and when uploaded to YouTube. Also fixes Windows GPU encoder selection to prefer
                                 the correct hardware encoder (NVIDIA, AMD, or Intel) for faster exports.
