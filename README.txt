@@ -11,6 +11,9 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.08  May ??, 2026
+    -enh (dkulp)                When a JobPool worker thread dies from an unhandled C++ exception, the log now
+                                records the exception type, what() message, and the in-flight job name instead
+                                of just "unknown exception". Helps diagnose render-thread crashes.
     -bug (dkulp)                Fix House Preview / Model Preview floating panes coming up gray after a perspective
                                 load (would only render once manually docked and re-floated). The fix runs the same
                                 dock+refloat cycle automatically right after perspective load, preserving the saved
