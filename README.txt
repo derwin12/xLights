@@ -25,8 +25,7 @@ XLIGHTS/NUTCRACKER RELEASE NOTES
                                 and when uploaded to YouTube. Also fixes Windows GPU encoder selection to prefer
                                 the correct hardware encoder (NVIDIA, AMD, or Intel) for faster exports.
     -enh (agfazio)              Add "Also add alias to model" checkbox to the Select Model dialog shown when
-                                renaming a missing submodel during sequence load. When checked, subsequent
-                                sequences with the same old submodel name are auto-remapped without prompting.
+                                renaming a missing submodel during sequence load.
     -bug (agfazio)              Fix channel numbers not recalculating after deleting a model from the layout.
     -bug (dkulp)                macOS: fix Metal compute-render buffer leak. MetalComputeUtilities was double-retaining
                                 MTLBuffer/MTLTexture objects allocated via newBufferWith*/newTextureWithDescriptor: but
@@ -74,6 +73,7 @@ XLIGHTS/NUTCRACKER RELEASE NOTES
                                 render on background threads on Linux (previously forced to the main thread because
                                 the wx/Pango stack isn't off-thread safe), parallelizing rendering of sequences
                                 with heavy text/emoji content.
+    -bug (derwin12)			    Fix Dimensions showing incorrectly in 2D vs 3D (#6294)
 	-bug (derwin12)				Some WMA music files were hard crashing. (#6306)
 	-bug (derwin12) 			Restored the missing assets alert (#6276)
 	-bug (derwin12)				Fix in the lua script for batch rendering
