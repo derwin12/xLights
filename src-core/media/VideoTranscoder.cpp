@@ -172,12 +172,19 @@ std::string VideoTranscoder::Transcode(const std::string& inputPath,
     }
 
     // --- Decide output codec ---------------------------------------------
-    bool useRawvideo = IsUncompressedCodec(srcCodecId);
-
-    // Sources with an alpha channel (e.g. qtrle mattes) need an alpha-capable
-    // encoder or transparency is silently flattened. ProRes 4444 (prores_ks)
-    // preserves alpha and is decodable by AVFoundation on macOS and
-    // iPadOS 15.4+.
+    // Two source-property bits drive codec selection:
+    //
+    //   sourceIsUncompressed  — rawvideo / V210 / etc. We must NOT pass these
+    //     through as rawvideo in MOV: AVFoundation's QuickTime stack accepts
+    //     the container (asset.playable=YES) but AVAssetReader silently
+    //     reads zero frames, which on sequence reopen surfaces as
+    //     "couldn't read those mov files". ProRes 4444 is the right target
+    //     for these — visually-lossless, AVFoundation-decodable.
+    //
+    //   sourceHasAlpha — qtrle mattes etc.; HEVC/H.264 would silently flatten
+    //     transparency. ProRes 4444 (prores_ks) preserves it and is
+    //     decodable by AVFoundation on macOS and iPadOS 15.4+.
+    bool sourceIsUncompressed = IsUncompressedCodec(srcCodecId);
     bool sourceHasAlpha = false;
     if (const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(c.decCtx->pix_fmt)) {
         sourceHasAlpha = (desc->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
@@ -193,9 +200,10 @@ std::string VideoTranscoder::Transcode(const std::string& inputPath,
     if (!outStream) return "avformat_new_stream failed";
     bool needsGlobalHeader = (c.outCtx->oformat->flags & AVFMT_GLOBALHEADER) != 0;
 
-    AVCodecID outCodecId = useRawvideo ? AV_CODEC_ID_RAWVIDEO : AV_CODEC_ID_HEVC;
+    AVCodecID outCodecId = AV_CODEC_ID_NONE;
     const AVCodec* encoder = nullptr;
     AVPixelFormat encPixFmt = AV_PIX_FMT_NONE;
+    bool useRawvideo = false; // last-resort fallback only; see below
 
     // Configure + open `tryCtx` for `enc` of `codecId`. Returns true on
     // success (caller keeps tryCtx, sets pixFmtOut). On failure tryCtx is
@@ -257,20 +265,37 @@ std::string VideoTranscoder::Transcode(const std::string& inputPath,
         return true;
     };
 
-    if (!useRawvideo) {
+    // AVFoundation's QuickTime rawvideo decoder requires the row stride to be
+    // a multiple of 8 bytes — for rgb24 (3 bytes/pixel) that means width must
+    // be a multiple of 8. When the source is uncompressed AND the width is
+    // 8-aligned, we can preserve true bit-exactness by passing through as
+    // rawvideo. Otherwise (uncompressed but unaligned, or carrying alpha) we
+    // route through ProRes 4444, which is visually lossless and AVFoundation-
+    // decodable at any width.
+    bool rawvideoStrideAligned = (width % 8) == 0;
+    bool rawvideoPreferred = sourceIsUncompressed && rawvideoStrideAligned;
+
+    if (rawvideoPreferred) {
+        useRawvideo = true;
+        outCodecId = AV_CODEC_ID_RAWVIDEO;
+    } else {
         // Priority order:
-        //   1. prores_ks         — only when source has alpha (preserves it)
+        //   1. prores_ks         — when source has alpha OR is uncompressed
+        //                          (alpha preserved; lossless-equivalent for
+        //                          uncompressed sources whose width isn't
+        //                          8-aligned and so can't ride the rawvideo
+        //                          fast path).
         //   2. hevc_videotoolbox — macOS hardware HEVC
         //   3. libx265           — software HEVC (cross-platform)
         //   4. any HEVC encoder  — catches NVENC, QSV, VAAPI, etc.
         //   5. h264_videotoolbox — macOS hardware H.264
         //   6. libx264           — software H.264 (almost always available on Windows)
         //   7. any H.264 encoder — catches NVENC, QSV, VAAPI, etc.
-        //   8. rawvideo          — lossless fallback
+        //   8. rawvideo          — last-resort fallback (not AVFoundation-decodable)
         struct Candidate {
-            const char* name;    // null → generic find by id
+            const char* name;        // null → generic find by id
             AVCodecID id;
-            bool onlyIfAlpha;    // skip unless the source carries alpha
+            bool onlyIfNeedLossless; // skip unless source has alpha or is uncompressed
         };
         static constexpr Candidate kCandidates[] = {
             { "prores_ks",         AV_CODEC_ID_PRORES, true  },
@@ -281,8 +306,9 @@ std::string VideoTranscoder::Transcode(const std::string& inputPath,
             { "libx264",           AV_CODEC_ID_H264,   false },
             { nullptr,             AV_CODEC_ID_H264,   false },
         };
+        bool needLossless = sourceHasAlpha || sourceIsUncompressed;
         for (const auto& cand : kCandidates) {
-            if (cand.onlyIfAlpha && !sourceHasAlpha) continue;
+            if (cand.onlyIfNeedLossless && !needLossless) continue;
             const AVCodec* tryEncoder = cand.name ? avcodec_find_encoder_by_name(cand.name)
                                                   : avcodec_find_encoder(cand.id);
             if (!tryEncoder) continue;
@@ -299,7 +325,8 @@ std::string VideoTranscoder::Transcode(const std::string& inputPath,
             break;
         }
         if (!encoder) {
-            spdlog::warn("Transcoder: no HEVC/H.264 encoder available, falling back to rawvideo");
+            spdlog::warn("Transcoder: no AVFoundation-decodable encoder available, falling back to rawvideo "
+                         "(produced .mov may not be playable on macOS)");
             useRawvideo = true;
             outCodecId = AV_CODEC_ID_RAWVIDEO;
         } else if (sourceHasAlpha && outCodecId != AV_CODEC_ID_PRORES) {

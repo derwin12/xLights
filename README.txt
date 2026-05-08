@@ -15,6 +15,23 @@ XLIGHTS/NUTCRACKER RELEASE NOTES
                                 to open for the source dimensions, fall through to the next candidate (libx264, etc.)
                                 instead of returning a "Could not open encoder" failure. Fixes transcoding very small
                                 videos on Windows where libx265 was previously the only HEVC option tried.
+    -bug (dkulp)                Video transcode + Export Model Video (.mov): root-cause is that AVFoundation's
+                                QuickTime rawvideo decoder requires the row stride to be a multiple of 8 bytes
+                                (so for rgb24, width must be a multiple of 8). Wider matrix sizes (128x96 etc.)
+                                always met this; narrow models (50x24 etc.) silently failed to decode on
+                                macOS sequence reopen and on iPad (no FFmpeg fallback). Now: when width is
+                                8-aligned, .mov stays rawvideo (bit-exact, what TuneToMatrix.mov-style files
+                                always did); otherwise we route through ProRes 4444 (visually-lossless,
+                                AVFoundation-decodable). The "Uncompressed" .avi export is unchanged.
+    -enh (dkulp)                MediaCompatibility check now flags rawvideo .mov files with non-8-aligned row
+                                stride so the on-load "convert incompatible video" dialog catches them and
+                                converts to ProRes 4444 instead of letting them silently fail at playback.
+                                Also catches the broader silent-failure pattern (AVAssetReader producing zero
+                                samples after a successful startReading).
+    -enh (dkulp)                AVFoundationVideoReader detects rawvideo .mov with non-8-aligned stride at
+                                construction and invalidates the reader so VideoReader.cpp's existing FFmpeg
+                                fallback handles those files on desktop. iPad has no fallback so the file is
+                                surfaced as unreadable rather than silently producing black frames.
 
 2026.08  May 7, 2026
     -enh (dkulp)                When a JobPool worker thread dies from an unhandled C++ exception, the log now
