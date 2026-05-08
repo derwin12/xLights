@@ -120,7 +120,7 @@ protected:
     void Draw(RenderBuffer& buffer, b2ParticleSystem* ps, const xlColor& color, bool mixColors, int despeckle, float gravityX, float gravityY);
     bool LostForever(int x, int y, int w, int h, float gravityX, float gravityY);
     void CreateParticles(b2ParticleSystem* ps, int x, int y, int direction, int velocity, int flow, bool flowMusic, int lifetime, int width, int height, const xlColor& c, const std::string& particleType, bool mixcolors, float audioLevel, int sourceSize, float& flowAccumulator, float dt);
-    void CreateParticleSystem(b2World* world, int lifetime, int size, int maxParticles);
+    void CreateParticleSystem(b2World* world, int lifetime, int size);
     void Step(b2World* world, RenderBuffer& buffer, bool enabled[], int lifetime, const std::string& particleType, bool mixcolors,
               int x1, int y1, int direction1, int velocity1, int flow1, int sourceSize1, bool flowMusic1,
               int x2, int y2, int direction2, int velocity2, int flow2, int sourceSize2, bool flowMusic2,
