@@ -10,6 +10,8 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
+2026.09  May ??, 2026
+
 2026.08  May 7, 2026
     -enh (dkulp)                When a JobPool worker thread dies from an unhandled C++ exception, the log now
                                 records the exception type, what() message, and the in-flight job name instead
