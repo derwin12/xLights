@@ -183,8 +183,80 @@ std::string VideoTranscoder::Transcode(const std::string& inputPath,
         sourceHasAlpha = (desc->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
     }
 
+    // --- Open output (allocated before encoder selection so candidates can
+    //     read AVFMT_GLOBALHEADER before opening) -------------------------
+    ret = avformat_alloc_output_context2(&c.outCtx, nullptr, "mov", outputPath.c_str());
+    if (ret < 0 || !c.outCtx) {
+        return "Could not create output context: " + AvErr(ret);
+    }
+    AVStream* outStream = avformat_new_stream(c.outCtx, nullptr);
+    if (!outStream) return "avformat_new_stream failed";
+    bool needsGlobalHeader = (c.outCtx->oformat->flags & AVFMT_GLOBALHEADER) != 0;
+
     AVCodecID outCodecId = useRawvideo ? AV_CODEC_ID_RAWVIDEO : AV_CODEC_ID_HEVC;
     const AVCodec* encoder = nullptr;
+    AVPixelFormat encPixFmt = AV_PIX_FMT_NONE;
+
+    // Configure + open `tryCtx` for `enc` of `codecId`. Returns true on
+    // success (caller keeps tryCtx, sets pixFmtOut). On failure tryCtx is
+    // freed so we can fall through to the next candidate — libx265, for
+    // example, refuses to encode anything smaller than 16x16 even though
+    // its by-name lookup succeeds.
+    auto tryConfigureAndOpen = [&](const AVCodec* enc, AVCodecID codecId,
+                                   AVCodecContext*& tryCtx,
+                                   AVPixelFormat& pixFmtOut) -> bool {
+        tryCtx = avcodec_alloc_context3(enc);
+        if (!tryCtx) return false;
+        tryCtx->width = width;
+        tryCtx->height = height;
+        tryCtx->time_base = av_inv_q(srcFrameRate);
+        tryCtx->framerate = srcFrameRate;
+        tryCtx->sample_aspect_ratio = AVRational{ 1, 1 };
+
+        if (codecId == AV_CODEC_ID_PRORES) {
+            // ProRes 4444: 10-bit YUVA 4:4:4:4, all-intra. Profile 4 = 4444.
+            pixFmtOut = AV_PIX_FMT_YUVA444P10LE;
+            tryCtx->pix_fmt = pixFmtOut;
+            tryCtx->gop_size = 1;
+            tryCtx->has_b_frames = 0;
+            tryCtx->max_b_frames = 0;
+            av_opt_set_int(tryCtx, "profile", 4, AV_OPT_SEARCH_CHILDREN);
+        } else {
+            std::string encName(enc->name);
+            bool isVideotoolbox = encName.find("videotoolbox") != std::string::npos;
+            // videotoolbox wants NV12; software encoders (libx264/libx265) want YUV420P.
+            pixFmtOut = isVideotoolbox ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+            tryCtx->pix_fmt = pixFmtOut;
+            tryCtx->gop_size = 30;
+            tryCtx->max_b_frames = 2;
+            if (isVideotoolbox) {
+                av_opt_set_int(tryCtx, "allow_sw", 1, AV_OPT_SEARCH_CHILDREN);
+#if defined(__aarch64__)
+                tryCtx->flags |= AV_CODEC_FLAG_QSCALE;
+                tryCtx->global_quality = FF_QP2LAMBDA * 65; // ~visually lossless
+#else
+                tryCtx->bit_rate = (int64_t)width * height * 4 * 8; // generous
+#endif
+            } else {
+                av_opt_set(tryCtx, "crf", "18", AV_OPT_SEARCH_CHILDREN);
+                av_opt_set(tryCtx, "preset", "medium", AV_OPT_SEARCH_CHILDREN);
+            }
+        }
+
+        if (needsGlobalHeader) {
+            tryCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        }
+
+        int openRet = avcodec_open2(tryCtx, enc, nullptr);
+        if (openRet < 0) {
+            spdlog::warn("Transcoder: encoder '{}' failed to open: {}",
+                         enc->name, AvErr(openRet));
+            avcodec_free_context(&tryCtx);
+            return false;
+        }
+        return true;
+    };
+
     if (!useRawvideo) {
         // Priority order:
         //   1. prores_ks         — only when source has alpha (preserves it)
@@ -211,13 +283,20 @@ std::string VideoTranscoder::Transcode(const std::string& inputPath,
         };
         for (const auto& cand : kCandidates) {
             if (cand.onlyIfAlpha && !sourceHasAlpha) continue;
-            encoder = cand.name ? avcodec_find_encoder_by_name(cand.name)
-                                : avcodec_find_encoder(cand.id);
-            if (encoder) {
-                outCodecId = cand.id;
-                spdlog::debug("Transcoder: using encoder '{}'", encoder->name);
-                break;
+            const AVCodec* tryEncoder = cand.name ? avcodec_find_encoder_by_name(cand.name)
+                                                  : avcodec_find_encoder(cand.id);
+            if (!tryEncoder) continue;
+            AVCodecContext* tryCtx = nullptr;
+            AVPixelFormat tryPixFmt = AV_PIX_FMT_NONE;
+            if (!tryConfigureAndOpen(tryEncoder, cand.id, tryCtx, tryPixFmt)) {
+                continue;
             }
+            encoder = tryEncoder;
+            c.encCtx = tryCtx;
+            outCodecId = cand.id;
+            encPixFmt = tryPixFmt;
+            spdlog::debug("Transcoder: using encoder '{}'", encoder->name);
+            break;
         }
         if (!encoder) {
             spdlog::warn("Transcoder: no HEVC/H.264 encoder available, falling back to rawvideo");
@@ -233,69 +312,26 @@ std::string VideoTranscoder::Transcode(const std::string& inputPath,
         if (!encoder) {
             return "No rawvideo encoder available";
         }
-    }
-
-    // --- Open output ------------------------------------------------------
-    ret = avformat_alloc_output_context2(&c.outCtx, nullptr, "mov", outputPath.c_str());
-    if (ret < 0 || !c.outCtx) {
-        return "Could not create output context: " + AvErr(ret);
-    }
-    AVStream* outStream = avformat_new_stream(c.outCtx, nullptr);
-    if (!outStream) return "avformat_new_stream failed";
-
-    c.encCtx = avcodec_alloc_context3(encoder);
-    if (!c.encCtx) return "alloc encoder context failed";
-    c.encCtx->width = width;
-    c.encCtx->height = height;
-    c.encCtx->time_base = av_inv_q(srcFrameRate);
-    c.encCtx->framerate = srcFrameRate;
-    c.encCtx->sample_aspect_ratio = AVRational{ 1, 1 };
-
-    AVPixelFormat encPixFmt;
-    if (useRawvideo) {
+        c.encCtx = avcodec_alloc_context3(encoder);
+        if (!c.encCtx) return "alloc encoder context failed";
+        c.encCtx->width = width;
+        c.encCtx->height = height;
+        c.encCtx->time_base = av_inv_q(srcFrameRate);
+        c.encCtx->framerate = srcFrameRate;
+        c.encCtx->sample_aspect_ratio = AVRational{ 1, 1 };
         encPixFmt = AV_PIX_FMT_RGB24;
         c.encCtx->pix_fmt = encPixFmt;
         c.encCtx->field_order = AV_FIELD_PROGRESSIVE;
         c.encCtx->gop_size = 1;
         c.encCtx->has_b_frames = 0;
         c.encCtx->max_b_frames = 0;
-    } else if (outCodecId == AV_CODEC_ID_PRORES) {
-        // ProRes 4444: 10-bit YUVA 4:4:4:4, all-intra. Profile 4 = 4444.
-        encPixFmt = AV_PIX_FMT_YUVA444P10LE;
-        c.encCtx->pix_fmt = encPixFmt;
-        c.encCtx->gop_size = 1;
-        c.encCtx->has_b_frames = 0;
-        c.encCtx->max_b_frames = 0;
-        av_opt_set_int(c.encCtx, "profile", 4, AV_OPT_SEARCH_CHILDREN);
-    } else {
-        std::string encName(encoder->name);
-        bool isVideotoolbox = encName.find("videotoolbox") != std::string::npos;
-        // videotoolbox wants NV12; software encoders (libx264/libx265) want YUV420P.
-        encPixFmt = isVideotoolbox ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
-        c.encCtx->pix_fmt = encPixFmt;
-        c.encCtx->gop_size = 30;
-        c.encCtx->max_b_frames = 2;
-        if (isVideotoolbox) {
-            av_opt_set_int(c.encCtx, "allow_sw", 1, AV_OPT_SEARCH_CHILDREN);
-#if defined(__aarch64__)
-            c.encCtx->flags |= AV_CODEC_FLAG_QSCALE;
-            c.encCtx->global_quality = FF_QP2LAMBDA * 65; // ~visually lossless
-#else
-            c.encCtx->bit_rate = (int64_t)width * height * 4 * 8; // generous
-#endif
-        } else {
-            av_opt_set(c.encCtx, "crf", "18", AV_OPT_SEARCH_CHILDREN);
-            av_opt_set(c.encCtx, "preset", "medium", AV_OPT_SEARCH_CHILDREN);
+        if (needsGlobalHeader) {
+            c.encCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         }
-    }
-
-    if (c.outCtx->oformat->flags & AVFMT_GLOBALHEADER) {
-        c.encCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    }
-
-    ret = avcodec_open2(c.encCtx, encoder, nullptr);
-    if (ret < 0) {
-        return "Could not open encoder: " + AvErr(ret);
+        ret = avcodec_open2(c.encCtx, encoder, nullptr);
+        if (ret < 0) {
+            return "Could not open rawvideo encoder: " + AvErr(ret);
+        }
     }
 
     ret = avcodec_parameters_from_context(outStream->codecpar, c.encCtx);

@@ -11,6 +11,10 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.09  May ??, 2026
+    -bug (dkulp)                Video transcode: when a chosen encoder (e.g. libx265 with its 16x16 minimum) refuses
+                                to open for the source dimensions, fall through to the next candidate (libx264, etc.)
+                                instead of returning a "Could not open encoder" failure. Fixes transcoding very small
+                                videos on Windows where libx265 was previously the only HEVC option tried.
 
 2026.08  May 7, 2026
     -enh (dkulp)                When a JobPool worker thread dies from an unhandled C++ exception, the log now
