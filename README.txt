@@ -11,6 +11,10 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.09  May ??, 2026
+    -bug (dkulp)                Generate AI Lyrics now feeds the recogniser whatever waveform the user has currently
+                                selected (RAW, an isolated HTDemucs vocals stem, a band-passed filter, etc.) instead
+                                of always sending the original mix. Previously the in-place stem selection was
+                                ignored and the recogniser saw the full mix unless an alt-track file was attached.
     -bug (dkulp)                Video transcode: when a chosen encoder (e.g. libx265 with its 16x16 minimum) refuses
                                 to open for the source dimensions, fall through to the next candidate (libx264, etc.)
                                 instead of returning a "Could not open encoder" failure. Fixes transcoding very small
