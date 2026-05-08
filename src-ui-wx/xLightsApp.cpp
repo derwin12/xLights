@@ -146,6 +146,69 @@
 
 xLightsFrame* xLightsApp::__frame = nullptr;
 
+#ifdef __WXOSX__
+// Resolve the .app bundle path of the currently-running xLights process by
+// walking up from the executable. Returns empty if the layout doesn't match
+// the expected `<Bundle>.app/Contents/MacOS/<exe>` shape (e.g. unbundled dev
+// run). Callers must check for empty before using the result.
+wxString GetRunningAppBundlePath() {
+    wxString exePath = wxStandardPaths::Get().GetExecutablePath();
+    wxFileName fn(exePath);
+    if (fn.GetDirCount() < 2) {
+        spdlog::warn("Cannot resolve .app bundle: executable path too shallow: {}",
+                     exePath.ToStdString());
+        return wxEmptyString;
+    }
+    fn.RemoveLastDir(); // strip MacOS
+    fn.RemoveLastDir(); // strip Contents
+    wxString candidate = fn.GetPath();
+    if (!candidate.EndsWith(".app")) {
+        spdlog::warn("Cannot resolve .app bundle from executable path '{}' (got '{}')",
+                     exePath.ToStdString(), candidate.ToStdString());
+        return wxEmptyString;
+    }
+    return candidate;
+}
+
+// Spawn a new xLights instance using `open -n -a <bundle> [--args <file>]`.
+// Uses the argv form of wxExecute to avoid shell quoting / escaping issues
+// for paths containing spaces, quotes, or other shell metacharacters.
+// Returns false if the bundle path cannot be resolved.
+bool SpawnNewXLightsInstance(const wxString& fileToOpen) {
+    wxString bundle = GetRunningAppBundlePath();
+    if (bundle.IsEmpty()) {
+        return false;
+    }
+    // Keep backing storage alive for the duration of the wxExecute call.
+    std::string sOpen = "/usr/bin/open";
+    std::string sN = "-n";
+    std::string sA = "-a";
+    std::string sBundle(bundle.ToUTF8().data());
+    std::string sArgs = "--args";
+    std::string sFile(fileToOpen.ToUTF8().data());
+
+    long pid = 0;
+    if (fileToOpen.IsEmpty()) {
+        char* argv[] = { sOpen.data(), sN.data(), sA.data(), sBundle.data(), nullptr };
+        spdlog::info("Spawning new xLights instance: open -n -a '{}'", sBundle);
+        pid = wxExecute(argv, wxEXEC_ASYNC);
+    } else {
+        char* argv[] = { sOpen.data(), sN.data(), sA.data(), sBundle.data(),
+                         sArgs.data(), sFile.data(), nullptr };
+        spdlog::info("Spawning new xLights instance: open -n -a '{}' --args '{}'",
+                     sBundle, sFile);
+        pid = wxExecute(argv, wxEXEC_ASYNC);
+    }
+    // wxExecute async returns 0 on launch failure; non-zero is the child PID.
+    if (pid == 0) {
+        spdlog::warn("wxExecute failed to launch new xLights instance for '{}'",
+                     sFile.empty() ? sBundle : sFile);
+        return false;
+    }
+    return true;
+}
+#endif
+
 void InitialiseLogging(bool fromMain)
 {
     static bool loggingInitialised = false;
@@ -453,8 +516,18 @@ void xLightsApp::MacOpenFiles(const wxArrayString &fileNames) {
     if (__frame) {
         xLightsFrame* frame = __frame;
         frame->CallAfter([showDir, fileName, frame] {
-            
+
             if (fileName.EndsWith("xsqz") || fileName.EndsWith("zip")) {
+
+                // If a sequence is already loaded in this instance, spawn a separate
+                // xLights process for the package instead of replacing the current
+                // show. Matches the Windows behavior where double-clicking an xsqz
+                // launches a fresh instance with the package as its show folder.
+                // Falls back to in-place handling if we can't resolve the bundle
+                // (e.g. running unbundled).
+                if (frame->IsSequenceLoaded() && SpawnNewXLightsInstance(fileName)) {
+                    return;
+                }
 
                 SequencePackage xsqPkg(std::filesystem::path(fileName.ToStdString()),
                                        __frame->GetShowDirectory(), __frame->GetSeqXmlFileName().ToStdString(), &__frame->AllModels);
