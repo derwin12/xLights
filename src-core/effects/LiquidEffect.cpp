@@ -10,7 +10,6 @@
 
 #include "LiquidEffect.h"
 
-#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <spdlog/fmt/fmt.h>
@@ -205,9 +204,7 @@ void LiquidEffect::adjustSettings(const std::string& version, Effect* effect, bo
     // saved before this used per-frame semantics; we need the original
     // sequence frame rate to convert them so old sequences render
     // visually identically at any new frame rate.
-    const bool needsMigration = IsVersionOlder("2026.07.1", version);
-
-    if (needsMigration) {
+    if (IsVersionOlder("2026.07.1", version)) {
         // Look up the sequence's frame interval. Defaults to 50ms (the
         // long-time historical default) if anything in the chain is
         // missing — adjustSettings can run in contexts where the
@@ -227,7 +224,6 @@ void LiquidEffect::adjustSettings(const std::string& version, Effect* effect, bo
             }
         }
         const float oldFps = 1000.0F / static_cast<float>(oldFrameMs);
-        spdlog::debug("Liquid migration: oldFrameMs={} oldFps={:.1f}", oldFrameMs, oldFps);
 
         auto migrate = [&](const char* keyBase, float scale, long minVal, long maxVal) {
             for (int n = 1; n <= 4; ++n) {
@@ -280,8 +276,7 @@ void LiquidEffect::adjustSettings(const std::string& version, Effect* effect, bo
             if (!slider.empty()) {
                 const long oldVal = std::strtol(slider.c_str(), nullptr, 10);
                 const float oldPerSec = static_cast<float>(oldVal) * oldFps;
-                const long newSlider = perSecToSlider(oldPerSec);
-                settings[sliderKey] = std::to_string(newSlider);
+                settings[sliderKey] = std::to_string(perSecToSlider(oldPerSec));
             }
 
             const std::string vc = settings.Get(vcKey, "");
@@ -299,8 +294,7 @@ void LiquidEffect::adjustSettings(const std::string& version, Effect* effect, bo
                 valc.SetLimits(static_cast<float>(sFlowMin), static_cast<float>(sFlowMax));
                 valc.Deserialise(vc);
                 // V/frame × oldFps = perSec; perSec / 4 = slider (linear half).
-                const float vcScale = oldFps * 0.25F;
-                valc.ScaleAndOffsetValues(vcScale, 0);
+                valc.ScaleAndOffsetValues(oldFps * 0.25F, 0);
                 settings[vcKey] = valc.Serialise();
             }
         }
@@ -315,7 +309,6 @@ void LiquidEffect::adjustSettings(const std::string& version, Effect* effect, bo
             if (!slider.empty()) {
                 const long oldVal = std::strtol(slider.c_str(), nullptr, 10);
                 const long newVal = std::min<long>(oldVal * oldFrameMs / 10, 2500L);
-                spdlog::debug("Liquid migrate WarmUp: frames={} -> time={}ms (capped={})", oldVal, newVal, newVal == 2500L);
                 settings[newKey] = std::to_string(newVal);
                 settings.erase(oldKey);
             }
@@ -426,21 +419,13 @@ void LiquidEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Render
         );
 }
 
-// Global count of active Box2D worlds across all concurrent render threads.
-// Capped to sMaxConcurrentWorlds to prevent memory exhaustion when many
-// models carry a Liquid effect and all initialise in the same render pass.
-static std::atomic<int> sActiveLiquidWorlds{0};
-static constexpr int sMaxConcurrentWorlds = 8;
-
 class LiquidRenderCache : public EffectRenderCache {
 public:
     LiquidRenderCache() { _world = nullptr; };
     virtual ~LiquidRenderCache() {
         if (_world != nullptr) delete _world;
-        if (_holdsSlot) --sActiveLiquidWorlds;
-    };
+	};
     b2World* _world;
-    bool _holdsSlot = false;
     // Sub-particle flow accumulator per emitter. Slider values are
     // user-units that resolve to particles per 10 frames; fractional
     // amounts persist across frames so a low slider produces an
@@ -727,12 +712,12 @@ void LiquidEffect::CreateParticles(b2ParticleSystem* ps, int x, int y, int direc
     }
 }
 
-void LiquidEffect::CreateParticleSystem(b2World* world, int lifetime, int size, int maxParticles)
+void LiquidEffect::CreateParticleSystem(b2World* world, int lifetime, int size)
 {
     b2ParticleSystemDef particleSystemDef;
     auto particleSystem = world->CreateParticleSystem(&particleSystemDef);
     particleSystem->SetRadius((float)size / 1000.0f);
-    particleSystem->SetMaxParticleCount(maxParticles);
+    particleSystem->SetMaxParticleCount(MAX_PARTICLES);
     if (lifetime > 0) {
         particleSystem->SetDestructionByAge(true);
     }
@@ -831,36 +816,12 @@ void LiquidEffect::Render(RenderBuffer &buffer,
     b2Vec2 grav(gravityX, gravityY);
 
     if (buffer.needToInit) {
-        // Concurrency gate: if the global world limit is reached, defer this
-        // frame. needToInit remains false so we skip init cleanly; the world
-        // stays null and the effect renders nothing until a slot opens up.
-        if (!cache->_holdsSlot && sActiveLiquidWorlds.load() >= sMaxConcurrentWorlds) {
-            spdlog::debug("Liquid Render init deferred: {} worlds active (limit {}), buf={}x{} particleType='{}'",
-                          sActiveLiquidWorlds.load(), sMaxConcurrentWorlds, buffer.BufferWi, buffer.BufferHt, particleType);
-            buffer.needToInit = true; // retry next frame
-            return;
-        }
-
         buffer.needToInit = false;
 
         if (_world != nullptr) {
             delete _world;
             _world = nullptr;
         }
-
-        if (!cache->_holdsSlot) {
-            ++sActiveLiquidWorlds;
-            cache->_holdsSlot = true;
-        }
-
-        // Cap particles proportional to buffer area so tiny strip models
-        // (e.g. 27x1) cannot accumulate hundreds of thousands of off-screen
-        // particles. Large models fall back to MAX_PARTICLES unchanged.
-        const int bufferAreaCap = std::max(1000, buffer.BufferWi * buffer.BufferHt * 10);
-        const int effectiveMaxParticles = std::min(MAX_PARTICLES, bufferAreaCap);
-
-        spdlog::debug("Liquid Render init: buf={}x{} type='{}' maxParticles={} worlds={}",
-                      buffer.BufferWi, buffer.BufferHt, particleType, effectiveMaxParticles, sActiveLiquidWorlds.load());
 
         _world = new b2World(grav);
         if (bottom) {
@@ -876,7 +837,7 @@ void LiquidEffect::Render(RenderBuffer &buffer,
             CreateBarrier(_world, (float)buffer.BufferWi + 1.0f, (float)buffer.BufferHt / 2.0f, 0.001f, (float)buffer.BufferHt);
         }
 
-        CreateParticleSystem(_world, lifetime, size, effectiveMaxParticles);
+        CreateParticleSystem(_world, lifetime, size);
 
         // Convert warmUpTime (hundredths of seconds) to a frame count
         // at the current sequence frame rate. e.g. 200 (= 2 sec) at
@@ -884,8 +845,6 @@ void LiquidEffect::Render(RenderBuffer &buffer,
         const int warmUpFrames = (buffer.frameTimeInMs > 0)
             ? (warmUpTime * 10 / buffer.frameTimeInMs)
             : 0;
-        if (warmUpFrames > 0)
-            spdlog::debug("Liquid warm-up: {} frames ({}ms each)", warmUpFrames, buffer.frameTimeInMs);
         for (int i = 0; i < warmUpFrames; ++i) {
             Step(_world, buffer, enabled, lifetime, particleType, mixcolors,
                 x1, y1, direction1, velocity1, flow1, sourceSize1, flowMusic1,
@@ -912,12 +871,6 @@ void LiquidEffect::Render(RenderBuffer &buffer,
 
     // create new particles
     b2ParticleSystem* ps = _world->GetParticleSystemList();
-    if (ps != nullptr && buffer.curPeriod % 10 == 0) {
-        spdlog::trace("Liquid frame {}: particleCount={} acc=[{:.2f},{:.2f},{:.2f},{:.2f}]",
-                      buffer.curPeriod, ps->GetParticleCount(),
-                      cache->_flowAccumulator[0], cache->_flowAccumulator[1],
-                      cache->_flowAccumulator[2], cache->_flowAccumulator[3]);
-    }
     if (ps != nullptr) {
         xlColor color;
         buffer.palette.GetColor(0, color);
@@ -928,10 +881,5 @@ void LiquidEffect::Render(RenderBuffer &buffer,
     if (buffer.curPeriod == buffer.curEffEndPer) {
         delete _world;
         _world = nullptr;
-        if (cache->_holdsSlot) {
-            --sActiveLiquidWorlds;
-            cache->_holdsSlot = false;
-            spdlog::debug("Liquid world released: {} worlds now active", sActiveLiquidWorlds.load());
-        }
     }
 }
