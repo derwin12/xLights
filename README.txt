@@ -11,6 +11,10 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.09  May ??, 2026
+    -bug (dkulp)                Backup: switch the per-file copy from wxCopyFile to std::filesystem::copy_file so
+                                failures log the source/dest path and the underlying system error (errno) instead
+                                of a bare "Copy Failed". Also request write access for the backup directory so
+                                sandboxed (App Store) builds get a writable security-scoped bookmark.
     -bug (Neil)                 macOS: opening a .xsqz package while a sequence was already loaded replaced the
                                 current show folder in-place instead of launching a separate instance like Windows
                                 does. Now spawns a new xLights process for the package via `open -n`, leaving the

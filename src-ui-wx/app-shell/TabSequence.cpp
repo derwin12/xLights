@@ -269,7 +269,7 @@ void xLightsFrame::LoadEffectsFile()
 
     // This is the earliest we can do the backup as now the settings node will be populated
     _backupDirectory = GetXmlSetting("backupDir", showDirectory);
-    ObtainAccessToURL(_backupDirectory);
+    ObtainAccessToURL(_backupDirectory, true);
     if (!wxDir::Exists(_backupDirectory)) {
         spdlog::warn("Backup Directory not Found ... switching to Show Directory.");
         _backupDirectory = showDirectory;

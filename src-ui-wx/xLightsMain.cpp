@@ -3406,13 +3406,21 @@ bool xLightsFrame::CopyFiles(const wxString& wildcard, wxDir& srcDir, wxString& 
                 continue;
             }
 
-            spdlog::debug("    to {}.", (const char*)(targetDirName + wxFileName::GetPathSeparator() + fname).c_str());
+            wxString dstFullPath = targetDirName + wxFileName::GetPathSeparator() + fname;
+            spdlog::debug("    to {}.", (const char*)dstFullPath.c_str());
             SetStatusText("Copying File \"" + srcFile.GetFullPath());
-            bool success = wxCopyFile(srcFile.GetFullPath(),
-                                      targetDirName + wxFileName::GetPathSeparator() + fname);
-            if (!success) {
-                spdlog::error("    Copy Failed.");
-                errors += "Unable to copy file \"" + srcDir.GetNameWithSep() + fname + "\"\n";
+            std::error_code ec;
+            std::filesystem::copy_file(std::filesystem::path(srcFile.GetFullPath().ToStdString()),
+                                       std::filesystem::path(dstFullPath.ToStdString()),
+                                       std::filesystem::copy_options::overwrite_existing,
+                                       ec);
+            if (ec) {
+                spdlog::error("    Copy Failed: '{}' -> '{}': {} (errno {})",
+                              srcFile.GetFullPath().ToStdString(),
+                              dstFullPath.ToStdString(),
+                              ec.message(),
+                              ec.value());
+                errors += "Unable to copy file \"" + srcDir.GetNameWithSep() + fname + "\": " + ec.message() + "\n";
                 if (srcDir.GetNameWithSep().length() + fname.length() > 225) {
                     errors += "Consider shortening the directory path or filename.\n";
                 }
