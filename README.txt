@@ -11,6 +11,8 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.09  May ??, 2026
+    -bug (scott)                Fix HTDemucs ONNX model download failing: the 12-second total curl timeout set for
+                                short API calls was also killing the large-file download before it could complete.
     -bug (dkulp)                Backup: switch the per-file copy from wxCopyFile to std::filesystem::copy_file so
                                 failures log the source/dest path and the underlying system error (errno) instead
                                 of a bare "Copy Failed". Also request write access for the backup directory so

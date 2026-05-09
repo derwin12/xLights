@@ -478,9 +478,15 @@ bool CurlManager::doGetFile(const std::string& url,
         curl_easy_setopt(curl, CURLOPT_USERPWD, sAuth.c_str());
     }
 
+    // createCurl sets CURLOPT_TIMEOUT_MS=12000 for short API calls, but that
+    // would abort a large-file download after 12 seconds.  Disable it here and
+    // use the connection-phase timeout + low-speed detection instead.
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 0L);
     if (timeoutSeconds > 0) {
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeoutSeconds);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeoutSeconds);
     }
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);

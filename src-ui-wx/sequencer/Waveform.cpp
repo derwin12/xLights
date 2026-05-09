@@ -688,23 +688,49 @@ bool Waveform::PrepareStemData()
         if (locDlg.ShowModal() != wxID_OK)
             return false;
         const std::string chosenRoot = roots[locDlg.GetSelection()];
-        const std::string destDir = chosenRoot + "/" + AIModelStore::kModelsSubdir;
+        const std::string destDir = chosenRoot + "\\" + AIModelStore::kModelsSubdir;
         if (!AIModelStore::EnsureDirectory(destDir)) {
             DisplayError("Couldn't create directory: " + destDir);
             return false;
         }
 
-        const std::string local_Path = destDir + "/" + AIModelStore::kDemucsOnnxModelName;        
-        wxProgressDialog prog("Downloading Model",
-                                "Fetching HTDemucs stem-separation model…",
-                                100, this,
-                                wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_CAN_ABORT);
-        if (!CurlManager::HTTPSGetFile(AIModelStore::kDemucsOnnxDownloadURL, local_Path)) {
-            DisplayError("Download failed. Check your internet connection and try again.");
-            return false;
-        }        
+        const std::string local_Path = destDir + "\\" + AIModelStore::kDemucsOnnxModelName;
+        {
+            wxProgressDialog prog("Downloading Model",
+                                    "Downloading HTDemucs stem-separation model…",
+                                    1000, this,
+                                  wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME | wxPD_REMAINING_TIME);
+            std::atomic<bool> dlDone(false);
+            std::atomic<bool> dlOk(false);
+            std::atomic<int>  dlPct(0);
+            std::atomic<bool> dlAbort(false);
+            std::thread dlWorker([&] {
+                auto cb = [&dlPct, &dlAbort](int pos) -> bool {
+                    dlPct.store(pos);
+                    return !dlAbort.load();
+                };
+                dlOk = CurlManager::HTTPSGetFile(AIModelStore::kDemucsOnnxDownloadURL, local_Path, {}, {}, 300, cb);
+                dlDone.store(true);
+            });
+            bool dlCancelled = false;
+            while (!dlDone.load()) {
+                if (!prog.Update(dlPct.load())) {
+                    dlAbort.store(true);
+                    dlCancelled = true;
+                    break;
+                }
+                wxMilliSleep(50);
+                wxTheApp->Yield(true);
+            }
+            dlWorker.join();
+            if (dlCancelled || !dlOk.load()) {
+                if (!dlCancelled)
+                    DisplayError("Download failed. Check your internet connection and try again.");
+                return false;
+            }
+        }
         modelPath = local_Path;
-        if (modelPath.empty() || std::filesystem::exists(modelPath)) {
+        if (modelPath.empty() || !std::filesystem::exists(modelPath)) {
             DisplayError("Model wasn't found anywhere under " + destDir);
             return false;
         }
@@ -715,7 +741,7 @@ bool Waveform::PrepareStemData()
         wxProgressDialog prog("Separating Stems",
             "Running HTDemucs — drums, bass, vocals, other…",
             100, this,
-            wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_ELAPSED_TIME | wxPD_ESTIMATED_TIME | wxPD_CAN_ABORT);
+                              wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_ELAPSED_TIME | wxPD_REMAINING_TIME | wxPD_CAN_ABORT);
         std::atomic<bool> done(false);
         std::atomic<bool> ok(false);
         std::atomic<int>  pct(0);
