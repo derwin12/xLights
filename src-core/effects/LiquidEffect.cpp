@@ -425,7 +425,7 @@ public:
     LiquidRenderCache() : _world(nullptr) {};
     virtual ~LiquidRenderCache() {
         if (_world != nullptr) {
-            spdlog::warn("[Liquid] b2World leaked - effect cache destroyed before last frame was rendered");
+            spdlog::debug("[Liquid] Destroying remaining b2World during effect cache teardown");
             delete _world;
         }
     };
