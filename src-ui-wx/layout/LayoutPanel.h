@@ -33,12 +33,16 @@ class wxStaticText;
 #include <glm/glm.hpp>
 #include <pugixml.hpp>
 
+#include "models/handles/Handles.h"
+#include "models/handles/DragSession.h"
+
 #include "setup/ControllerConnectionDialog.h"
 #include "shared/utils/xlPropertyGrid.h"
 #include <wx/aui/aui.h>
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <vector>
 #include <list>
@@ -483,7 +487,13 @@ class LayoutPanel: public wxPanel
         int m_bound_end_y = 0;
         bool m_3d_lasso_shift_continuous = false;  // shift was still held when last 3D lasso ended
         bool m_3d_lasso_fresh_start = false;       // current 3D lasso clears prior selection
-        int m_over_handle = -1;
+        // Hover state: the handle the cursor is currently over.
+        // Cleared (nullopt) when the cursor is not on any handle.
+        std::optional<handles::Id> m_over_handle;
+        // Trailing-vertex counter for polyline create. Distinct from
+        // `m_over_handle` because the two have disjoint lifetimes and
+        // need different representations. Init -1 (NO_HANDLE).
+        int m_polyline_create_handle = -1;
         bool m_moving_handle = false;
         bool m_wheel_down = false;
         bool m_polyline_active = false;
@@ -505,10 +515,17 @@ class LayoutPanel: public wxPanel
         BaseObject *highlightedBaseObject = nullptr;
         wxTreeListItem selectedPrimaryTreeItem = nullptr;
         bool selectionLatched = false;
-        int over_handle = -1;
+        // Previous hover state, used to detect transitions so
+        // MouseOverHandle is only called on change.
+        std::optional<handles::Id> over_handle;
         glm::vec3 last_centerpos = {0,0,0};
         glm::vec3 last_worldrotate = {0,0,0};
         glm::vec3 last_worldscale = {0,0,0};
+
+        // descriptor-based drag session. Non-null while a
+        // new-API drag is in progress; legacy `MoveHandle3D` path
+        // is bypassed in mouse-move/up when this is set.
+        std::unique_ptr<handles::DragSession> m_dragSession;
 
         void clearPropGrid();
         bool stringPropsVisible = false;
@@ -584,7 +601,6 @@ class LayoutPanel: public wxPanel
         BaseObject* last_highlight = nullptr;
         int m_last_mouse_x = 0;
         int m_last_mouse_y = 0;
-        bool creating_model =  false;
         bool mouse_state_set = false;
 
         void OnSelectionChanged(wxTreeListEvent& event);

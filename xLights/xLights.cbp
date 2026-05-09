@@ -273,6 +273,10 @@
 		<Unit filename="../src-ui-wx/color/ColoursPanel.h" />
 		<Unit filename="../src-core/models/ControllerConnection.cpp" />
 		<Unit filename="../src-core/models/ControllerConnection.h" />
+		<Unit filename="../src-core/models/handles/DragSession.h" />
+		<Unit filename="../src-core/models/handles/Handles.h" />
+		<Unit filename="../src-core/models/handles/HitTest.cpp" />
+		<Unit filename="../src-core/models/handles/HitTest.h" />
 		<Unit filename="../src-ui-wx/setup/ControllerConnectionDialog.cpp" />
 		<Unit filename="../src-ui-wx/setup/ControllerConnectionDialog.h" />
 		<Unit filename="../src-ui-wx/setup/ControllerModelDialog.cpp" />

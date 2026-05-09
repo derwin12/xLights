@@ -60,6 +60,8 @@
 #include "models/ViewObject.h"
 #include "models/RulerObject.h"
 #include "models/CustomModel.h"
+#include "models/handles/HitTest.h"
+
 #include "XmlSerializer/FileSerializingVisitor.h"
 #include "XmlSerializer/StringSerializingVisitor.h"
 #include "XmlSerializer/XmlSerializer.h"
@@ -125,6 +127,13 @@ inline wxCursor CursorTypeToWx(CursorType ct) {
 static constexpr int kPaneMinHeight      = 400; // minimum height for ModelList / ModelSettings panes
 static constexpr int kListHeightFallback = 200; // fallback half-height used when container is hidden
 static constexpr int kMinPaneWidth       = 150; // absolute floor for left-panel sash drag (px)
+
+static inline handles::Modifier ModsFromEvent(const wxKeyboardState& event) {
+    handles::Modifier mods = handles::Modifier::None;
+    if (event.ShiftDown())   mods = mods | handles::Modifier::Shift;
+    if (event.ControlDown()) mods = mods | handles::Modifier::Control;
+    return mods;
+}
 // Left-panel target width is computed dynamically in UpdateLayoutSplitter() as
 // 18% of the splitter width (floor kMinPaneWidth) so it scales with screen resolution.
 
@@ -3669,6 +3678,16 @@ void LayoutPanel::SetSelectedModelToGroupSelected()
 
 void LayoutPanel::OnPreviewLeftDClick(wxMouseEvent& event)
 {
+    // double-click ends polyline creation. This is the
+    // touch-friendly equivalent of pressing ESC or RETURN. The
+    // second click of a wxEVT_LEFT_DCLICK does NOT fire a separate
+    // LEFT_DOWN (wx replaces it with the DCLICK event), so the
+    // first click of the double-click placed the final vertex and
+    // the DCLICK finalises immediately.
+    if (m_polyline_active) {
+        FinalizeModel();
+        return;
+    }
     if (!event.ControlDown()) {
         if (editing_models) {
             UnSelectAllModelsInTree();
@@ -3686,51 +3705,185 @@ void LayoutPanel::ProcessLeftMouseClick3D(wxMouseEvent& event)
     // don't mark mouse down if a selection is being made
     if (highlightedBaseObject != nullptr) {
         if (selectionLatched) {
-            m_over_handle = -1;
+            m_over_handle.reset();
+            bool handledByNewApi = false;
             if (selectedBaseObject != nullptr) {
                 glm::vec3 ray_origin;
                 glm::vec3 ray_direction;
                 GetMouseLocation(event.GetX(), event.GetY(), ray_origin, ray_direction);
-                selectedBaseObject->GetBaseObjectScreenLocation().CheckIfOverHandles3D(ray_origin, ray_direction, m_over_handle, modelPreview->GetCameraZoomForHandles(), modelPreview->GetHandleScale());
-            }
-            if (m_over_handle != -1) {
-                if ((m_over_handle & HANDLE_AXIS) > 0) {
-                    // an axis was selected
-                    if (selectedBaseObject != nullptr) {
-                        int active_handle = selectedBaseObject->GetBaseObjectScreenLocation().GetActiveHandle();
-                        selectedBaseObject->GetBaseObjectScreenLocation().SetActiveAxis((ModelScreenLocation::MSLAXIS)(m_over_handle & 0xff));
-                        selectedBaseObject->GetBaseObjectScreenLocation().MouseOverHandle(-1);
-                        bool z_scale = selectedBaseObject->GetBaseObjectScreenLocation().GetSupportsZScaling();
-                        // this is designed to pretend the control and shift keys are down when creating models to
-                        // make them scale from the desired handle depending on model type
-                        xlights->AbortRender();
-                        bool update_rgbeffects = false;
-                        auto pos = selectedBaseObject->MoveHandle3D(modelPreview, active_handle, event.ShiftDown() || creating_model, event.ControlDown() || (creating_model && z_scale), event.GetX(), event.GetY(), true, z_scale, update_rgbeffects);
-                        xlights->SetStatusText(wxString::Format("x=%.2f y=%.2f z=%.2f %s", pos.x, pos.y, pos.z, selectedBaseObject->GetDimension()));
-                        xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "LayoutPanel::ProcessLeftMouseClick3D");
-                        if (update_rgbeffects) {
-                            xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "LayoutPanel::ProcessLeftMouseClick3D");
+
+                // Descriptor-based hit-test. CentreCycle / locked /
+                // fromBase return nullptr from BeginDrag — those
+                // hits route through the selectionOnly path below
+                // instead of starting a drag session.
+                Model* model = dynamic_cast<Model*>(selectedBaseObject);
+                const auto currentTool =
+                    selectedBaseObject->GetBaseObjectScreenLocation().GetAxisTool();
+                handles::Tool newApiTool = handles::Tool::Translate;
+                bool toolSupportedByNewApi = false;
+                switch (currentTool) {
+                    case ModelScreenLocation::MSLTOOL::TOOL_TRANSLATE:
+                        newApiTool = handles::Tool::Translate;
+                        toolSupportedByNewApi = true;
+                        break;
+                    case ModelScreenLocation::MSLTOOL::TOOL_SCALE:
+                        newApiTool = handles::Tool::Scale;
+                        toolSupportedByNewApi = true;
+                        break;
+                    case ModelScreenLocation::MSLTOOL::TOOL_ROTATE:
+                        newApiTool = handles::Tool::Rotate;
+                        toolSupportedByNewApi = true;
+                        break;
+                    case ModelScreenLocation::MSLTOOL::TOOL_XY_TRANS:
+                        newApiTool = handles::Tool::XYTranslate;
+                        toolSupportedByNewApi = true;
+                        break;
+                    case ModelScreenLocation::MSLTOOL::TOOL_ELEVATE:
+                        newApiTool = handles::Tool::Elevate;
+                        toolSupportedByNewApi = true;
+                        break;
+                    default:
+                        break;
+                }
+                if (model != nullptr && toolSupportedByNewApi) {
+                    const float zoom = modelPreview->GetCameraZoomForHandles();
+                    const int hscale = modelPreview->GetHandleScale();
+                    auto& sloc0 = selectedBaseObject->GetBaseObjectScreenLocation();
+                    handles::ViewParams view;
+                    view.axisArrowLength = sloc0.GetAxisArrowLength(zoom, hscale);
+                    view.axisHeadLength  = sloc0.GetAxisHeadLength(zoom, hscale);
+                    view.axisRadius      = sloc0.GetAxisRadius(zoom, hscale);
+                    auto descriptors = model->GetHandles(
+                        handles::ViewMode::ThreeD, newApiTool, view);
+                    if (!descriptors.empty()) {
+                        handles::ScreenProjection proj{
+                            modelPreview->GetProjViewMatrix(),
+                            modelPreview->getWidth(),
+                            modelPreview->getHeight() };
+                        handles::HitTestOptions opts;
+                        // XY_TRANS / Elevate model the "single axis"
+                        // as a wide drag area on top of the active
+                        // handle (legacy AABB is ~half the arrow
+                        // length on each side). Use a much looser
+                        // screen tolerance so descriptors at the
+                        // active handle catch clicks anywhere in
+                        // that volume.
+                        opts.handleTolerance = (newApiTool == handles::Tool::XYTranslate ||
+                                                newApiTool == handles::Tool::Elevate)
+                                                ? 28.0f : 8.0f;
+                        glm::vec2 mousePx{ static_cast<float>(event.GetX()),
+                                           static_cast<float>(event.GetY()) };
+                        auto hit = handles::HitTest(descriptors, proj, mousePx, opts);
+
+                        if (hit) {
+                            // selection-only descriptors
+                            // (3D spheres, etc.) translate the
+                            // hit into a SetActiveHandle without
+                            // creating a DragSession.
+                            if (hit->selectionOnly) {
+                                auto& sloc = selectedBaseObject->GetBaseObjectScreenLocation();
+                                if (hit->id.role == handles::Role::Segment) {
+                                    // segment click → SelectSegment
+                                    // (curve / delete operations target it).
+                                    sloc.SelectSegment(hit->id.index);
+                                    xlights->GetOutputModelManager()->AddASAPWork(
+                                        OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW,
+                                        "LayoutPanel::ProcessLeftMouseClick3D-NewAPI-Segment");
+                                    handledByNewApi = true;
+                                } else {
+                                    if (sloc.GetActiveHandleId() == std::optional<handles::Id>(hit->id)) {
+                                        sloc.AdvanceAxisTool();
+                                    }
+                                    sloc.SetActiveHandle(std::optional<handles::Id>(hit->id));
+                                    xlights->GetOutputModelManager()->AddASAPWork(
+                                        OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW,
+                                        "LayoutPanel::ProcessLeftMouseClick3D-NewAPI-Select");
+                                    handledByNewApi = true;
+                                }
+                            } else {
+                                handles::WorldRay startRay{ray_origin, ray_direction};
+                                if (auto session = model->BeginDrag(hit->id, startRay)) {
+                                    xlights->AbortRender();
+                                    if (selectedBaseObject != _newModel) {
+                                        CreateUndoPoint(editing_models ? "SingleModel" : "SingleObject",
+                                                        selectedBaseObject->name, "");
+                                    }
+                                    auto& sloc2 = selectedBaseObject->GetBaseObjectScreenLocation();
+                                    const bool isAxisGizmo =
+                                        hit->id.role == handles::Role::AxisArrow ||
+                                        hit->id.role == handles::Role::AxisCube  ||
+                                        hit->id.role == handles::Role::AxisRing;
+                                    if (isAxisGizmo) {
+                                        // Axis-gizmo drag: keep the body handle as
+                                        // active (so GetHandles keeps emitting axis
+                                        // descriptors and the gizmo stays anchored),
+                                        // but sync the visual cues:
+                                        //  • active_axis drives DrawActiveAxisIndicator's
+                                        //    long red/green/blue line through the gizmo.
+                                        //  • highlighted_handle drives the yellow tint
+                                        //    on the dragged arrow/cube/ring in DrawAxisTool.
+                                        sloc2.SetActiveAxis(static_cast<ModelScreenLocation::MSLAXIS>(hit->id.axis));
+                                        sloc2.MouseOverHandle(hit->id);
+                                    } else {
+                                        // Vertex / CurveControl picks in XY_TRANS mode
+                                        // skip the selectionOnly path; sync active_handle
+                                        // here so the property panel and other legacy
+                                        // readers reflect the dragged sub-handle.
+                                        sloc2.SetActiveHandle(std::optional<handles::Id>(hit->id));
+                                    }
+                                    m_dragSession = std::move(session);
+                                    m_moving_handle = true;
+                                    m_mouse_down = true;
+                                    last_centerpos = selectedBaseObject->GetBaseObjectScreenLocation().GetCenterPosition();
+                                    last_worldrotate = selectedBaseObject->GetBaseObjectScreenLocation().GetRotationAngles();
+                                    last_worldscale = selectedBaseObject->GetBaseObjectScreenLocation().GetScaleMatrix();
+                                    xlights->GetOutputModelManager()->AddASAPWork(
+                                        OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW,
+                                        "LayoutPanel::ProcessLeftMouseClick3D-NewAPI");
+                                    handledByNewApi = true;
+                                }
+                            }
                         }
-                        m_moving_handle = true;
-                        m_mouse_down = true;
-                        last_centerpos = selectedBaseObject->GetBaseObjectScreenLocation().GetCenterPosition();
-                        last_worldrotate = selectedBaseObject->GetBaseObjectScreenLocation().GetRotationAngles();
-                        last_worldscale = selectedBaseObject->GetBaseObjectScreenLocation().GetScaleMatrix();
                     }
                 }
-                else if ((m_over_handle & HANDLE_SEGMENT) > 0) {
-                    // a segment was selected
+
+            }
+            if (!handledByNewApi && editing_models && !event.ControlDown() && !event.ShiftDown() && !event.AltDown()) {
+                // click missed all handles on the currently
+                // selected model. If the click landed on a different
+                // model body, switch selection to it (avoids needing
+                // to click empty space first to unlatch).
+                glm::vec3 ray_origin;
+                glm::vec3 ray_direction;
+                GetMouseLocation(event.GetX(), event.GetY(), ray_origin, ray_direction);
+                BaseObject* which_object = nullptr;
+                float distance = 1000000000.0f;
+                for (const auto& it : modelPreview->GetModels()) {
+                    if (it == selectedBaseObject) continue;
+                    float intersection_distance = 1000000000.0f;
+                    if (it->GetBaseObjectScreenLocation().HitTest3D(ray_origin, ray_direction, intersection_distance)) {
+                        if (intersection_distance < distance) {
+                            distance = intersection_distance;
+                            which_object = it;
+                        }
+                    }
+                }
+                if (which_object != nullptr) {
+                    // Clear the tree selection first; otherwise
+                    // SelectBaseObjectInTree's Select() call adds
+                    // the new model to the existing tree selection
+                    // (multi-select tree control), leaving the old
+                    // model still group-selected.
+                    UnSelectAllModelsInTree();
+                    SelectBaseObject(which_object);
                     if (selectedBaseObject != nullptr) {
-                        selectedBaseObject->GetBaseObjectScreenLocation().SelectSegment(m_over_handle & 0xFFF);
-                        xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "LayoutPanel::ProcessLeftMouseClick3D");
+                        selectionLatched = true;
+                        highlightedBaseObject = selectedBaseObject;
+                        selectedBaseObject->GetBaseObjectScreenLocation().SetActiveHandle(CENTER_HANDLE);
                     }
-                }
-                else {
-                    if (selectedBaseObject->GetBaseObjectScreenLocation().GetActiveHandle() == m_over_handle) {
-                        selectedBaseObject->GetBaseObjectScreenLocation().AdvanceAxisTool();
-                    }
-                    selectedBaseObject->GetBaseObjectScreenLocation().SetActiveHandle(m_over_handle);
-                    xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "LayoutPanel::ProcessLeftMouseClick3D");
+                    xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "LayoutPanel::ProcessLeftMouseClick3D-SwitchModel");
+                } else {
+                    m_mouse_down = true;
                 }
             }
             else {
@@ -3776,6 +3929,12 @@ void LayoutPanel::ProcessLeftMouseClick3D(wxMouseEvent& event)
             if (model_type == "Poly Line") {
                 m_polyline_active = true;
             }
+            // also clear the tree control's selection.
+            // UnSelectAllModels resets model-side flags but the
+            // multi-select tree control still holds the previously-
+            // selected model, so the new model is added to the
+            // selection rather than replacing it.
+            UnSelectAllModelsInTree();
             UnSelectAllModels();
             _newModel->Selected(true);
             _newModel->GetBaseObjectScreenLocation().SetActiveHandle(_newModel->GetBaseObjectScreenLocation().GetDefaultHandle());
@@ -3785,21 +3944,28 @@ void LayoutPanel::ProcessLeftMouseClick3D(wxMouseEvent& event)
             selectedBaseObject = _newModel;
             // need to ensure the model stays selected
             xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "LayoutPanel::ProcessLeftMouseClick3D", _newModel, nullptr, _newModel->GetName());
-            creating_model = true;
             if (wi > 0 && ht > 0)
             {
-                modelPreview->SetCursor(CursorTypeToWx(_newModel->InitializeLocation(m_over_handle, event.GetX(), event.GetY(), modelPreview)));
+                modelPreview->SetCursor(CursorTypeToWx(_newModel->InitializeLocation(m_polyline_create_handle, event.GetX(), event.GetY(), modelPreview)));
             }
-            bool z_scale = selectedBaseObject->GetBaseObjectScreenLocation().GetSupportsZScaling();
-            // this is designed to pretend the control and shift keys are down when creating models to
-            // make them scale from the desired handle depending on model type
             xlights->AbortRender();
-            bool update_rgbeffects = false;
-            auto pos = selectedBaseObject->MoveHandle3D(modelPreview, selectedBaseObject->GetBaseObjectScreenLocation().GetDefaultHandle(), event.ShiftDown() || creating_model, event.ControlDown() || (creating_model && z_scale), event.GetX(), event.GetY(), true, z_scale, update_rgbeffects);
-            if (update_rgbeffects) {
-                xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "LayoutPanel::ProcessLeftMouseClick3D");
+            // open a placement DragSession. Session captures
+            // the click intersection; mouse-move drives Update().
+            handles::WorldRay clickRay{};
+            GetMouseLocation(event.GetX(), event.GetY(), clickRay.origin, clickRay.direction);
+            auto createSession = selectedBaseObject->GetBaseObjectScreenLocation().BeginCreate(
+                _newModel->GetName(), clickRay, handles::ViewMode::ThreeD);
+            if (createSession) {
+                m_dragSession = std::move(createSession);
+                m_mouse_down = true;
+                // Setup() before the first redraw so Nodes reflect
+                // the click point. Without this, the initial render
+                // shows stale CreateDefaultModel-time positions and
+                // the model appears to jump when the first
+                // mouse-move fires Setup later.
+                _newModel->Setup();
+                _newModel->IncrementChangeCount();
             }
-            xlights->SetStatusText(wxString::Format("x=%.2f y=%.2f z=%.2f %s", pos.x, pos.y, pos.z, selectedBaseObject->GetDimension()));
             lastModelName = _newModel->name;
             modelPreview->SetAdditionalModel(_newModel);
         }
@@ -3919,6 +4085,13 @@ void LayoutPanel::OnPreviewLeftDown(wxMouseEvent& event)
     if (m_polyline_active)
     {
         Model *m = _newModel;
+        // close the prior vertex's drag session before
+        // adding a new one, so the new vertex gets its own
+        // session.
+        if (m_dragSession) {
+            m_dragSession->Commit();
+            m_dragSession.reset();
+        }
         m->AddHandle(modelPreview, event.GetX(), event.GetY());
         PolyLineModel* poly = dynamic_cast<PolyLineModel*>(m);
         poly->AddHandle();
@@ -3926,10 +4099,32 @@ void LayoutPanel::OnPreviewLeftDown(wxMouseEvent& event)
         xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE |
                                                       OutputModelManager::WORK_MODELS_CHANGE_REQUIRING_RERENDER |
                                                       OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "LayoutPanel::OnPreviewLeftDown");
-        m_over_handle++;
-        int handle = m->GetBaseObjectScreenLocation().GetActiveHandle();
-        handle++;
-        m->GetBaseObjectScreenLocation().SetActiveHandle(handle);
+        m_polyline_create_handle++;
+        // Advance active_handle to the next Vertex. If we're not on
+        // a vertex yet (model just created), start at vertex 0.
+        auto& sloc = m->GetBaseObjectScreenLocation();
+        const auto curActive = sloc.GetActiveHandleId();
+        const int nextVertexIdx =
+            (curActive && curActive->role == handles::Role::Vertex)
+                ? curActive->index + 1
+                : 0;
+        handles::Id nextVertexId;
+        nextVertexId.role = handles::Role::Vertex;
+        nextVertexId.index = nextVertexIdx;
+        sloc.SetActiveHandle(std::optional<handles::Id>(nextVertexId));
+        // Open a new session on the just-added vertex.
+        auto polyLoc = dynamic_cast<PolyPointScreenLocation*>(&sloc);
+        if (polyLoc) {
+            handles::WorldRay polyRay{};
+            GetMouseLocation(event.GetX(), event.GetY(), polyRay.origin, polyRay.direction);
+            auto polySession = polyLoc->BeginExtend(
+                m->GetName(), polyRay,
+                is_3d ? handles::ViewMode::ThreeD : handles::ViewMode::TwoD,
+                nextVertexIdx);
+            if (polySession) {
+                m_dragSession = std::move(polySession);
+            }
+        }
         return;
     }
 
@@ -3939,6 +4134,66 @@ void LayoutPanel::OnPreviewLeftDown(wxMouseEvent& event)
     if (is_3d) {
         ProcessLeftMouseClick3D(event);
         return;
+    }
+
+    // try descriptor-based 2D handle pick before any
+    // Shift / Ctrl / Alt branches. Without this, Shift+click
+    // routes to the marquee-select path and never reaches the
+    // resize handle, which means aspect-ratio-locked resize
+    // (which depends on Shift being held) is unreachable.
+    {
+        bool handledByNewApi = false;
+        if (selectedBaseObject != nullptr) {
+            Model* model = dynamic_cast<Model*>(selectedBaseObject);
+            if (model != nullptr) {
+                handles::ViewParams view2d;  // 2D handles are at
+                // fixed positions (no camera-zoom scaling), so the
+                // default 60/4 ViewParams are fine.
+                auto descriptors = model->GetHandles(
+                    handles::ViewMode::TwoD, handles::Tool::Translate, view2d);
+                if (!descriptors.empty()) {
+                    handles::ScreenProjection proj{
+                        modelPreview->GetProjViewMatrix(),
+                        modelPreview->getWidth(),
+                        modelPreview->getHeight() };
+                    handles::HitTestOptions opts;
+                    opts.handleTolerance = 8.0f;
+                    glm::vec2 mousePx{ static_cast<float>(event.GetX()),
+                                       static_cast<float>(event.GetY()) };
+                    if (auto hit = handles::HitTest(descriptors, proj, mousePx, opts)) {
+                        // segment click → SelectSegment (2D).
+                        if (hit->id.role == handles::Role::Segment) {
+                            selectedBaseObject->GetBaseObjectScreenLocation().SelectSegment(hit->id.index);
+                            modelPreview->SetCursor(wxCURSOR_DEFAULT);
+                            xlights->GetOutputModelManager()->AddASAPWork(
+                                OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW,
+                                "LayoutPanel::OnPreviewLeftDown-NewAPI2D-Segment");
+                            handledByNewApi = true;
+                        } else {
+                            handles::WorldRay startRay;
+                            GetMouseLocation(event.GetX(), event.GetY(),
+                                              startRay.origin, startRay.direction);
+                            if (auto session = model->BeginDrag(hit->id, startRay)) {
+                                xlights->AbortRender();
+                                if (selectedBaseObject != _newModel) {
+                                    CreateUndoPoint("SingleModel", selectedBaseObject->name, "");
+                                }
+                                m_dragSession = std::move(session);
+                                m_moving_handle = true;
+                                m_mouse_down = true;
+                                xlights->GetOutputModelManager()->AddASAPWork(
+                                    OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW,
+                                    "LayoutPanel::OnPreviewLeftDown-NewAPI2D");
+                                handledByNewApi = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (handledByNewApi) {
+            return;
+        }
     }
 
     if (event.ControlDown())
@@ -3965,24 +4220,6 @@ void LayoutPanel::OnPreviewLeftDown(wxMouseEvent& event)
         m_previous_mouse_y = event.GetY();
         m_wheel_down = true;
     }
-    else if (m_over_handle != -1)
-    {
-        if ((m_over_handle & HANDLE_SEGMENT) > 0) {
-            // a segment was selected
-            if (selectedBaseObject != nullptr) {
-                selectedBaseObject->GetBaseObjectScreenLocation().SelectSegment(m_over_handle & 0xFFF);
-                modelPreview->SetCursor(wxCURSOR_DEFAULT);
-                xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "LayoutPanel::OnPreviewLeftDown");
-            }
-        }
-        else {
-            m_moving_handle = true;
-            if (selectedBaseObject != nullptr) {
-                selectedBaseObject->SelectHandle(m_over_handle);
-                xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "LayoutPanel::OnPreviewLeftDown");
-            }
-        }
-    }
     else if (selectedButton != nullptr)
     {
         //create a new model
@@ -4005,9 +4242,31 @@ void LayoutPanel::OnPreviewLeftDown(wxMouseEvent& event)
             if (model_type == "Poly Line") {
                 m_polyline_active = true;
             }
+            UnSelectAllModelsInTree();
             UnSelectAllModels();
             _newModel->Selected(true);
-            modelPreview->SetCursor(CursorTypeToWx(_newModel->InitializeLocation(m_over_handle, event.GetX(), event.GetY(), modelPreview)));
+            // Latch active_handle to the screen location's default
+            // handle. The polyline-extend branch reads
+            // `GetActiveHandleId()` to compute the next vertex
+            // index — without this latch the 2nd click would drag
+            // vertex 0 instead of the newly-added trailing vertex.
+            _newModel->GetBaseObjectScreenLocation().SetActiveHandle(_newModel->GetBaseObjectScreenLocation().GetDefaultHandle());
+            _newModel->GetBaseObjectScreenLocation().SetAxisTool(_newModel->GetBaseObjectScreenLocation().GetDefaultTool());
+            modelPreview->SetCursor(CursorTypeToWx(_newModel->InitializeLocation(m_polyline_create_handle, event.GetX(), event.GetY(), modelPreview)));
+            // Open a 2D placement DragSession — mouse-move drives
+            // Update() until the session commits.
+            handles::WorldRay clickRay2d{};
+            GetMouseLocation(event.GetX(), event.GetY(), clickRay2d.origin, clickRay2d.direction);
+            auto createSession2d = _newModel->GetBaseObjectScreenLocation().BeginCreate(
+                _newModel->GetName(), clickRay2d, handles::ViewMode::TwoD);
+            if (createSession2d) {
+                m_dragSession = std::move(createSession2d);
+                // See 3D path comment: rebuild Nodes immediately so
+                // the first redraw after click reflects the click-
+                // point position.
+                _newModel->Setup();
+                _newModel->IncrementChangeCount();
+            }
             lastModelName = _newModel->name;
             modelPreview->SetAdditionalModel(_newModel);
         }
@@ -4059,6 +4318,20 @@ void LayoutPanel::OnPreviewLeftUp(wxMouseEvent& event)
         return;
     }
 
+    if (m_mouse_down && m_dragSession) {
+        auto commit = m_dragSession->Commit();
+        const bool dirty = commit.dirty != handles::DirtyField::None;
+        m_dragSession.reset();
+        if (dirty) {
+            xlights->GetOutputModelManager()->AddASAPWork(
+                OutputModelManager::WORK_RGBEFFECTS_CHANGE |
+                    OutputModelManager::WORK_MODELS_CHANGE_REQUIRING_RERENDER |
+                    OutputModelManager::WORK_RELOAD_PROPERTYGRID |
+                    OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW,
+                "LayoutPanel::OnPreviewLeftUp-NewAPI");
+        }
+    }
+
     if (is_3d && m_mouse_down) {
         if (selectedBaseObject != nullptr) {
             selectedBaseObject->GetBaseObjectScreenLocation().SetActiveAxis(ModelScreenLocation::MSLAXIS::NO_AXIS);
@@ -4071,7 +4344,7 @@ void LayoutPanel::OnPreviewLeftUp(wxMouseEvent& event)
     m_mouse_down = false;
     SetMouseStateForModels(m_mouse_down);
     m_moving_handle = false;
-    over_handle = NO_HANDLE;
+    over_handle.reset();
 
     if (m_creating_bound_rect) {
         if (is_3d) {
@@ -4346,12 +4619,19 @@ static Model* GetXlightsModel(Model* model, std::string& last_model, xLightsFram
 void LayoutPanel::FinalizeModel()
 {
     xlights->AddTraceMessage("In LayoutPanel::FinalizeModel");
-    if (m_polyline_active && m_over_handle > 1) {
+    // discard any active drag session before mutating mPos.
+    // FinalizeModel's polyline DeleteHandle below shrinks mPos, so a
+    // session pointing at the trailing vertex would crash on the
+    // next mouse-move SetPoint.
+    if (m_dragSession) {
+        m_dragSession.reset();
+    }
+    if (m_polyline_active && m_polyline_create_handle > 1) {
         Model *m = _newModel;
         if (m != nullptr)
         {
             xlights->AddTraceMessage("LayoutPanel::FinalizeModel Polyline deleting handle.");
-            m->DeleteHandle(m_over_handle);
+            m->DeleteHandle(m_polyline_create_handle);
 
             auto plm = dynamic_cast<PolyLineModel*>(m);
             plm->ClearPolyLineCreate(); // disable the auto-distribute node feature
@@ -4370,8 +4650,8 @@ void LayoutPanel::FinalizeModel()
     m_moving_handle = false;
     m_dragging = false;
     m_polyline_active = false;
-    creating_model = false;
-    m_over_handle = NO_HANDLE;
+    m_over_handle.reset();
+    m_polyline_create_handle = NO_HANDLE;
 
     if (_newModel != nullptr) {
         xlights->AddTraceMessage("LayoutPanel::FinalizeModel New model is not null.");
@@ -4939,111 +5219,112 @@ void LayoutPanel::OnPreviewMouseMove3D(wxMouseEvent& event)
     else if (m_mouse_down) {
         if (m_moving_handle) {
             xlights->AddTraceMessage("LayoutPanel::OnPreviewMouseMove3D Mouse down moving handle");
-            Model* m = dynamic_cast<Model*>(selectedBaseObject);
-            if (selectedBaseObject != nullptr && (_newModel == selectedBaseObject || xlights->AllModels.IsModelValid(m))) {
+            if (m_dragSession) {
                 if (!xlights->AbortRender()) return;
-
-                int active_handle = selectedBaseObject->GetBaseObjectScreenLocation().GetActiveHandle();
-
-                int selectedModelCnt = ModelsSelectedCount();
-                int selectedViewObjectCnt = ViewObjectsSelectedCount();
-                if (selectedBaseObject != _newModel) {
-                    CreateUndoPoint(editing_models ? "SingleModel" : "SingleObject", selectedBaseObject->name, std::to_string(active_handle));
-                }
-                bool z_scale = selectedBaseObject->GetBaseObjectScreenLocation().GetSupportsZScaling();
-                if (selectedBaseObject->GetBaseObjectScreenLocation().GetAxisTool() == ModelScreenLocation::MSLTOOL::TOOL_ROTATE) {
-                    SetMouseStateForModels(true);
-                }
-                // this is designed to pretend the control and shift keys are down when creating models to
-                // make them scale from the desired handle depending on model type
-                bool update_rgbeffects = false;
-                auto pos = selectedBaseObject->MoveHandle3D(modelPreview, active_handle, event.ShiftDown() || creating_model, event.ControlDown() || (creating_model && z_scale), event.GetX(), event.GetY(), false, z_scale, update_rgbeffects);
-                xlights->SetStatusText(wxString::Format("x=%.2f y=%.2f z=%.2f %s", pos.x, pos.y, pos.z, selectedBaseObject->GetDimension()));
-                //SetupPropGrid(selectedBaseObject);
-                if (update_rgbeffects) {
-                    xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "LayoutPanel::OnPreviewMouseMove");
-                }
-                xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RELOAD_PROPERTYGRID, "LayoutPanel::OnPreviewMouseMove");
-                // dont need these until released
-                //xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "LayoutPanel::OnPreviewMouseMove3D");
-                //xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_MODELS_CHANGE_REQUIRING_RERENDER, "LayoutPanel::OnPreviewMouseMove3D");
-                if (selectedModelCnt > 1 || selectedViewObjectCnt > 1) {
-                    if (selectedBaseObject->GetBaseObjectScreenLocation().GetAxisTool() == ModelScreenLocation::MSLTOOL::TOOL_TRANSLATE) {
-                        glm::vec3 new_centerpos = selectedBaseObject->GetBaseObjectScreenLocation().GetCenterPosition();
-                        glm::vec3 pos_offset = new_centerpos - last_centerpos;
-                        for (size_t i = 0; i < modelPreview->GetModels().size(); i++)
-                        {
-                            if (modelPreview->GetModels()[i]->GroupSelected() || modelPreview->GetModels()[i]->Selected()) {
-                                if (modelPreview->GetModels()[i] != selectedBaseObject) {
-                                    modelPreview->GetModels()[i]->AddOffset(pos_offset.x, pos_offset.y, pos_offset.z);
-                                }
-                            }
-                        }
-                        for (const auto& it : xlights->AllObjects) {
-                            ViewObject* view_object = it.second;
-                            if (view_object->GroupSelected() || view_object->Selected()) {
-                                if (view_object != selectedBaseObject) {
-                                    view_object->AddOffset(pos_offset.x, pos_offset.y, pos_offset.z);
-                                }
-                            }
-                        }
-                        last_centerpos = new_centerpos;
-                    } else if (selectedBaseObject->GetBaseObjectScreenLocation().GetAxisTool() == ModelScreenLocation::MSLTOOL::TOOL_ROTATE) {
-                        glm::vec3 new_worldrotate = selectedBaseObject->GetBaseObjectScreenLocation().GetRotationAngles();
-                        glm::vec3 rotate_offset = new_worldrotate - last_worldrotate;
-                        glm::vec3 active_handle_position = selectedBaseObject->GetBaseObjectScreenLocation().GetActiveHandlePosition();
-                        if( rotate_offset.x > 180.0f ) { rotate_offset.x -= 360.0f; }
-                        if( rotate_offset.y > 180.0f ) { rotate_offset.y -= 360.0f; }
-                        if( rotate_offset.z > 180.0f ) { rotate_offset.z -= 360.0f; }
-                        if( rotate_offset.x < -180.0f ) { rotate_offset.x += 360.0f; }
-                        if( rotate_offset.y < -180.0f ) { rotate_offset.y += 360.0f; }
-                        if( rotate_offset.z < -180.0f ) { rotate_offset.z += 360.0f; }
-                        rotate_offset.x = -rotate_offset.x;
-                        for (size_t i = 0; i < modelPreview->GetModels().size(); i++) {
-                            if (modelPreview->GetModels()[i]->GroupSelected() || modelPreview->GetModels()[i]->Selected()) {
-                                if (modelPreview->GetModels()[i] != selectedBaseObject) {
-                                    xlights->AbortRender();
-                                    modelPreview->GetModels()[i]->RotateAboutPoint(active_handle_position, rotate_offset);
-                                }
-                            }
-                        }
-                        for (const auto& it : xlights->AllObjects) {
-                            ViewObject* view_object = it.second;
-                            if (view_object->GroupSelected() || view_object->Selected()) {
-                                if (view_object != selectedBaseObject) {
-                                    xlights->AbortRender();
-                                    view_object->RotateAboutPoint(active_handle_position, rotate_offset);
-                                }
-                            }
-                        }
-                        last_worldrotate = new_worldrotate;
-                    }
-                    if (selectedBaseObject->GetBaseObjectScreenLocation().GetAxisTool() == ModelScreenLocation::MSLTOOL::TOOL_SCALE) {
-                        glm::vec3 new_worldscale = selectedBaseObject->GetBaseObjectScreenLocation().GetScaleMatrix();
-                        if (last_worldscale.x == 0 || last_worldscale.y == 0 || last_worldscale.z == 0) {
-                            spdlog::critical("This is not going to end well last_world_scale has a zero parameter and we are about to divide using it.");
-                        }
-                        glm::vec3 scale_offset = glm::vec3(new_worldscale / last_worldscale);
-                        for (size_t i = 0; i < modelPreview->GetModels().size(); i++)
-                        {
-                            if (modelPreview->GetModels()[i]->GroupSelected() || modelPreview->GetModels()[i]->Selected()) {
-                                if (modelPreview->GetModels()[i] != selectedBaseObject) {
-                                    modelPreview->GetModels()[i]->Scale(scale_offset);
-                                }
-                            }
-                        }
-                        for (const auto& it : xlights->AllObjects) {
-                            ViewObject* view_object = it.second;
-                            if (view_object->GroupSelected() || view_object->Selected()) {
-                                if (view_object != selectedBaseObject) {
-                                    view_object->Scale(scale_offset);
-                                }
-                            }
-                        }
-                        last_worldscale = new_worldscale;
+                handles::WorldRay ray{};
+                GetMouseLocation(event.GetX(), event.GetY(), ray.origin, ray.direction);
+                auto result = m_dragSession->Update(ray, ModsFromEvent(event));
+                // NeedsInit: rebuild Nodes when a vertex / curve move changes the
+                // spline. Without this, polyline lights stay at their pre-drag
+                // positions during creation and vertex moves.
+                if (result == handles::UpdateResult::NeedsInit) {
+                    if (Model* mModel = dynamic_cast<Model*>(selectedBaseObject)) {
+                        mModel->Setup();
+                        mModel->IncrementChangeCount();
                     }
                 }
-                xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "LayoutPanel::OnPreviewMouseMove3D");
+                if (result == handles::UpdateResult::Updated ||
+                    result == handles::UpdateResult::NeedsInit) {
+                    if (selectedBaseObject != nullptr) {
+                        auto pos = selectedBaseObject->GetBaseObjectScreenLocation().GetCenterPosition();
+                        xlights->SetStatusText(wxString::Format(
+                            "x=%.2f y=%.2f z=%.2f %s",
+                            pos.x, pos.y, pos.z,
+                            selectedBaseObject->GetDimension()));
+
+                        // Multi-select group-drag: routes by the dragged handle's role
+                        // (arrow → translate, ring → rotate, cube → scale).
+                        const int selectedModelCnt      = ModelsSelectedCount();
+                        const int selectedViewObjectCnt = ViewObjectsSelectedCount();
+                        const bool multiSel = (selectedModelCnt > 1 || selectedViewObjectCnt > 1);
+                        if (multiSel) {
+                            auto& sloc = selectedBaseObject->GetBaseObjectScreenLocation();
+                            const handles::Role dragRole = m_dragSession->GetHandleId().role;
+                            if (dragRole == handles::Role::AxisArrow) {
+                                glm::vec3 new_centerpos = sloc.GetCenterPosition();
+                                glm::vec3 pos_offset    = new_centerpos - last_centerpos;
+                                for (size_t i = 0; i < modelPreview->GetModels().size(); i++) {
+                                    Model* mm = modelPreview->GetModels()[i];
+                                    if ((mm->GroupSelected() || mm->Selected()) && mm != selectedBaseObject) {
+                                        mm->AddOffset(pos_offset.x, pos_offset.y, pos_offset.z);
+                                    }
+                                }
+                                for (const auto& it : xlights->AllObjects) {
+                                    ViewObject* vo = it.second;
+                                    if ((vo->GroupSelected() || vo->Selected()) && vo != selectedBaseObject) {
+                                        vo->AddOffset(pos_offset.x, pos_offset.y, pos_offset.z);
+                                    }
+                                }
+                                last_centerpos = new_centerpos;
+                            } else if (dragRole == handles::Role::AxisRing) {
+                                // Wrap-aware rotation delta. X is negated to match
+                                // RotateAboutPoint's handedness.
+                                glm::vec3 new_worldrotate = sloc.GetRotationAngles();
+                                glm::vec3 rotate_offset   = new_worldrotate - last_worldrotate;
+                                if (rotate_offset.x >  180.0f) rotate_offset.x -= 360.0f;
+                                if (rotate_offset.y >  180.0f) rotate_offset.y -= 360.0f;
+                                if (rotate_offset.z >  180.0f) rotate_offset.z -= 360.0f;
+                                if (rotate_offset.x < -180.0f) rotate_offset.x += 360.0f;
+                                if (rotate_offset.y < -180.0f) rotate_offset.y += 360.0f;
+                                if (rotate_offset.z < -180.0f) rotate_offset.z += 360.0f;
+                                rotate_offset.x = -rotate_offset.x;
+                                glm::vec3 active_handle_position = sloc.GetActiveHandlePosition();
+                                for (size_t i = 0; i < modelPreview->GetModels().size(); i++) {
+                                    Model* mm = modelPreview->GetModels()[i];
+                                    if ((mm->GroupSelected() || mm->Selected()) && mm != selectedBaseObject) {
+                                        xlights->AbortRender();
+                                        mm->RotateAboutPoint(active_handle_position, rotate_offset);
+                                    }
+                                }
+                                for (const auto& it : xlights->AllObjects) {
+                                    ViewObject* vo = it.second;
+                                    if ((vo->GroupSelected() || vo->Selected()) && vo != selectedBaseObject) {
+                                        xlights->AbortRender();
+                                        vo->RotateAboutPoint(active_handle_position, rotate_offset);
+                                    }
+                                }
+                                last_worldrotate = new_worldrotate;
+                            } else if (dragRole == handles::Role::AxisCube) {
+                                glm::vec3 new_worldscale = sloc.GetScaleMatrix();
+                                if (last_worldscale.x == 0 || last_worldscale.y == 0 || last_worldscale.z == 0) {
+                                    spdlog::critical("11 multi-select scale: last_worldscale has a zero component");
+                                } else {
+                                    glm::vec3 scale_offset = new_worldscale / last_worldscale;
+                                    for (size_t i = 0; i < modelPreview->GetModels().size(); i++) {
+                                        Model* mm = modelPreview->GetModels()[i];
+                                        if ((mm->GroupSelected() || mm->Selected()) && mm != selectedBaseObject) {
+                                            mm->Scale(scale_offset);
+                                        }
+                                    }
+                                    for (const auto& it : xlights->AllObjects) {
+                                        ViewObject* vo = it.second;
+                                        if ((vo->GroupSelected() || vo->Selected()) && vo != selectedBaseObject) {
+                                            vo->Scale(scale_offset);
+                                        }
+                                    }
+                                }
+                                last_worldscale = new_worldscale;
+                            }
+                        }
+                    }
+                    xlights->GetOutputModelManager()->AddASAPWork(
+                        OutputModelManager::WORK_RELOAD_PROPERTYGRID |
+                            OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW,
+                        "LayoutPanel::OnPreviewMouseMove3D-NewAPI");
+                }
+                m_last_mouse_x = event.GetX();
+                m_last_mouse_y = event.GetY();
+                return;
             }
         }
         else {
@@ -5117,24 +5398,34 @@ void LayoutPanel::OnPreviewMouseMove3D(wxMouseEvent& event)
                 Model* m = dynamic_cast<Model*>(obj);
                 if (obj == nullptr || (!xlights->AllModels.IsModelValid(m) && _newModel != obj)) return;
             }
-            int active_handle = obj->GetBaseObjectScreenLocation().GetActiveHandle();
-            if (obj != _newModel) {
-                CreateUndoPoint(editing_models ? "SingleModel" : "SingleObject", obj->name, std::to_string(active_handle));
+            // descriptor session takes the move stream when
+            // active. This branch fires for the polyline "trail vertex
+            // with cursor" path between clicks (mouse-up cleared
+            // m_mouse_down but m_moving_handle is still true).
+            if (m_dragSession) {
+                if (!xlights->AbortRender()) return;
+                handles::WorldRay ray{};
+                GetMouseLocation(event.GetX(), event.GetY(), ray.origin, ray.direction);
+                auto result = m_dragSession->Update(ray, ModsFromEvent(event));
+                if (result == handles::UpdateResult::NeedsInit) {
+                    if (Model* mModel = dynamic_cast<Model*>(obj)) {
+                        mModel->Setup();
+                        mModel->IncrementChangeCount();
+                    }
+                }
+                if (result == handles::UpdateResult::Updated ||
+                    result == handles::UpdateResult::NeedsInit) {
+                    auto pos = obj->GetBaseObjectScreenLocation().GetCenterPosition();
+                    xlights->SetStatusText(wxString::Format(
+                        "x=%.2f y=%.2f z=%.2f %s",
+                        pos.x, pos.y, pos.z, obj->GetDimension()));
+                    xlights->GetOutputModelManager()->AddASAPWork(
+                        OutputModelManager::WORK_RELOAD_PROPERTYGRID |
+                            OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW,
+                        "LayoutPanel::OnPreviewMouseMove3D-NewAPI-trail");
+                }
+                return;
             }
-            bool z_scale = obj->GetBaseObjectScreenLocation().GetSupportsZScaling();
-            // this is designed to pretend the control and shift keys are down when creating models to
-            // make them scale from the desired handle depending on model type
-            xlights->AbortRender();
-            bool update_rgbeffects = false;
-            auto pos = obj->MoveHandle3D(modelPreview, active_handle, event.ShiftDown() || creating_model, event.ControlDown() || (creating_model && z_scale), event.GetX(), event.GetY(), false, z_scale, update_rgbeffects);
-            if (update_rgbeffects) {
-                xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "LayoutPanel::OnPreviewMouseMove");
-            }
-            xlights->SetStatusText(wxString::Format("x=%.2f y=%.2f z=%.2f %s", pos.x, pos.y, pos.z, obj->GetDimension()));
-            //SetupPropGrid(obj);
-            // dont need WORK_MODELS_CHANGE_REQUIRING_RERENDER until model is finished moving
-            xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RELOAD_PROPERTYGRID |
-                                                          OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "LayoutPanel::OnPreviewMouseMove");
         }
         else {
             Model* m = dynamic_cast<Model*>(selectedBaseObject);
@@ -5143,8 +5434,55 @@ void LayoutPanel::OnPreviewMouseMove3D(wxMouseEvent& event)
                 glm::vec3 ray_origin;
                 glm::vec3 ray_direction;
                 GetMouseLocation(event.GetX(), event.GetY(), ray_origin, ray_direction);
-                // check for mouse over handle and if so highlight it
-                modelPreview->SetCursor(CursorTypeToWx(selectedBaseObject->GetBaseObjectScreenLocation().CheckIfOverHandles3D(ray_origin, ray_direction, m_over_handle, modelPreview->GetCameraZoomForHandles(), modelPreview->GetHandleScale())));
+                // hover hit-test through the descriptor system.
+                // The descriptor hit's role drives the cursor; the Id
+                // is also stored on `m_over_handle` so the click
+                // handler can route by descriptor identity.
+                CursorType hoverCursor = CursorType::Default;
+                std::optional<handles::Id> hoverId;
+                if (m != nullptr) {
+                    auto& sloc = selectedBaseObject->GetBaseObjectScreenLocation();
+                    const auto legacyToolHover = sloc.GetAxisTool();
+                    handles::Tool hoverTool = handles::Tool::Translate;
+                    bool hoverToolSupported = false;
+                    switch (legacyToolHover) {
+                        case ModelScreenLocation::MSLTOOL::TOOL_TRANSLATE: hoverTool = handles::Tool::Translate;   hoverToolSupported = true; break;
+                        case ModelScreenLocation::MSLTOOL::TOOL_SCALE:     hoverTool = handles::Tool::Scale;       hoverToolSupported = true; break;
+                        case ModelScreenLocation::MSLTOOL::TOOL_ROTATE:    hoverTool = handles::Tool::Rotate;      hoverToolSupported = true; break;
+                        case ModelScreenLocation::MSLTOOL::TOOL_XY_TRANS:  hoverTool = handles::Tool::XYTranslate; hoverToolSupported = true; break;
+                        case ModelScreenLocation::MSLTOOL::TOOL_ELEVATE:   hoverTool = handles::Tool::Elevate;     hoverToolSupported = true; break;
+                        default: break;
+                    }
+                    if (hoverToolSupported) {
+                        const float zoom = modelPreview->GetCameraZoomForHandles();
+                        const int hscale = modelPreview->GetHandleScale();
+                        handles::ViewParams hoverView;
+                        hoverView.axisArrowLength = sloc.GetAxisArrowLength(zoom, hscale);
+                        hoverView.axisHeadLength  = sloc.GetAxisHeadLength(zoom, hscale);
+                        hoverView.axisRadius      = sloc.GetAxisRadius(zoom, hscale);
+                        const auto hoverDescs = m->GetHandles(handles::ViewMode::ThreeD, hoverTool, hoverView);
+                        if (!hoverDescs.empty()) {
+                            handles::ScreenProjection hoverProj{
+                                modelPreview->GetProjViewMatrix(),
+                                modelPreview->getWidth(),
+                                modelPreview->getHeight() };
+                            handles::HitTestOptions hoverOpts;
+                            hoverOpts.handleTolerance = (hoverTool == handles::Tool::XYTranslate ||
+                                                          hoverTool == handles::Tool::Elevate)
+                                                          ? 28.0f : 8.0f;
+                            glm::vec2 hoverPx{ static_cast<float>(event.GetX()),
+                                               static_cast<float>(event.GetY()) };
+                            if (auto h = handles::HitTest(hoverDescs, hoverProj, hoverPx, hoverOpts)) {
+                                hoverCursor = (h->id.role == handles::Role::Segment)
+                                              ? CursorType::Default
+                                              : CursorType::Hand;
+                                hoverId = h->id;
+                            }
+                        }
+                    }
+                }
+                m_over_handle = hoverId;
+                modelPreview->SetCursor(CursorTypeToWx(hoverCursor));
                 if (m_over_handle != over_handle) {
                     selectedBaseObject->GetBaseObjectScreenLocation().MouseOverHandle(m_over_handle);
                     over_handle = m_over_handle;
@@ -5157,8 +5495,7 @@ void LayoutPanel::OnPreviewMouseMove3D(wxMouseEvent& event)
                     float distance = 1000000000.0f;
                     float intersection_distance = 1000000000.0f;
                     if( editing_models ) {
-                        for (const auto& it : modelPreview->GetModels())
-                        {
+                        for (const auto& it : modelPreview->GetModels()) {
                             if (it != selectedBaseObject) {
                                 if (it->GetBaseObjectScreenLocation().HitTest3D(ray_origin, ray_direction, intersection_distance)) {
                                     if (intersection_distance < distance) {
@@ -5256,21 +5593,26 @@ void LayoutPanel::OnPreviewMouseMove(wxMouseEvent& event)
 
     if (m_moving_handle) {
         if (!xlights->AbortRender()) return;
-        if (m != _newModel) {
-            CreateUndoPoint("SingleModel", m->name, std::to_string(m_over_handle));
+        if (m_dragSession) {
+            handles::WorldRay ray{};
+            GetMouseLocation(event.GetX(), event.GetY(), ray.origin, ray.direction);
+            auto result = m_dragSession->Update(ray, ModsFromEvent(event));
+            if (result == handles::UpdateResult::NeedsInit) {
+                m->Setup();
+                m->IncrementChangeCount();
+            }
+            if (result == handles::UpdateResult::Updated ||
+                result == handles::UpdateResult::NeedsInit) {
+                xlights->SetStatusText(wxString::Format("x=%.2f y=%.2f",
+                    m->GetBaseObjectScreenLocation().GetCenterPosition().x,
+                    m->GetBaseObjectScreenLocation().GetCenterPosition().y));
+                xlights->GetOutputModelManager()->AddASAPWork(
+                    OutputModelManager::WORK_RELOAD_PROPERTYGRID |
+                        OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW,
+                    "LayoutPanel::OnPreviewMouseMove-NewAPI");
+            }
+            return;
         }
-        bool update_rgbeffects = false;
-        auto pos = m->MoveHandle(modelPreview, m_over_handle, event.ShiftDown(), event.GetX(), event.GetY(), update_rgbeffects);
-        xlights->SetStatusText(wxString::Format("x=%.2f y=%.2f", pos.x, pos.y));
-
-        //SetupPropGrid(m);
-        xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RELOAD_PROPERTYGRID, "LayoutPanel::OnPreviewMouseMove");
-        if (update_rgbeffects) {
-            xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE, "LayoutPanel::OnPreviewMouseMove");
-        }
-        // dont need these until finish moving
-        //xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_MODELS_CHANGE_REQUIRING_RERENDER, "LayoutPanel::OnPreviewMouseMove");
-        xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "LayoutPanel::OnPreviewMouseMove");
     }
     else if (m_dragging && event.Dragging()) {
         double delta_x = (double)event.GetX() - m_previous_mouse_x;
@@ -5303,7 +5645,40 @@ void LayoutPanel::OnPreviewMouseMove(wxMouseEvent& event)
     }
     else {
         if (m->Selected()) {
-            modelPreview->SetCursor(CursorTypeToWx(m->GetBaseObjectScreenLocation().CheckIfOverHandles(modelPreview, m_over_handle, event.GetX(), event.GetY())));
+            extern CursorType GetResizeCursor(int cornerIndex, int PreviewRotation);
+            handles::ViewParams view2d;
+            const auto descs = m->GetHandles(handles::ViewMode::TwoD, handles::Tool::Translate, view2d);
+            CursorType hoverCur = CursorType::Default;
+            std::optional<handles::Id> hoverId;
+            if (!descs.empty()) {
+                handles::ScreenProjection proj{
+                    modelPreview->GetProjViewMatrix(),
+                    modelPreview->getWidth(),
+                    modelPreview->getHeight() };
+                handles::HitTestOptions opts;
+                opts.handleTolerance = 8.0f;
+                glm::vec2 mousePx{ static_cast<float>(event.GetX()),
+                                   static_cast<float>(event.GetY()) };
+                if (auto h = handles::HitTest(descs, proj, mousePx, opts)) {
+                    hoverId = h->id;
+                    switch (h->id.role) {
+                        case handles::Role::Segment:
+                            hoverCur = CursorType::Default;
+                            break;
+                        case handles::Role::ResizeCorner: {
+                            // id.index uses the L_TOP/R_TOP/etc. constants directly.
+                            const int rotZ = static_cast<int>(m->GetBaseObjectScreenLocation().GetRotateZ());
+                            hoverCur = GetResizeCursor(h->id.index, rotZ);
+                            break;
+                        }
+                        default:
+                            hoverCur = CursorType::Hand;
+                            break;
+                    }
+                }
+            }
+            m_over_handle = hoverId;
+            modelPreview->SetCursor(CursorTypeToWx(hoverCur));
         }
     }
 }
@@ -5345,10 +5720,13 @@ void LayoutPanel::AddSingleModelOptionsToBaseMenu(wxMenu &menu) {
                 }
                 need_sep = true;
             }
-            int sel_hdl = model->GetSelectedHandle();
-            // Center handle is 0 and selected segments are greater than 0x4000
-            if( (sel_hdl > 0) && (sel_hdl < 0x4000) && (sel_hdl <= model->GetNumHandles()) && (model->GetNumHandles() > 2) ) {
-                menu.Append(ID_PREVIEW_MODEL_DELETEPOINT,"Delete Point");
+            // "Delete Point" only applies to vertex handles —
+            // not the centre, not a curve control point, not a
+            // segment hover.
+            auto selectedId = model->GetSelectedHandleId();
+            if (selectedId && selectedId->role == handles::Role::Vertex &&
+                model->GetNumHandles() > 2) {
+                menu.Append(ID_PREVIEW_MODEL_DELETEPOINT, "Delete Point");
                 need_sep = true;
             }
         }
@@ -5877,10 +6255,13 @@ void LayoutPanel::OnPreviewModelPopup(wxCommandEvent& event)
         Model* md = dynamic_cast<Model*>(selectedBaseObject);
         if (md == nullptr)
             return;
-        int selected_handle = md->GetSelectedHandle();
-        if ((selected_handle != -1) && (md->GetNumHandles() > 2)) {
-            CreateUndoPoint("SingleModel", md->name, std::to_string(selected_handle + 0x4000));
-            md->DeleteHandle(selected_handle);
+        auto selectedId = md->GetSelectedHandleId();
+        if (selectedId && selectedId->role == handles::Role::Vertex &&
+            md->GetNumHandles() > 2) {
+            // PolyPoint vertex int convention is 1-based.
+            const int legacyHandle = selectedId->index + 1;
+            CreateUndoPoint("SingleModel", md->name, std::to_string(legacyHandle + 0x4000));
+            md->DeleteHandle(legacyHandle);
             md->SelectHandle(-1);
             md->GetModelScreenLocation().SelectSegment(-1);
             md->Reinitialize();
@@ -8455,10 +8836,12 @@ void LayoutPanel::OnModelsPopup(wxCommandEvent& event) {
         Model* md = dynamic_cast<Model*>(selectedBaseObject);
         if (md == nullptr)
             return;
-        int selected_handle = md->GetSelectedHandle();
-        if ((selected_handle != -1) && (md->GetNumHandles() > 2)) {
-            CreateUndoPoint("SingleModel", md->name, std::to_string(selected_handle + 0x4000));
-            md->DeleteHandle(selected_handle);
+        auto selectedId = md->GetSelectedHandleId();
+        if (selectedId && selectedId->role == handles::Role::Vertex &&
+            md->GetNumHandles() > 2) {
+            const int legacyHandle = selectedId->index + 1;
+            CreateUndoPoint("SingleModel", md->name, std::to_string(legacyHandle + 0x4000));
+            md->DeleteHandle(legacyHandle);
             md->SelectHandle(-1);
             md->GetModelScreenLocation().SelectSegment(-1);
             md->Reinitialize();

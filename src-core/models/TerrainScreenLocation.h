@@ -23,15 +23,13 @@ public:
     virtual void Init() override;
     virtual bool DrawHandles(xlGraphicsProgram *program, float zoom, int scale, bool drawBounding, bool fromBase) const override;
     
-    virtual CursorType CheckIfOverHandles3D(glm::vec3& ray_origin, glm::vec3& ray_direction, int& handle, float zoom, int scale) const override;
-    virtual int MoveHandle3D(IModelPreview* preview, int handle, bool ShiftKeyPressed, bool CtrlKeyPressed, int mouseX, int mouseY, bool latch, bool scale_z) override;
     virtual int MoveHandle3D(float scale, int handle, glm::vec3 &rot, glm::vec3 &mov) override;
 
     virtual void SetActiveHandle(int handle) override;
     virtual void AdvanceAxisTool() override;
     virtual void SetAxisTool(MSLTOOL mode) override;
     virtual void SetActiveAxis(MSLAXIS axis) override;
-    virtual bool IsElevationHandle() const override { return active_handle > 0; }
+    virtual bool IsElevationHandle() const override { return IsRole(active_handle, handles::Role::Vertex); }
     virtual bool CanEdit() const { return edit_active; }
     virtual void SetEdit(bool val) override { edit_active = val; }
     virtual void* GetRawData() override { return (void*)&mPos; }
@@ -39,6 +37,20 @@ public:
     int GetNumPointsWide() const { return num_points_wide; }
     int GetNumPointsDeep() const { return num_points_deep; }
     int GetNumPoints() const { return num_points; }
+
+    [[nodiscard]] float GetGridHeight(int idx) const {
+        return (idx >= 0 && idx < static_cast<int>(mPos.size())) ? mPos[idx] : 0.0f;
+    }
+    void SetGridHeight(int idx, float h) {
+        if (idx >= 0 && idx < static_cast<int>(mPos.size())) mPos[idx] = h;
+    }
+    [[nodiscard]] std::vector<handles::Descriptor> GetHandles(
+        handles::ViewMode mode, handles::Tool tool,
+        const handles::ViewParams& view = {}) const override;
+    std::unique_ptr<handles::DragSession> CreateDragSession(
+        const std::string& modelName,
+        const handles::Id& id,
+        const handles::WorldRay& startRay) override;
 
     void UpdateSize(int wide, int deep, int num_points);
 

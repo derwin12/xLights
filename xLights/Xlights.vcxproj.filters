@@ -1106,6 +1106,9 @@
       <Filter>XmlSerializer</Filter>
     </ClCompile>
     <ClCompile Include="..\src-core\models\ControllerConnection.cpp" />
+    <ClCompile Include="..\src-core\models\handles\HitTest.cpp">
+      <Filter>Models\handles</Filter>
+    </ClCompile>
     <ClCompile Include="..\src-core\models\DMX\DmxBeamAbility.cpp">
       <Filter>Models\DMX</Filter>
     </ClCompile>
@@ -2475,6 +2478,15 @@
       <Filter>XmlSerializer</Filter>
     </ClInclude>
     <ClInclude Include="..\src-core\models\ControllerConnection.h" />
+    <ClInclude Include="..\src-core\models\handles\DragSession.h">
+      <Filter>Models\handles</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src-core\models\handles\Handles.h">
+      <Filter>Models\handles</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src-core\models\handles\HitTest.h">
+      <Filter>Models\handles</Filter>
+    </ClInclude>
     <ClInclude Include="..\src-core\models\DMX\DmxBeamAbility.h">
       <Filter>Models\DMX</Filter>
     </ClInclude>
@@ -2802,6 +2814,9 @@
     </Filter>
     <Filter Include="Models\DMX">
       <UniqueIdentifier>{4fb623be-9694-497c-b76e-19e9b12e5991}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Models\handles">
+      <UniqueIdentifier>{6f6c7a3a-7d1c-4c4e-9b3a-2e1c7c0d8f10}</UniqueIdentifier>
     </Filter>
     <Filter Include="Preferences">
       <UniqueIdentifier>{deb253e2-d6a8-4b5f-909d-9a98e9e667e1}</UniqueIdentifier>

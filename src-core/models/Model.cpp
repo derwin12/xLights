@@ -3636,25 +3636,9 @@ void Model::DisplayEffectOnWindow(IModelPreview* preview, double pointSize)
     }
 }
 
-glm::vec3 Model::MoveHandle(IModelPreview* preview, int handle, bool ShiftKeyPressed, int mouseX, int mouseY, bool& update_rgbeffects)
+std::optional<handles::Id> Model::GetSelectedHandleId()
 {
-    if (GetModelScreenLocation().IsLocked() || IsFromBase())
-        return GetModelScreenLocation().GetHandlePosition(handle);
-
-    int i = GetModelScreenLocation().MoveHandle(preview, handle, ShiftKeyPressed, mouseX, mouseY);
-    if (i == MODEL_NEEDS_INIT) {
-        Setup();
-    } else if (i == MODEL_UPDATE_RGBEFFECTS) {
-        update_rgbeffects = true;
-    }
-    IncrementChangeCount();
-
-    return GetModelScreenLocation().GetHandlePosition(handle);
-}
-
-int Model::GetSelectedHandle()
-{
-    return GetModelScreenLocation().GetSelectedHandle();
+    return GetModelScreenLocation().GetSelectedHandleId();
 }
 
 int Model::GetNumHandles()

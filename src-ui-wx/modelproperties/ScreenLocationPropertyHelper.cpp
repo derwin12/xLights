@@ -529,11 +529,16 @@ int ScreenLocationPropertyHelper::OnPropertyGridChange(PolyPointScreenLocation& 
             auto o = name.find(" ", 12);
             wxASSERT(o != std::string::npos);
 
-            loc.SetSelectedHandle(wxAtoi(name.substr(12, o - 12)) - 1);
-
-            wxASSERT(loc.GetSelectedHandle() + 1 < (int)loc.GetNumPoints());
-
-            int h = loc.GetSelectedHandle();
+            // "REAL Segment N" — N is 1-based segment number; segment N
+            // joins point N-1 to point N. Skip the SetSelectedHandle→
+            // GetSelectedHandle round-trip (which previously lost
+            // information through the legacy int convention) and use
+            // the parsed index directly. SetSelectedHandle is still
+            // called for visual feedback (highlights the corresponding
+            // vertex in the layout view).
+            int h = wxAtoi(name.substr(12, o - 12)) - 1;
+            loc.SetSelectedHandle(h);
+            wxASSERT(h + 1 < (int)loc.GetNumPoints());
             auto p1 = loc.GetPoint(h);
             auto p2 = loc.GetPoint(h + 1);
             float oldLen = RulerObject::UnMeasure(RulerObject::Measure(p1, p2));

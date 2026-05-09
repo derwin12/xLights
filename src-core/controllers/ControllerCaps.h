@@ -99,6 +99,7 @@ public:
     bool NeedsFullUniverseForDMX() const;
     bool AllSmartRemoteTypesPerPortMustBeSame() const;
     bool DMXAfterPixels() const;
+    bool OpenSourceFirmware() const;
 
     int GetSmartRemoteCount() const;
     int GetMaxInputE131Universes() const;

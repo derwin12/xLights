@@ -26,16 +26,25 @@ public:
 
     virtual bool IsContained(IModelPreview* preview, int x1, int y1, int x2, int y2) const override;
     virtual bool HitTest(glm::vec3& ray_origin, glm::vec3& ray_direction) const override;
-    virtual CursorType CheckIfOverHandles(IModelPreview* preview, int &handle, int x, int y) const override;
-    
+
     //new drawing code
     virtual bool DrawHandles(xlGraphicsProgram *program, float zoom, int scale, bool fromBase) const override;
     virtual bool DrawHandles(xlGraphicsProgram *program, float zoom, int scale, bool drawBounding, bool fromBase) const override;
     virtual void DrawBoundingBox(xlVertexColorAccumulator *vac, bool fromBase) const;
 
-    virtual int MoveHandle(IModelPreview* preview, int handle, bool ShiftKeyPressed, int mouseX, int mouseY) override;
-    virtual int MoveHandle3D(IModelPreview* preview, int handle, bool ShiftKeyPressed, bool CtrlKeyPressed, int mouseX, int mouseY, bool latch, bool scale_z) override;
     virtual int MoveHandle3D(float scale, int handle, glm::vec3 &rot, glm::vec3 &mov) override;
+
+    [[nodiscard]] std::vector<handles::Descriptor> GetHandles(
+        handles::ViewMode mode, handles::Tool tool,
+        const handles::ViewParams& view = {}) const override;
+    std::unique_ptr<handles::DragSession> CreateDragSession(
+        const std::string& modelName,
+        const handles::Id& id,
+        const handles::WorldRay& startRay) override;
+    [[nodiscard]] std::unique_ptr<handles::DragSession> BeginCreate(
+        const std::string& modelName,
+        const handles::WorldRay& clickRay,
+        handles::ViewMode mode) override;
     virtual bool Rotate(MSLAXIS axis, float factor) override;
     virtual bool Scale(const glm::vec3& factor) override;
 
@@ -93,6 +102,7 @@ public:
 
     glm::vec3 GetPoint1() const { return origin; }
     glm::vec3 GetPoint2() const { return point2; }
+    glm::mat4 GetModelMatrix() const { return matrix; }
 
 protected:
     float x2 = 0.0f;

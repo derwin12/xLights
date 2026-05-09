@@ -29,8 +29,6 @@ public:
     virtual bool DrawHandles(xlGraphicsProgram *program, float zoom, int scale, bool drawBounding, bool fromBase) const override;
     virtual void DrawBoundingBox(xlVertexColorAccumulator *vac, bool fromBase) const override;
 
-    virtual int MoveHandle(IModelPreview* preview, int handle, bool ShiftKeyPressed, int mouseX, int mouseY) override;
-    virtual int MoveHandle3D(IModelPreview* preview, int handle, bool ShiftKeyPressed, bool CtrlKeyPressed, int mouseX, int mouseY, bool latch, bool scale_z) override;
     virtual int MoveHandle3D(float scale, int handle, glm::vec3 &rot, glm::vec3 &mov) override;
     virtual float GetVScaleFactor() const override;
 
@@ -60,13 +58,24 @@ public:
     virtual void AdvanceAxisTool() override;
     virtual void SetAxisTool(MSLTOOL mode) override;
     virtual void SetActiveAxis(MSLAXIS axis) override;
-    virtual bool IsXYTransHandle() const override { return active_handle == SHEAR_HANDLE; }
+    virtual bool IsXYTransHandle() const override { return IsRole(active_handle, handles::Role::Shear); }
 
     float GetHeight() const { return height; }
     void SetHeight(float h) { height = h; }
     float GetShear() const { return shear; }
     void SetShear(float s) { shear = s; }
     bool GetSupportsShear() const { return supportsShear; }
+    bool GetSupportsAngle() const { return supportsAngle; }
+
+    [[nodiscard]] glm::vec3 GetShearHandleWorldPosition() const;
+
+    [[nodiscard]] std::vector<handles::Descriptor> GetHandles(
+        handles::ViewMode mode, handles::Tool tool,
+        const handles::ViewParams& view = {}) const override;
+    std::unique_ptr<handles::DragSession> CreateDragSession(
+        const std::string& modelName,
+        const handles::Id& id,
+        const handles::WorldRay& startRay) override;
 
 private:
     bool modelHandleHeight = false;

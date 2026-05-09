@@ -21,6 +21,9 @@
 #include "models/ModelScreenLocation.h"
 #include "utils/VectorMath.h"
 #include "graphics/xlGraphicsContext.h"
+#include "models/handles/Handles.h"
+#include "models/handles/DragSession.h"
+#include "models/handles/HitTest.h"
 #include "utils/xlImage.h"
 #include "graphics/metal/xlMetalGraphicsContext.h"
 
@@ -57,6 +60,12 @@
     BOOL _layoutOverlaysSeeded;      // first draw seeds from rgbeffects state
     BOOL _snapToGrid;                // J-2 — drag-to-move snap toggle
     BOOL _handleDragNeedsLatch;      // J-2 — true on first dragHandle call after a pick
+    // When non-null, handle drags route through the descriptor
+    // DragSession API. Applies to descriptor-implemented paths
+    // (e.g. 3D-translate via axis arrows on Boxed); other paths
+    // still consult the `_handleDragNeedsLatch` flag.
+    std::unique_ptr<handles::DragSession> _dragSession;
+    handles::Id _dragSessionStartId;
     // Cached background image — loaded once per path change, reused across
     // frames. Texture ownership is manual because xlTexture has no
     // unique_ptr-friendly deleter in the public header; released in
@@ -687,8 +696,7 @@ static void PointToWindowPixels(const CGPoint& p, double scale,
 }
 
 // Build a world-space ray from a touch point, using the preview's
-// ProjView matrix. Used by the 3D hit-test paths that take a ray
-// directly (Model::HitTest3D / ScreenLocation::CheckIfOverHandles3D).
+// ProjView matrix. Used by `Model::HitTest3D` for model-body picks.
 static void TouchPointToWorldRay(const CGPoint& p, double scale,
                                   iPadModelPreview* preview,
                                   glm::vec3& outOrigin,
@@ -773,64 +781,108 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     Model* m = rctx->GetModelManager()[_selectedModelName];
     if (!m) return -1;
     auto& loc = m->GetModelScreenLocation();
-    // ScreenLocation::CheckIfOverHandles bails on locked itself,
-    // but exit early so we don't allocate a ray for nothing.
-    // IsFromBase models (imported from a parent "base" show) are
-    // intentionally read-only — `BaseObject::MoveHandle3D` /
-    // `Model::MoveHandle` short-circuit on them, so a drag would
-    // appear to register (axis highlight) but never move.
-    // Bailing here keeps the gesture from engaging at all so the
-    // user gets the camera-orbit fallback signalling "can't edit".
+    // Exit early on locked / from-base models so a drag gesture never
+    // engages on a model that can't be edited (the user then gets the
+    // camera-orbit fallback signalling "can't edit" instead of an
+    // axis highlight followed by silent no-op).
     if (loc.IsLocked()) return -1;
     if (m->IsFromBase()) return -1;
 
     int handle = NO_HANDLE;
     if (_preview->Is3D()) {
-        glm::vec3 ray_origin, ray_direction;
-        TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
-                              ray_origin, ray_direction);
-        loc.CheckIfOverHandles3D(ray_origin, ray_direction, handle,
-                                  _preview->GetCameraZoomForHandles(),
-                                  _preview->GetHandleScale());
-        // 3D gizmo: ONLY drags along axis arrows. Desktop's mouse-
-        // down flow (LayoutPanel.cpp:3693-3729) is:
-        //  - Hit an axis arrow (HANDLE_AXIS bit): SetActiveAxis,
-        //    then call MoveHandle3D against the model's current
-        //    active_handle (CENTER_HANDLE / SHEAR_HANDLE / etc.).
-        //  - Hit a plain handle (corner, shear, vertex):
-        //    SetActiveHandle(handle); if it's already the active
-        //    handle, AdvanceAxisTool. Do NOT call MoveHandle3D —
-        //    DragHandle would hit `assert(false)` on NO_AXIS.
-        //    The user then clicks an axis arrow to actually move.
-        if (handle == NO_HANDLE) {
-            return -1;
+        handles::Tool newApiTool = handles::Tool::Translate;
+        bool toolSupportedByNewApi = false;
+        switch (loc.GetAxisTool()) {
+            case ModelScreenLocation::MSLTOOL::TOOL_TRANSLATE:
+                newApiTool = handles::Tool::Translate;
+                toolSupportedByNewApi = true;
+                break;
+            case ModelScreenLocation::MSLTOOL::TOOL_SCALE:
+                newApiTool = handles::Tool::Scale;
+                toolSupportedByNewApi = true;
+                break;
+            case ModelScreenLocation::MSLTOOL::TOOL_ROTATE:
+                newApiTool = handles::Tool::Rotate;
+                toolSupportedByNewApi = true;
+                break;
+            default:
+                break;
         }
-        if (handle & HANDLE_AXIS) {
-            loc.SetActiveAxis((ModelScreenLocation::MSLAXIS)(handle & 0xff));
-            int activeHandle = loc.GetActiveHandle();
-            if (activeHandle == NO_HANDLE) return -1;
-            // Mirror desktop's mouse-DOWN: subsequent dragHandle
-            // calls run with latch=false; the first one needs
-            // latch=true so MoveHandle3D snapshots the model's
-            // current world position into saved_position.
-            _handleDragNeedsLatch = YES;
-            return (NSInteger)activeHandle;
+        const float zoom = _preview->GetCameraZoomForHandles();
+        const int hscale = _preview->GetHandleScale();
+        handles::ViewParams view;
+        view.axisArrowLength = loc.GetAxisArrowLength(zoom, hscale);
+        view.axisHeadLength  = loc.GetAxisHeadLength(zoom, hscale);
+        view.axisRadius      = loc.GetAxisRadius(zoom, hscale);
+        auto descriptors = toolSupportedByNewApi
+            ? m->GetHandles(handles::ViewMode::ThreeD, newApiTool, view)
+            : std::vector<handles::Descriptor>{};
+        if (!descriptors.empty()) {
+            handles::ScreenProjection proj;
+            proj.projViewMatrix = _preview->GetProjViewMatrix();
+            proj.viewportWidth  = _canvas->getWidth();
+            proj.viewportHeight = _canvas->getHeight();
+            double scaleFactor = _canvas->getScaleFactor();
+            if (scaleFactor <= 0) scaleFactor = 1.0;
+            glm::vec2 touchPx{
+                static_cast<float>(point.x * scaleFactor),
+                static_cast<float>(point.y * scaleFactor)
+            };
+            handles::HitTestOptions opts;
+            opts.handleTolerance     = 60.0f;  // touch slop in pixels
+            opts.preferAxisHandles   = true;
+            opts.ignoreNonEditable   = true;
+            if (auto hit = handles::HitTest(descriptors, proj, touchPx, opts)) {
+                handles::WorldRay startRay;
+                TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
+                                      startRay.origin, startRay.direction);
+                auto session = m->BeginDrag(hit->id, startRay);
+                if (session) {
+                    _dragSession = std::move(session);
+                    _dragSessionStartId = hit->id;
+                    // Return any non-negative value — the value
+                    // itself is unused for new-API drags (dragHandle
+                    // routes via `_dragSession` regardless of the
+                    // handleIndex Swift stores).
+                    return 0;
+                }
+            }
         }
-        // Plain handle hit. Set it as the active handle so the
-        // subsequent axis-arrow drag operates on this handle, but
-        // don't start a drag here — non-axis 3D drags assert.
-        // Clear stale active_axis from any previous gesture.
-        loc.SetActiveHandle(handle);
-        loc.SetActiveAxis(ModelScreenLocation::MSLAXIS::NO_AXIS);
+        // If the descriptor HitTest missed, the touch is treated as
+        // no-hit.
         return -1;
-    } else {
-        int mx = 0, my = 0;
-        PointToWindowPixels(point, _canvas->getScaleFactor(), &mx, &my);
-        loc.CheckIfOverHandles(_preview.get(), handle, mx, my);
     }
-    if (handle == NO_HANDLE) return -1;
-    _handleDragNeedsLatch = YES;
-    return (NSInteger)handle;
+    // 2D path: descriptor hit-test against the model's TwoD handle set
+    // (Endpoint / Vertex / ResizeCorner / Rotate / Segment / etc.).
+    handles::ViewParams view2d;
+    const auto descs2d = m->GetHandles(handles::ViewMode::TwoD, handles::Tool::Translate, view2d);
+    if (descs2d.empty()) return -1;
+    handles::ScreenProjection proj2d;
+    proj2d.projViewMatrix = _preview->GetProjViewMatrix();
+    proj2d.viewportWidth  = _canvas->getWidth();
+    proj2d.viewportHeight = _canvas->getHeight();
+    double sf2d = _canvas->getScaleFactor();
+    if (sf2d <= 0) sf2d = 1.0;
+    glm::vec2 touchPx2d{
+        static_cast<float>(point.x * sf2d),
+        static_cast<float>(point.y * sf2d)
+    };
+    handles::HitTestOptions opts2d;
+    opts2d.handleTolerance     = 60.0f;
+    opts2d.preferAxisHandles   = true;
+    opts2d.ignoreNonEditable   = true;
+    auto hit2d = handles::HitTest(descs2d, proj2d, touchPx2d, opts2d);
+    if (!hit2d) return -1;
+    handles::WorldRay startRay2d;
+    TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
+                          startRay2d.origin, startRay2d.direction);
+    auto session2d = m->BeginDrag(hit2d->id, startRay2d);
+    if (session2d) {
+        _dragSession = std::move(session2d);
+        _dragSessionStartId = hit2d->id;
+        return 0;
+    }
+    return -1;
 }
 
 - (BOOL)handleCenterHandleTapAtScreenPoint:(CGPoint)point
@@ -846,30 +898,81 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     auto& loc = m->GetModelScreenLocation();
     if (loc.IsLocked()) return NO;
 
-    // Hit-test in 3D. We do not call pickHandle here because that
-    // would set _handleDragNeedsLatch — this is a tap, not a drag.
-    glm::vec3 ray_origin, ray_direction;
-    TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
-                          ray_origin, ray_direction);
-    int handle = NO_HANDLE;
-    loc.CheckIfOverHandles3D(ray_origin, ray_direction, handle,
-                              _preview->GetCameraZoomForHandles(),
-                              _preview->GetHandleScale());
-    if (handle == NO_HANDLE) return NO;
-    // Axis arrows / segments are drag targets; tap-and-release
-    // doesn't cycle the tool.
-    if (handle & HANDLE_AXIS) return NO;
-    if (handle & HANDLE_SEGMENT) return NO;
-    // Only cycle when the user taps the model's currently-active
-    // handle (mirrors desktop LayoutPanel.cpp:3725).
-    if (handle != loc.GetActiveHandle()) return NO;
-
+    // descriptor hit-test for the centre-cycle tap. Only the
+    // CentreCycle / non-axis selectionOnly descriptors trigger the
+    // tool cycle; axis / segment / draggable descriptors are drag
+    // targets and a tap on them is a no-op.
+    handles::Tool centerTool = handles::Tool::Translate;
+    switch (loc.GetAxisTool()) {
+        case ModelScreenLocation::MSLTOOL::TOOL_TRANSLATE: centerTool = handles::Tool::Translate;   break;
+        case ModelScreenLocation::MSLTOOL::TOOL_SCALE:     centerTool = handles::Tool::Scale;       break;
+        case ModelScreenLocation::MSLTOOL::TOOL_ROTATE:    centerTool = handles::Tool::Rotate;      break;
+        case ModelScreenLocation::MSLTOOL::TOOL_XY_TRANS:  centerTool = handles::Tool::XYTranslate; break;
+        case ModelScreenLocation::MSLTOOL::TOOL_ELEVATE:   centerTool = handles::Tool::Elevate;     break;
+        default: return NO;
+    }
+    const float zoom = _preview->GetCameraZoomForHandles();
+    const int hscale = _preview->GetHandleScale();
+    handles::ViewParams view;
+    view.axisArrowLength = loc.GetAxisArrowLength(zoom, hscale);
+    view.axisHeadLength  = loc.GetAxisHeadLength(zoom, hscale);
+    view.axisRadius      = loc.GetAxisRadius(zoom, hscale);
+    const auto descs = m->GetHandles(handles::ViewMode::ThreeD, centerTool, view);
+    if (descs.empty()) return NO;
+    handles::ScreenProjection proj;
+    proj.projViewMatrix = _preview->GetProjViewMatrix();
+    proj.viewportWidth  = _canvas->getWidth();
+    proj.viewportHeight = _canvas->getHeight();
+    double scaleFactor = _canvas->getScaleFactor();
+    if (scaleFactor <= 0) scaleFactor = 1.0;
+    glm::vec2 touchPx{ static_cast<float>(point.x * scaleFactor),
+                       static_cast<float>(point.y * scaleFactor) };
+    handles::HitTestOptions opts;
+    opts.handleTolerance   = 60.0f;
+    opts.preferAxisHandles = true;
+    auto hit = handles::HitTest(descs, proj, touchPx, opts);
+    if (!hit) return NO;
+    // Axis-style + segment hits are drag targets; tap doesn't cycle.
+    if (hit->id.role == handles::Role::AxisArrow ||
+        hit->id.role == handles::Role::AxisCube  ||
+        hit->id.role == handles::Role::AxisRing  ||
+        hit->id.role == handles::Role::Segment) return NO;
+    // Only cycle when the tap landed on the currently-active sub-
+    // handle (mirrors desktop's "click already-active handle to
+    // advance tool" behavior).
+    if (loc.GetActiveHandleId() != std::optional<handles::Id>(hit->id)) return NO;
     loc.AdvanceAxisTool();
     return YES;
 }
 
 - (void)endHandleDragForDocument:(XLSequenceDocument*)doc {
     _handleDragNeedsLatch = NO;
+
+    // If a descriptor session is active, commit + drop. Maps
+    // DirtyField bits onto the dirty layout-models set so save
+    // picks up the change.
+    if (_dragSession) {
+        auto result = _dragSession->Commit();
+        if (handles::HasDirty(result.dirty, handles::DirtyField::Position) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Dimensions) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Rotation) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Endpoint) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Vertex) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Curve) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Shear)) {
+            iPadRenderContext* rctx = ContextFromDoc(doc);
+            if (rctx && !result.modelName.empty()) {
+                rctx->MarkLayoutModelDirty(result.modelName);
+            }
+        }
+        _dragSession.reset();
+        _dragSessionStartId = handles::Id{};
+        return;
+    }
+
+    // Clear active_axis so the next pick starts fresh, but keep
+    // active_handle at CentreCycle so the still-selected model
+    // continues to show its gizmo.
     if (!_preview) return;
     if (_selectedModelName.empty()) return;
     iPadRenderContext* rctx = ContextFromDoc(doc);
@@ -877,9 +980,6 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     Model* m = rctx->GetModelManager()[_selectedModelName];
     if (!m) return;
     auto& loc = m->GetModelScreenLocation();
-    // Clear active_axis (set during gizmo grab) so the next pick
-    // starts fresh. Leave active_handle = CENTER_HANDLE so the
-    // gizmo stays drawn for the still-selected model.
     loc.SetActiveAxis(ModelScreenLocation::MSLAXIS::NO_AXIS);
 }
 
@@ -888,52 +988,26 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
         viewSize:(CGSize)viewSize
      forDocument:(XLSequenceDocument*)doc {
     if (!_preview || !doc) return NO;
-    if (_selectedModelName.empty()) return NO;
-    if (handleIndex == NO_HANDLE) return NO;
-    iPadRenderContext* rctx = ContextFromDoc(doc);
-    if (!rctx) return NO;
-    Model* m = rctx->GetModelManager()[_selectedModelName];
-    if (!m) return NO;
-    auto& loc = m->GetModelScreenLocation();
-    if (loc.IsLocked()) return NO;
 
-    int mx = 0, my = 0;
-    PointToWindowPixels(point, _canvas->getScaleFactor(), &mx, &my);
-
-    int code = MODEL_UNCHANGED;
-    if (_preview->Is3D()) {
-        // Mirrors desktop's mouse-down → mouse-move sequence
-        // (LayoutPanel.cpp:3704 = mouse-down `latch=true`,
-        // LayoutPanel.cpp:4956 = mouse-move `latch=false`). Latch
-        // resets `saved_position` inside MoveHandle3D — passing
-        // it on every frame means drag_delta evaluates to zero
-        // and the model stops moving.
-        bool latch = _handleDragNeedsLatch ? true : false;
-        bool update_rgbeffects = false;
-        m->MoveHandle3D(_preview.get(), (int)handleIndex,
-                        /* ShiftKeyPressed */ false,
-                        /* CtrlKeyPressed */ false,
-                        mx, my,
-                        /* latch */ latch,
-                        /* scale_z */ false,
-                        update_rgbeffects);
-        _handleDragNeedsLatch = NO;
-        if (update_rgbeffects) code = MODEL_UPDATE_RGBEFFECTS;
-    } else {
-        // Use Model::MoveHandle (the 2D wrapper) rather than the
-        // raw ScreenLocation method — the wrapper calls Setup() on
-        // MODEL_NEEDS_INIT (needed for ThreePoint shear/angle and
-        // PolyPoint vertex drags) and IncrementChangeCount(),
-        // matching the 3D BaseObject::MoveHandle3D pattern.
-        bool update_rgbeffects = false;
-        m->MoveHandle(_preview.get(), (int)handleIndex,
-                      /* ShiftKeyPressed */ false, mx, my,
-                      update_rgbeffects);
-        (void)update_rgbeffects;
+    // if a new-API session is active, route through it.
+    // Ignores `handleIndex` (the new path identifies the handle
+    // via the session's stored `Id`).
+    if (_dragSession) {
+        handles::WorldRay ray;
+        TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
+                              ray.origin, ray.direction);
+        auto result = _dragSession->Update(ray, handles::Modifier::None);
+        if (result == handles::UpdateResult::Updated ||
+            result == handles::UpdateResult::NeedsInit) {
+            iPadRenderContext* rctx = ContextFromDoc(doc);
+            if (rctx) rctx->MarkLayoutModelDirty(_selectedModelName);
+        }
+        return YES;
     }
-    rctx->MarkLayoutModelDirty(_selectedModelName);
-    (void)code;
-    return YES;
+
+    // No-op without an active descriptor session.
+    (void)handleIndex;
+    return NO;
 }
 
 - (BOOL)moveModel:(NSString*)name
@@ -1138,14 +1212,13 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
                              return a.second < b.second;
                          });
         const bool is3d = _preview->Is3D();
-        // J-2 — mirror desktop's ModelPreview::RenderModels for the
-        // LayoutEditor pane: `allowSelected=true` (so PrepareToDraw
-        // updates ModelMatrix — required by HitTest3D /
-        // CheckIfOverHandles3D), a non-null `color` (so models render
-        // with the layout-edit override colour rather than effect
-        // output), and Selected(true) on the chosen model so
-        // DisplayModelOnWindow's built-in DrawHandles fires
-        // (Model.cpp:3254). House Preview keeps the playback /
+        // Mirror desktop's `ModelPreview::RenderModels` for the
+        // LayoutEditor pane: `allowSelected=true` so `PrepareToDraw`
+        // updates `ModelMatrix` (required by `HitTest3D`), a non-null
+        // `color` so models render with the layout-edit override
+        // colour rather than effect output, and `Selected(true)` on
+        // the chosen model so `DisplayModelOnWindow`'s built-in
+        // DrawHandles fires. House Preview keeps the playback /
         // effect-color path (c=nullptr, allowSelected=false).
         const bool allowSel = _isLayoutEditor ? true : false;
         // Default = xlLIGHT_GREY, Selected = xlYELLOW. Hardcoded
@@ -1159,19 +1232,16 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
                 bool isSel = (!_selectedModelName.empty() &&
                               model->GetName() == _selectedModelName);
                 model->Selected(isSel);
-                // 3D gizmo: BoxedScreenLocation::DrawHandles (5-arg)
-                // only draws the centre sphere + DrawAxisTool gizmo
-                // (translate arrows / scale cubes / rotate rings)
-                // when `active_handle != NO_HANDLE`. Desktop sets it
-                // to CENTER_HANDLE on select (LayoutPanel.cpp:3152);
-                // mirror that so iPad sees the gizmo too. Clear on
-                // deselect.
+                // 3D gizmo: subclass `DrawHandles` only paints the
+                // centre sphere + axis gizmo when `active_handle`
+                // has a value. Latch CentreCycle on select so the
+                // user sees a gizmo, and clear on deselect.
                 auto& sloc = model->GetModelScreenLocation();
                 if (isSel) {
-                    if (sloc.GetActiveHandle() == NO_HANDLE) {
+                    if (!sloc.GetActiveHandleId().has_value()) {
                         sloc.SetActiveHandle(CENTER_HANDLE);
                     }
-                } else if (sloc.GetActiveHandle() != NO_HANDLE) {
+                } else if (sloc.GetActiveHandleId().has_value()) {
                     sloc.SetActiveHandle(NO_HANDLE);
                     sloc.SetActiveAxis(ModelScreenLocation::MSLAXIS::NO_AXIS);
                 }

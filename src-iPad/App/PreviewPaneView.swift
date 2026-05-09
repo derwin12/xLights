@@ -557,13 +557,13 @@ struct PreviewPaneView: UIViewRepresentable {
                     let touch = recognizer.location(in: view)
                     let viewSize = view.bounds.size
                     // Handle hit-test runs first in both 2D and 3D —
-                    // ScreenLocation::CheckIfOverHandles[3D] returns
-                    // a per-type handle id (corners, rotate, vertex,
-                    // segment-control-point, etc.). A handle hit
-                    // routes to MoveHandle[3D]; otherwise we fall
-                    // back to the 2D body-drag path. 3D body-drag
-                    // requires camera-aware delta math we haven't
-                    // shipped yet, so it gates on !is3D().
+                    // `pickHandle` returns a legacy handle id (corner,
+                    // rotate, vertex, segment-CP, etc.) and the bridge
+                    // opens a descriptor drag session for it. If no
+                    // handle is hit, fall back to the 2D body-drag
+                    // path. 3D body-drag requires camera-aware delta
+                    // math we haven't shipped yet, so it gates on
+                    // `!is3D()`.
                     let handle = bridge.pickHandle(atScreenPoint: touch,
                                                    viewSize: viewSize,
                                                    for: viewModel.document)

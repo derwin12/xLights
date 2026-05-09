@@ -412,6 +412,11 @@ bool ControllerCaps::DMXAfterPixels() const
     return DoesXmlNodeExist(_config, "DMXAfterPixels");
 }
 
+bool ControllerCaps::OpenSourceFirmware() const
+{
+    return DoesXmlNodeExist(_config, "OpenSourceFirmware");
+}
+
 bool ControllerCaps::SupportsMultipleSimultaneousOutputProtocols() const {
 
     return DoesXmlNodeExist(_config, "SupportsMultipleSimultaneousOutputProtocols");
@@ -773,6 +778,7 @@ void ControllerCaps::Dump() const
     
     spdlog::debug("Controller Capabilities " + _vendor + ":" + _model + ":" + GetVariantName());
 
+    if (OpenSourceFirmware()) spdlog::debug("   Open source firmware.");
     if (SupportsUpload()) spdlog::debug("   Supports upload.");
     if (SupportsInputOnlyUpload()) spdlog::debug("   Supports input only upload.");
     if (SupportsLEDPanelMatrix()) spdlog::debug("   Supports LED panel matrices.");

@@ -38,19 +38,7 @@ void BaseObject::SetLayoutGroup(const std::string &grp, bool ignore_changes) {
     AddASAPWork(OutputModelManager::WORK_RELOAD_PROPERTYGRID, "SetLayoutGroup");
 }
 
-glm::vec3 BaseObject::MoveHandle3D(IModelPreview* preview, int handle, bool ShiftKeyPressed, bool CtrlKeyPressed, int mouseX, int mouseY, bool latch, bool scale_z, bool& update_rgbeffects)
-{
-    if (GetBaseObjectScreenLocation().IsLocked() || IsFromBase()) return GetBaseObjectScreenLocation().GetHandlePosition(handle);
-    int i = GetBaseObjectScreenLocation().MoveHandle3D(preview, handle, ShiftKeyPressed, CtrlKeyPressed, mouseX, mouseY, latch, scale_z);
-    if (i == MODEL_NEEDS_INIT) {
-        Setup();
-    } else if (i == MODEL_UPDATE_RGBEFFECTS) {
-        update_rgbeffects = true;
-    }
-    IncrementChangeCount();
-    return GetBaseObjectScreenLocation().GetHandlePosition(handle);
-}
-
+// SpaceMouse 6-DOF input.
 glm::vec3 BaseObject::MoveHandle3D(float scale, int handle, glm::vec3 &rot, glm::vec3 &mov, bool& update_rgbeffects) {
     if (GetBaseObjectScreenLocation().IsLocked() || IsFromBase()) return GetBaseObjectScreenLocation().GetHandlePosition(handle);
 
