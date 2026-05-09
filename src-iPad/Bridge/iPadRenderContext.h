@@ -35,6 +35,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <deque>
 #include <set>
 #include <string>
 #include <vector>
@@ -214,6 +215,14 @@ public:
     // Preview rendering blank for center-origin shows.
     bool GetDisplay2DCenter0() const { return _display2DCenter0; }
 
+    // Layout-editor display toggles (Phase J-0). Read from <settings>
+    // in xlights_rgbeffects.xml; default off / 100-unit grid spacing.
+    // Read-only on iPad in J-0 — setters land alongside layout-editor
+    // mutation in J-1+.
+    bool GetDisplay2DGrid() const { return _display2DGrid; }
+    long GetDisplay2DGridSpacing() const { return _display2DGridSpacing; }
+    bool GetDisplay2DBoundingBox() const { return _display2DBoundingBox; }
+
     // <settings><LayoutMode3D value="1"/>. Desktop's last-used 3D vs 2D
     // preference for the House Preview, read at show-folder load.
     // iPad uses this as the initial value for House Preview's is3D
@@ -312,6 +321,46 @@ public:
     // the save.
     bool SaveModelStates();
 
+    // Phase J-1 — layout-property edits (transforms, dimensions,
+    // rotation, locked, name, layoutGroup, controllerName). Each
+    // edit calls MarkLayoutModelDirty; SaveLayoutChanges() rewrites
+    // the on-disk `<model>` for every dirty entry by serializing the
+    // in-memory Model with `XmlSerializer::SerializeModel()` and
+    // replacing the matching node in xlights_rgbeffects.xml.
+    void MarkLayoutModelDirty(const std::string& modelName) {
+        if (!modelName.empty()) _dirtyLayoutModels.insert(modelName);
+    }
+    bool HasDirtyLayoutModels() const { return !_dirtyLayoutModels.empty(); }
+    bool SaveLayoutChanges();
+    // Clear the dirty set without writing to disk — used after a
+    // Discard Changes that has rolled back every in-memory edit
+    // through the undo stack. The undo restores re-marked every
+    // model dirty; without this clear, hasUnsavedLayoutChanges()
+    // reports true and the Save button stays enabled.
+    void ClearDirtyLayoutModels() { _dirtyLayoutModels.clear(); }
+
+    // Phase J-2 — layout undo. Snapshot the common-properties
+    // surface (centre, dimensions, rotation, locked, layoutGroup,
+    // controllerName) of `modelName` onto an in-memory undo stack.
+    // Caller is expected to push BEFORE making the edit. UndoLast
+    // pops the most recent snapshot and reapplies its values
+    // through the regular setters, which marks the model dirty
+    // again so the change persists on next save. Stack is capped
+    // at 100 entries (oldest dropped on overflow).
+    struct LayoutUndoEntry {
+        std::string modelName;
+        float hcenter, vcenter, dcenter;
+        float width, height, depth;
+        float rotateX, rotateY, rotateZ;
+        bool locked;
+        std::string layoutGroup;
+        std::string controllerName;
+    };
+    void PushLayoutUndoSnapshotForModel(const std::string& modelName);
+    bool UndoLastLayoutChange();
+    bool CanUndoLayoutChange() const { return !_layoutUndoStack.empty(); }
+    size_t LayoutUndoDepth() const { return _layoutUndoStack.size(); }
+
     // Model pixel data for a given frame — returns (x, y, r, g, b) tuples
     struct PixelData {
         float x, y;
@@ -362,6 +411,9 @@ private:
     int _previewWidth = 1280;
     int _previewHeight = 720;
     bool _display2DCenter0 = false;
+    bool _display2DGrid = false;
+    long _display2DGridSpacing = 100;
+    bool _display2DBoundingBox = false;
     bool _layoutMode3D = true;
 
     std::string _backgroundImage;
@@ -381,6 +433,16 @@ private:
     // on-disk xlights_rgbeffects.xml. SaveModelStates() reads + drains
     // this set.
     std::set<std::string> _dirtyStateModels;
+
+    // J-1 — models whose layout-relevant in-memory state (transforms,
+    // dimensions, rotation, locked, name, layoutGroup, controllerName)
+    // has diverged from the on-disk file. SaveLayoutChanges() reads +
+    // drains this set.
+    std::set<std::string> _dirtyLayoutModels;
+
+    // J-2 — undo stack for layout edits. Bounded to 100 entries.
+    std::deque<LayoutUndoEntry> _layoutUndoStack;
+    static constexpr size_t kLayoutUndoMaxDepth = 100;
 
     // Cache of the show folder's <colors> palette so per-frame bracket
     // queries don't re-scan XML. Populated on every LoadShowFolder.

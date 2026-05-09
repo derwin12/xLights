@@ -29,6 +29,7 @@
 #include "utils/Color.h"
 #include "utils/ExternalHooks.h"
 #include "XmlSerializer/XmlSerializingVisitor.h"
+#include "XmlSerializer/XmlSerializer.h"
 
 #include <pugixml.hpp>
 #include "utils/FileUtils.h"
@@ -152,6 +153,13 @@ bool iPadRenderContext::LoadShowFolder(const std::string& showDir,
                         if (h > 0) _previewHeight = h;
                     } else if (name == "Display2DCenter0") {
                         _display2DCenter0 = (std::string(v) == "1");
+                    } else if (name == "Display2DGrid") {
+                        _display2DGrid = (std::string(v) == "1");
+                    } else if (name == "Display2DGridSpacing") {
+                        long sp = std::strtol(v, nullptr, 10);
+                        if (sp > 0) _display2DGridSpacing = sp;
+                    } else if (name == "Display2DBoundingBox") {
+                        _display2DBoundingBox = (std::string(v) == "1");
                     } else if (name == "LayoutMode3D") {
                         _layoutMode3D = (std::string(v) == "1");
                     } else if (name == "backgroundImage") {
@@ -424,6 +432,165 @@ bool iPadRenderContext::SaveModelStates() {
         return false;
     }
     _dirtyStateModels.clear();
+    return true;
+}
+
+bool iPadRenderContext::SaveLayoutChanges() {
+    if (_dirtyLayoutModels.empty()) return true;
+    if (_showDir.empty()) return false;
+
+    std::string rgbPath = _showDir + "/xlights_rgbeffects.xml";
+    if (!ObtainAccessToURL(rgbPath, true)) {
+        spdlog::warn("iPadRenderContext::SaveLayoutChanges: ObtainAccessToURL failed for '{}' — write will likely fail", rgbPath);
+    }
+
+    // Always copy the current on-disk file to a single rolling
+    // backup before overwriting. The user can `cp` it back if a
+    // session of testing turns out badly. The backup intentionally
+    // overwrites itself each save so it doesn't accumulate; one
+    // step of recovery is the explicit goal.
+    if (FileExists(rgbPath)) {
+        std::string backupPath = rgbPath + ".iPad-bkp";
+        std::error_code ec;
+        std::filesystem::copy_file(rgbPath, backupPath,
+                                    std::filesystem::copy_options::overwrite_existing,
+                                    ec);
+        if (ec) {
+            spdlog::warn("iPadRenderContext::SaveLayoutChanges: backup copy {} failed: {}",
+                         backupPath, ec.message());
+        }
+    }
+
+    pugi::xml_document doc;
+    auto result = doc.load_file(rgbPath.c_str());
+    if (!result) {
+        spdlog::error("iPadRenderContext::SaveLayoutChanges: load failed: {}",
+                      result.description());
+        return false;
+    }
+    auto root = doc.child("xrgb");
+    if (!root) root = doc.child("xlights");
+    if (!root) {
+        spdlog::error("iPadRenderContext::SaveLayoutChanges: no root element");
+        return false;
+    }
+    auto modelsNode = root.child("models");
+    if (!modelsNode) {
+        spdlog::error("iPadRenderContext::SaveLayoutChanges: no <models> element");
+        return false;
+    }
+
+    // For each dirty model, serialize the in-memory Model into a fresh
+    // pugi::xml_document via the canonical XmlSerializer (same path
+    // desktop uses for export). Replace the matching <model> child of
+    // the on-disk <models> node with the serialized one. Preserves
+    // every attribute the Model owns — transforms, dimensions,
+    // rotation, locked, layoutGroup, controllerName, plus model-type-
+    // specific attributes the live edit may have side-effected.
+    for (const auto& modelName : _dirtyLayoutModels) {
+        Model* m = _modelManager ? _modelManager->GetModel(modelName) : nullptr;
+        if (!m) {
+            spdlog::warn("iPadRenderContext::SaveLayoutChanges: model '{}' not in manager — skipping",
+                         modelName);
+            continue;
+        }
+
+        XmlSerializer serializer;
+        pugi::xml_document modelDoc = serializer.SerializeModel(m);
+        pugi::xml_node serRoot = modelDoc.document_element();
+        if (!serRoot) continue;
+        pugi::xml_node serModel = serRoot.first_child();
+        if (!serModel) continue;
+
+        // Find the existing <model name="..."/> in the on-disk file.
+        // SetName edits update the live `m->GetName()` first, so the
+        // serialized node carries the new name. To keep the on-disk
+        // entry findable across renames we'd need an old-name → new-
+        // name map; J-1 does not support model rename yet, so the
+        // name here is stable.
+        pugi::xml_node existing;
+        for (auto n = modelsNode.first_child(); n; n = n.next_sibling()) {
+            if (std::string_view(n.name()) != "model") continue;
+            if (modelName == n.attribute("name").as_string()) {
+                existing = n;
+                break;
+            }
+        }
+        if (!existing) {
+            spdlog::warn("iPadRenderContext::SaveLayoutChanges: <model name='{}'> not found in xml — appending",
+                         modelName);
+            modelsNode.append_copy(serModel);
+            continue;
+        }
+        // Replace by inserting the serialized copy before the old node
+        // and removing the old node — pugixml has no "replace_child".
+        modelsNode.insert_copy_before(serModel, existing);
+        modelsNode.remove_child(existing);
+    }
+
+    if (!doc.save_file(rgbPath.c_str(), "  ")) {
+        spdlog::error("iPadRenderContext::SaveLayoutChanges: write failed for {}",
+                      rgbPath);
+        return false;
+    }
+    _dirtyLayoutModels.clear();
+    return true;
+}
+
+void iPadRenderContext::PushLayoutUndoSnapshotForModel(const std::string& modelName) {
+    if (modelName.empty() || !_modelManager) return;
+    Model* m = _modelManager->GetModel(modelName);
+    if (!m) return;
+    auto& loc = m->GetModelScreenLocation();
+    glm::vec3 rot = loc.GetRotation();
+    LayoutUndoEntry e;
+    e.modelName = modelName;
+    e.hcenter = loc.GetHcenterPos();
+    e.vcenter = loc.GetVcenterPos();
+    e.dcenter = loc.GetDcenterPos();
+    e.width   = loc.GetMWidth();
+    e.height  = loc.GetMHeight();
+    e.depth   = loc.GetMDepth();
+    e.rotateX = rot.x;
+    e.rotateY = rot.y;
+    e.rotateZ = rot.z;
+    e.locked  = loc.IsLocked();
+    e.layoutGroup    = m->GetLayoutGroup();
+    e.controllerName = m->GetControllerName();
+
+    _layoutUndoStack.push_back(std::move(e));
+    while (_layoutUndoStack.size() > kLayoutUndoMaxDepth) {
+        _layoutUndoStack.pop_front();
+    }
+}
+
+bool iPadRenderContext::UndoLastLayoutChange() {
+    if (_layoutUndoStack.empty() || !_modelManager) return false;
+    LayoutUndoEntry e = _layoutUndoStack.back();
+    _layoutUndoStack.pop_back();
+
+    Model* m = _modelManager->GetModel(e.modelName);
+    if (!m) return false;
+    auto& loc = m->GetModelScreenLocation();
+
+    // Apply via the same setters as the forward edit. They check
+    // IsLocked / IsFromBase, so an undo on a now-locked model is
+    // a no-op for position/dimension fields. layoutGroup +
+    // controllerName always apply (no lock gate).
+    m->SetHcenterPos(e.hcenter);
+    m->SetVcenterPos(e.vcenter);
+    m->SetDcenterPos(e.dcenter);
+    m->SetWidth(e.width);
+    m->SetHeight(e.height);
+    m->SetDepth(e.depth);
+    loc.SetRotateX(e.rotateX);
+    loc.SetRotateY(e.rotateY);
+    loc.SetRotateZ(e.rotateZ);
+    loc.SetLocked(e.locked);
+    if (m->GetLayoutGroup() != e.layoutGroup) m->SetLayoutGroup(e.layoutGroup);
+    if (m->GetControllerName() != e.controllerName) m->SetControllerName(e.controllerName);
+
+    MarkLayoutModelDirty(e.modelName);
     return true;
 }
 

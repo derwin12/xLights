@@ -78,6 +78,108 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)fitModelNamed:(NSString*)name
           forDocument:(XLSequenceDocument*)doc;
 
+// Phase J-2 — Layout Editor selection highlight. Empty / nil
+// clears the highlight. The bridge does NOT auto-redraw; SwiftUI
+// callers should `setNeedsDisplay` on the MTKView after setting
+// the selection so the ring appears on the next frame.
+- (void)setSelectedModel:(nullable NSString*)name;
+
+// Phase J-2 — Layout Editor in-canvas overlays. Per-bridge state
+// (not persisted to rgbeffects.xml in J-2). Initial values for
+// the LayoutEditor pane are seeded from iPadRenderContext's
+// `Display2DGrid` / `Display2DBoundingBox` flags on first
+// `drawModelsForDocument`. Other panes default both to NO and
+// ignore them. 2D-only — neither overlay draws in 3D.
+- (void)setShowLayoutGrid:(BOOL)show;
+- (BOOL)showLayoutGrid;
+- (void)setShowLayoutBoundingBox:(BOOL)show;
+- (BOOL)showLayoutBoundingBox;
+
+// Phase J-2 — snap-to-grid for drag-to-move. When YES, the post-
+// delta centre of the moved model snaps to the nearest grid
+// spacing multiple (read from the iPadRenderContext's
+// `Display2DGridSpacing`, with 2D-center0 origin honoured).
+// Default: NO. Per-session — not persisted to rgbeffects.xml.
+- (void)setSnapToGrid:(BOOL)snap;
+- (BOOL)snapToGrid;
+
+// Phase J-2 — first-pixel highlight (`highlightFirst` arg to
+// `DisplayModelOnWindow`). When YES, the first node of every
+// model is rendered in cyan instead of its native colour, so the
+// user can spot wiring origin while laying out.
+// Default: NO. LayoutEditor pane only — other panes ignore.
+- (void)setShowFirstPixel:(BOOL)show;
+- (BOOL)showFirstPixel;
+
+// Phase J-2 — return the topmost model whose world bounding box
+// contains `point` (in view-point coordinates relative to the
+// MTKView's bounds), or nil if no model is hit. `viewSize` is the
+// MTKView's bounds in points (not pixels) — the bridge multiplies
+// by its stored scale factor internally.
+//
+// Today: 2D-only. In 3D mode the method returns nil; full 3D
+// ray-cast hit testing lands alongside the gizmo work.
+//
+// Iterates the active layout group's models in reverse draw order
+// (last drawn = on top), so a small model rendered on top of a
+// larger backdrop wins the pick.
+- (nullable NSString*)pickModelAtScreenPoint:(CGPoint)point
+                                    viewSize:(CGSize)viewSize
+                                 forDocument:(XLSequenceDocument*)doc;
+
+// Phase J-2 — translate a screen-space drag delta (points) into a
+// world-space move on the named model's centre. Returns YES if the
+// model existed, was unlocked, and accepted the move (and was
+// marked dirty); NO otherwise. 2D-only (3D drag follows the gizmo
+// design). The caller is responsible for scoping this to the model
+// it intends to drag — typically the LayoutEditor's currently-
+// selected model.
+- (BOOL)moveModel:(NSString*)name
+       byDeltaDX:(CGFloat)dx
+              dY:(CGFloat)dy
+        viewSize:(CGSize)viewSize
+     forDocument:(XLSequenceDocument*)doc;
+
+// Phase J-2 — resize handles. The bridge draws 4 corner handles
+// around the selected model when the LayoutEditor selection ring
+// is active. Hit-test returns 0..3 (corner index, see below) for a
+// handle hit, or -1 for no handle. The drag method takes the
+// touch's screen point and resizes the model so the dragged corner
+// follows the touch and the OPPOSITE corner stays fixed.
+//
+// Corner indices, with ortho Y-up:
+//   0 = top-left    (-x, +y)
+//   1 = top-right   (+x, +y)
+//   2 = bottom-right (+x, -y)
+//   3 = bottom-left (-x, -y)
+//
+// Both methods return immediately for unselected / locked / empty
+// preview / 3D mode. 3D resize handles ship with the gizmo work.
+- (NSInteger)pickHandleAtScreenPoint:(CGPoint)point
+                            viewSize:(CGSize)viewSize
+                         forDocument:(XLSequenceDocument*)doc;
+
+- (BOOL)dragHandle:(NSInteger)handleIndex
+   toScreenPoint:(CGPoint)point
+        viewSize:(CGSize)viewSize
+     forDocument:(XLSequenceDocument*)doc;
+
+// Phase J-2 — call when the gesture that started a handle drag
+// ends, so per-drag state on the screen location (active_axis,
+// latching) is cleared and the next gesture starts clean.
+- (void)endHandleDragForDocument:(XLSequenceDocument*)doc;
+
+// Phase J-2 — single-tap dispatch for the LayoutEditor pane in
+// 3D. When a tap lands on the active centre handle of the
+// currently-selected model, cycles `axis_tool` between
+// translate / scale / rotate (mirrors desktop's
+// LayoutPanel.cpp:3726). Returns YES if the tool was advanced
+// (caller should repaint); NO if the tap should fall through
+// to model-selection. 2D / no-selection returns NO immediately.
+- (BOOL)handleCenterHandleTapAtScreenPoint:(CGPoint)point
+                                  viewSize:(CGSize)viewSize
+                               forDocument:(XLSequenceDocument*)doc;
+
 // Diagnostic surface for the SwiftUI preview pane. `errorReason`
 // returns the most recent silent-fail reason (no Metal layer, 0×0
 // drawable, render context missing, StartDrawing failed, no models

@@ -257,6 +257,15 @@ struct XLSequencerCommands: Commands {
 
             Divider()
 
+            // J-0 — Layout Editor (read-only in J-0; mutation lands in
+            // J-1+). Opens its own WindowGroup so the user can keep
+            // the sequencer visible alongside it on a 13" iPad.
+            // Disabled until a show folder loads — there's nothing to
+            // edit before models exist.
+            EditLayoutMenuItem(viewModel: viewModel)
+
+            Divider()
+
             Button("AI Services…") {
                 viewModel.showingAIServices = true
             }
@@ -638,5 +647,23 @@ private extension InspectorTab {
         case .blending: return ("b", [.command, .option])
         case .buffer:   return ("u", [.command, .option])
         }
+    }
+}
+
+/// J-0 — Tools → Edit Layout menu entry. Wrapped in its own View so
+/// it can read `@Environment(\.openWindow)` (only resolvable inside
+/// a View body, not directly in `Commands`). Insert + open follows
+/// the F-1 token pattern so iPadOS scene auto-restore doesn't pop
+/// the editor open on a launch the user didn't ask for.
+struct EditLayoutMenuItem: View {
+    let viewModel: SequencerViewModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Edit Layout…") {
+            viewModel.pendingDetachTokens.insert("layout-editor")
+            openWindow(id: "layout-editor")
+        }
+        .disabled(!viewModel.isShowFolderLoaded || viewModel.layoutEditorOpen)
     }
 }

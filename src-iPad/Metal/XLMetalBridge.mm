@@ -18,6 +18,8 @@
 #include "models/ViewObject.h"
 #include "models/ViewObjectManager.h"
 #include "render/ViewpointMgr.h"
+#include "models/ModelScreenLocation.h"
+#include "utils/VectorMath.h"
 #include "graphics/xlGraphicsContext.h"
 #include "utils/xlImage.h"
 #include "graphics/metal/xlMetalGraphicsContext.h"
@@ -46,7 +48,15 @@
     std::unique_ptr<iPadModelPreview> _preview;
     std::string _previewModel;   // set via setPreviewModel:
     BOOL _isModelPreview;        // YES = single-model pane; NO = full house
+    BOOL _isLayoutEditor;        // YES = LayoutEditor pane (selection / handles enabled)
+    BOOL _showFirstPixel;        // J-2 — `highlightFirst` arg to DisplayModelOnWindow
     BOOL _showViewObjects;       // House Preview view-object visibility toggle
+    std::string _selectedModelName;  // J-2 — Layout Editor selection ring
+    BOOL _showLayoutGrid;            // J-2 — Layout Editor 2D grid overlay
+    BOOL _showLayoutBoundingBox;     // J-2 — Layout Editor canvas bbox
+    BOOL _layoutOverlaysSeeded;      // first draw seeds from rgbeffects state
+    BOOL _snapToGrid;                // J-2 — drag-to-move snap toggle
+    BOOL _handleDragNeedsLatch;      // J-2 — true on first dragHandle call after a pick
     // Cached background image — loaded once per path change, reused across
     // frames. Texture ownership is manual because xlTexture has no
     // unique_ptr-friendly deleter in the public header; released in
@@ -78,6 +88,7 @@
         _preview = std::make_unique<iPadModelPreview>(_canvas.get());
         _preview->SetName(nameStr);
         _isModelPreview = [name isEqualToString:@"ModelPreview"];
+        _isLayoutEditor = [name isEqualToString:@"LayoutEditor"];
         _showViewObjects = YES;
         _bgTexture = nullptr;
         _bgImageWidth = 0;
@@ -197,6 +208,48 @@ static std::unique_ptr<xlImage> LoadImageFile(const std::string& path, int& outW
     if (_preview) {
         _preview->SetCurrentModel(_previewModel);
     }
+}
+
+- (void)setSelectedModel:(NSString*)name {
+    if (name == nil || name.length == 0) {
+        _selectedModelName.clear();
+    } else {
+        _selectedModelName = std::string([name UTF8String]);
+    }
+}
+
+- (void)setShowLayoutGrid:(BOOL)show {
+    _showLayoutGrid = show;
+    _layoutOverlaysSeeded = YES; // explicit set wins over the rgbeffects seed
+}
+
+- (BOOL)showLayoutGrid {
+    return _showLayoutGrid;
+}
+
+- (void)setShowLayoutBoundingBox:(BOOL)show {
+    _showLayoutBoundingBox = show;
+    _layoutOverlaysSeeded = YES;
+}
+
+- (BOOL)showLayoutBoundingBox {
+    return _showLayoutBoundingBox;
+}
+
+- (void)setSnapToGrid:(BOOL)snap {
+    _snapToGrid = snap;
+}
+
+- (BOOL)snapToGrid {
+    return _snapToGrid;
+}
+
+- (void)setShowFirstPixel:(BOOL)show {
+    _showFirstPixel = show;
+}
+
+- (BOOL)showFirstPixel {
+    return _showFirstPixel;
 }
 
 // Visual zoom factor — > 1 = zoomed in (scene appears larger), < 1 = zoomed out.
@@ -565,6 +618,388 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
     return YES;
 }
 
+// Inverse of `iPadModelPreview::StartDrawing`'s 2D View matrix.
+// Returns world (X, Y) for a touch in MTKView point coordinates.
+// Returns NO if the canvas hasn't been sized yet or the
+// projection denominator is zero. `worldDenom` (out, optional)
+// receives `zoom * scale2d` so callers can convert screen-space
+// distances (handle radius, etc.) to world units.
+- (BOOL)unprojectScreenPoint:(CGPoint)point
+                  toWorldX:(float*)outWorldX
+                   worldY:(float*)outWorldY
+                worldDenom:(float*)outDenom
+                forContext:(iPadRenderContext*)rctx {
+    int canvasW = _canvas->getWidth();
+    int canvasH = _canvas->getHeight();
+    if (canvasW <= 0 || canvasH <= 0) return NO;
+
+    double scale = _canvas->getScaleFactor();
+    if (scale <= 0) scale = 1.0;
+    double touchPxX = (double)point.x * scale;
+    double touchPxY = (double)point.y * scale;
+    double windowPxX = touchPxX;
+    double windowPxY = (double)canvasH - touchPxY;
+
+    PreviewCamera& cam = _preview->Get2DCamera();
+    int virtualW = 0, virtualH = 0;
+    _preview->GetVirtualCanvasSize(virtualW, virtualH);
+
+    float scale2d = 1.0f, scaleCorrX = 0.0f, scaleCorrY = 0.0f;
+    if (virtualW != 0 && virtualH != 0) {
+        float scale2dh = (float)canvasH / (float)virtualH;
+        float scale2dw = (float)canvasW / (float)virtualW;
+        if (scale2dh < scale2dw) {
+            scale2d = scale2dh;
+            scaleCorrX = ((scale2dw * (float)virtualW - (scale2d * (float)virtualW)) * cam.GetZoom()) / 2.0f;
+        } else {
+            scale2d = scale2dw;
+            scaleCorrY = ((scale2dh * (float)virtualH - (scale2d * (float)virtualH)) * cam.GetZoom()) / 2.0f;
+        }
+    }
+
+    float zoom = cam.GetZoom();
+    float denom = zoom * scale2d;
+    if (denom == 0.0f) return NO;
+
+    float worldX = ((float)windowPxX
+                    - cam.GetPanX() * zoom + cam.GetZoomCorrX() - scaleCorrX) / denom;
+    float worldY = ((float)windowPxY
+                    - cam.GetPanY() * zoom + cam.GetZoomCorrY() - scaleCorrY) / denom;
+    if (rctx->GetDisplay2DCenter0() && virtualW != 0) {
+        worldX -= ((float)virtualW) / 2.0f;
+    }
+    if (outWorldX) *outWorldX = worldX;
+    if (outWorldY) *outWorldY = worldY;
+    if (outDenom)  *outDenom  = denom;
+    return YES;
+}
+
+// Convert a touch point (UIKit Y-down points) into the window-pixel
+// coordinates the desktop ScreenLocation API expects. The
+// ScreenLocation methods themselves flip Y internally before
+// calling VectorMath::ScreenPosToWorldRay, matching desktop's
+// "mouse coords are Y-down" convention.
+static void PointToWindowPixels(const CGPoint& p, double scale,
+                                int* outX, int* outY) {
+    double sf = (scale > 0) ? scale : 1.0;
+    *outX = (int)std::round((double)p.x * sf);
+    *outY = (int)std::round((double)p.y * sf);
+}
+
+// Build a world-space ray from a touch point, using the preview's
+// ProjView matrix. Used by the 3D hit-test paths that take a ray
+// directly (Model::HitTest3D / ScreenLocation::CheckIfOverHandles3D).
+static void TouchPointToWorldRay(const CGPoint& p, double scale,
+                                  iPadModelPreview* preview,
+                                  glm::vec3& outOrigin,
+                                  glm::vec3& outDirection) {
+    int mx = 0, my = 0;
+    PointToWindowPixels(p, scale, &mx, &my);
+    VectorMath::ScreenPosToWorldRay(
+        mx, preview->getHeight() - my,
+        preview->getWidth(), preview->getHeight(),
+        preview->GetProjViewMatrix(),
+        outOrigin, outDirection);
+}
+
+- (nullable NSString*)pickModelAtScreenPoint:(CGPoint)point
+                                    viewSize:(CGSize)viewSize
+                                 forDocument:(XLSequenceDocument*)doc {
+    if (!_preview || !doc) return nil;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return nil;
+
+    // SubModels share their parent's screenLocation (SubModel.h:29)
+    // and aren't standalone layout entities — desktop's
+    // LayoutPanel doesn't expose them as selectable. Filter them
+    // out of pick/draw so a tap on a submodel's pixels selects
+    // the parent.
+    auto isSubModel = [](Model* m) {
+        return m && m->GetDisplayAs() == DisplayAsType::SubModel;
+    };
+
+    // 3D path uses the existing ray-cast against each model's
+    // ScreenLocation. Returns the closest hit (smallest
+    // intersection distance).
+    if (_preview->Is3D()) {
+        glm::vec3 ray_origin, ray_direction;
+        TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
+                              ray_origin, ray_direction);
+        Model* best = nullptr;
+        float bestDist = std::numeric_limits<float>::infinity();
+        for (Model* m : rctx->GetModelsForActivePreview()) {
+            if (!m || isSubModel(m)) continue;
+            float dist = 0.0f;
+            if (m->GetModelScreenLocation().HitTest3D(
+                    ray_origin, ray_direction, dist) && dist < bestDist) {
+                best = m;
+                bestDist = dist;
+            }
+        }
+        return best ? [NSString stringWithUTF8String:best->GetName().c_str()] : nil;
+    }
+
+    // 2D path: inverse-project the touch into world coords and
+    // box-test each model in reverse draw order.
+    float worldX = 0, worldY = 0, denom = 0;
+    if (![self unprojectScreenPoint:point toWorldX:&worldX worldY:&worldY
+                          worldDenom:&denom forContext:rctx]) {
+        return nil;
+    }
+    auto models = rctx->GetModelsForActivePreview();
+    for (auto it = models.rbegin(); it != models.rend(); ++it) {
+        Model* m = *it;
+        if (!m || isSubModel(m)) continue;
+        auto& loc = m->GetModelScreenLocation();
+        float cx = loc.GetHcenterPos();
+        float cy = loc.GetVcenterPos();
+        float halfW = std::max(1.0f, loc.GetMWidth() * 0.5f);
+        float halfH = std::max(1.0f, loc.GetMHeight() * 0.5f);
+        if (worldX >= cx - halfW && worldX <= cx + halfW &&
+            worldY >= cy - halfH && worldY <= cy + halfH) {
+            return [NSString stringWithUTF8String:m->GetName().c_str()];
+        }
+    }
+    return nil;
+}
+
+- (NSInteger)pickHandleAtScreenPoint:(CGPoint)point
+                            viewSize:(CGSize)viewSize
+                         forDocument:(XLSequenceDocument*)doc {
+    if (!_preview || !doc) return -1;
+    if (_selectedModelName.empty()) return -1;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return -1;
+    Model* m = rctx->GetModelManager()[_selectedModelName];
+    if (!m) return -1;
+    auto& loc = m->GetModelScreenLocation();
+    // ScreenLocation::CheckIfOverHandles bails on locked itself,
+    // but exit early so we don't allocate a ray for nothing.
+    // IsFromBase models (imported from a parent "base" show) are
+    // intentionally read-only — `BaseObject::MoveHandle3D` /
+    // `Model::MoveHandle` short-circuit on them, so a drag would
+    // appear to register (axis highlight) but never move.
+    // Bailing here keeps the gesture from engaging at all so the
+    // user gets the camera-orbit fallback signalling "can't edit".
+    if (loc.IsLocked()) return -1;
+    if (m->IsFromBase()) return -1;
+
+    int handle = NO_HANDLE;
+    if (_preview->Is3D()) {
+        glm::vec3 ray_origin, ray_direction;
+        TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
+                              ray_origin, ray_direction);
+        loc.CheckIfOverHandles3D(ray_origin, ray_direction, handle,
+                                  _preview->GetCameraZoomForHandles(),
+                                  _preview->GetHandleScale());
+        // 3D gizmo: ONLY drags along axis arrows. Desktop's mouse-
+        // down flow (LayoutPanel.cpp:3693-3729) is:
+        //  - Hit an axis arrow (HANDLE_AXIS bit): SetActiveAxis,
+        //    then call MoveHandle3D against the model's current
+        //    active_handle (CENTER_HANDLE / SHEAR_HANDLE / etc.).
+        //  - Hit a plain handle (corner, shear, vertex):
+        //    SetActiveHandle(handle); if it's already the active
+        //    handle, AdvanceAxisTool. Do NOT call MoveHandle3D —
+        //    DragHandle would hit `assert(false)` on NO_AXIS.
+        //    The user then clicks an axis arrow to actually move.
+        if (handle == NO_HANDLE) {
+            return -1;
+        }
+        if (handle & HANDLE_AXIS) {
+            loc.SetActiveAxis((ModelScreenLocation::MSLAXIS)(handle & 0xff));
+            int activeHandle = loc.GetActiveHandle();
+            if (activeHandle == NO_HANDLE) return -1;
+            // Mirror desktop's mouse-DOWN: subsequent dragHandle
+            // calls run with latch=false; the first one needs
+            // latch=true so MoveHandle3D snapshots the model's
+            // current world position into saved_position.
+            _handleDragNeedsLatch = YES;
+            return (NSInteger)activeHandle;
+        }
+        // Plain handle hit. Set it as the active handle so the
+        // subsequent axis-arrow drag operates on this handle, but
+        // don't start a drag here — non-axis 3D drags assert.
+        // Clear stale active_axis from any previous gesture.
+        loc.SetActiveHandle(handle);
+        loc.SetActiveAxis(ModelScreenLocation::MSLAXIS::NO_AXIS);
+        return -1;
+    } else {
+        int mx = 0, my = 0;
+        PointToWindowPixels(point, _canvas->getScaleFactor(), &mx, &my);
+        loc.CheckIfOverHandles(_preview.get(), handle, mx, my);
+    }
+    if (handle == NO_HANDLE) return -1;
+    _handleDragNeedsLatch = YES;
+    return (NSInteger)handle;
+}
+
+- (BOOL)handleCenterHandleTapAtScreenPoint:(CGPoint)point
+                                  viewSize:(CGSize)viewSize
+                               forDocument:(XLSequenceDocument*)doc {
+    if (!_preview || !doc) return NO;
+    if (!_preview->Is3D()) return NO;
+    if (_selectedModelName.empty()) return NO;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return NO;
+    Model* m = rctx->GetModelManager()[_selectedModelName];
+    if (!m) return NO;
+    auto& loc = m->GetModelScreenLocation();
+    if (loc.IsLocked()) return NO;
+
+    // Hit-test in 3D. We do not call pickHandle here because that
+    // would set _handleDragNeedsLatch — this is a tap, not a drag.
+    glm::vec3 ray_origin, ray_direction;
+    TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
+                          ray_origin, ray_direction);
+    int handle = NO_HANDLE;
+    loc.CheckIfOverHandles3D(ray_origin, ray_direction, handle,
+                              _preview->GetCameraZoomForHandles(),
+                              _preview->GetHandleScale());
+    if (handle == NO_HANDLE) return NO;
+    // Axis arrows / segments are drag targets; tap-and-release
+    // doesn't cycle the tool.
+    if (handle & HANDLE_AXIS) return NO;
+    if (handle & HANDLE_SEGMENT) return NO;
+    // Only cycle when the user taps the model's currently-active
+    // handle (mirrors desktop LayoutPanel.cpp:3725).
+    if (handle != loc.GetActiveHandle()) return NO;
+
+    loc.AdvanceAxisTool();
+    return YES;
+}
+
+- (void)endHandleDragForDocument:(XLSequenceDocument*)doc {
+    _handleDragNeedsLatch = NO;
+    if (!_preview) return;
+    if (_selectedModelName.empty()) return;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return;
+    Model* m = rctx->GetModelManager()[_selectedModelName];
+    if (!m) return;
+    auto& loc = m->GetModelScreenLocation();
+    // Clear active_axis (set during gizmo grab) so the next pick
+    // starts fresh. Leave active_handle = CENTER_HANDLE so the
+    // gizmo stays drawn for the still-selected model.
+    loc.SetActiveAxis(ModelScreenLocation::MSLAXIS::NO_AXIS);
+}
+
+- (BOOL)dragHandle:(NSInteger)handleIndex
+   toScreenPoint:(CGPoint)point
+        viewSize:(CGSize)viewSize
+     forDocument:(XLSequenceDocument*)doc {
+    if (!_preview || !doc) return NO;
+    if (_selectedModelName.empty()) return NO;
+    if (handleIndex == NO_HANDLE) return NO;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return NO;
+    Model* m = rctx->GetModelManager()[_selectedModelName];
+    if (!m) return NO;
+    auto& loc = m->GetModelScreenLocation();
+    if (loc.IsLocked()) return NO;
+
+    int mx = 0, my = 0;
+    PointToWindowPixels(point, _canvas->getScaleFactor(), &mx, &my);
+
+    int code = MODEL_UNCHANGED;
+    if (_preview->Is3D()) {
+        // Mirrors desktop's mouse-down → mouse-move sequence
+        // (LayoutPanel.cpp:3704 = mouse-down `latch=true`,
+        // LayoutPanel.cpp:4956 = mouse-move `latch=false`). Latch
+        // resets `saved_position` inside MoveHandle3D — passing
+        // it on every frame means drag_delta evaluates to zero
+        // and the model stops moving.
+        bool latch = _handleDragNeedsLatch ? true : false;
+        bool update_rgbeffects = false;
+        m->MoveHandle3D(_preview.get(), (int)handleIndex,
+                        /* ShiftKeyPressed */ false,
+                        /* CtrlKeyPressed */ false,
+                        mx, my,
+                        /* latch */ latch,
+                        /* scale_z */ false,
+                        update_rgbeffects);
+        _handleDragNeedsLatch = NO;
+        if (update_rgbeffects) code = MODEL_UPDATE_RGBEFFECTS;
+    } else {
+        // Use Model::MoveHandle (the 2D wrapper) rather than the
+        // raw ScreenLocation method — the wrapper calls Setup() on
+        // MODEL_NEEDS_INIT (needed for ThreePoint shear/angle and
+        // PolyPoint vertex drags) and IncrementChangeCount(),
+        // matching the 3D BaseObject::MoveHandle3D pattern.
+        bool update_rgbeffects = false;
+        m->MoveHandle(_preview.get(), (int)handleIndex,
+                      /* ShiftKeyPressed */ false, mx, my,
+                      update_rgbeffects);
+        (void)update_rgbeffects;
+    }
+    rctx->MarkLayoutModelDirty(_selectedModelName);
+    (void)code;
+    return YES;
+}
+
+- (BOOL)moveModel:(NSString*)name
+       byDeltaDX:(CGFloat)dx
+              dY:(CGFloat)dy
+        viewSize:(CGSize)viewSize
+     forDocument:(XLSequenceDocument*)doc {
+    if (!_preview || !doc || !name || name.length == 0) return NO;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return NO;
+    if (_preview->Is3D()) return NO;
+
+    Model* m = rctx->GetModelManager()[std::string([name UTF8String])];
+    if (!m) return NO;
+    auto& loc = m->GetModelScreenLocation();
+    if (loc.IsLocked()) return NO;
+
+    int canvasW = _canvas->getWidth();
+    int canvasH = _canvas->getHeight();
+    if (canvasW <= 0 || canvasH <= 0) return NO;
+
+    // Screen Δ (points) → window-pixel Δ → world Δ via the inverse of
+    // iPadModelPreview::StartDrawing's 2D View matrix. Translation
+    // components don't enter Δ-only conversion (they're constant);
+    // we just need the scale factor zoom*scale2d. The Y delta picks
+    // up an extra sign flip because window-pixel Y is up (Metal
+    // convention) while UI-point Y is down.
+    double scale = _canvas->getScaleFactor();
+    if (scale <= 0) scale = 1.0;
+    double dxPx = (double)dx * scale;
+    double dyPx = -(double)dy * scale;
+
+    PreviewCamera& cam = _preview->Get2DCamera();
+    int virtualW = 0, virtualH = 0;
+    _preview->GetVirtualCanvasSize(virtualW, virtualH);
+    float scale2d = 1.0f;
+    if (virtualW != 0 && virtualH != 0) {
+        float scale2dh = (float)canvasH / (float)virtualH;
+        float scale2dw = (float)canvasW / (float)virtualW;
+        scale2d = std::min(scale2dh, scale2dw);
+    }
+    float denom = cam.GetZoom() * scale2d;
+    if (denom == 0.0f) return NO;
+    float worldDX = (float)dxPx / denom;
+    float worldDY = (float)dyPx / denom;
+
+    float newH = loc.GetHcenterPos() + worldDX;
+    float newV = loc.GetVcenterPos() + worldDY;
+
+    // J-2 — snap the post-delta centre to the rgbeffects grid
+    // spacing if the user has snap-to-grid on. When the layout uses
+    // a centred origin (Display2DCenter0), snapping is naturally
+    // around 0; otherwise it snaps to the show's chosen origin
+    // corner.
+    if (_snapToGrid) {
+        float spacing = (float)std::max((long)1, rctx->GetDisplay2DGridSpacing());
+        newH = std::round(newH / spacing) * spacing;
+        newV = std::round(newV / spacing) * spacing;
+    }
+
+    m->SetHcenterPos(newH);
+    m->SetVcenterPos(newV);
+    rctx->MarkLayoutModelDirty(std::string([name UTF8String]));
+    return YES;
+}
+
 - (void)drawModelsForDocument:(XLSequenceDocument*)doc atMS:(int)frameMS pointSize:(float)pointSize {
     // Reset any stale banner from the previous frame; each path below
     // (early return, info-banner, or successful draw) sets the correct
@@ -682,6 +1117,18 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
         keyed.reserve(models.size());
         for (Model* model : models) {
             if (!model) continue;
+            // SubModels share their parent's screenLocation
+            // (SubModel.h:29) — they're effects-buffer carve-outs
+            // of a parent model, not standalone layout entities.
+            // Desktop's LayoutPanel doesn't expose them as
+            // selectable / movable; matches that behaviour here.
+            // House Preview still renders them via the parent's
+            // node loop, so excluding from the LayoutEditor pane's
+            // iteration doesn't lose any pixels.
+            if (_isLayoutEditor &&
+                model->GetDisplayAs() == DisplayAsType::SubModel) {
+                continue;
+            }
             glm::vec3 c = model->GetModelScreenLocation().GetCenterPosition();
             float z = (viewMatrix * glm::vec4(c, 1.0f)).z;
             keyed.emplace_back(model, z);
@@ -691,7 +1138,45 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
                              return a.second < b.second;
                          });
         const bool is3d = _preview->Is3D();
+        // J-2 — mirror desktop's ModelPreview::RenderModels for the
+        // LayoutEditor pane: `allowSelected=true` (so PrepareToDraw
+        // updates ModelMatrix — required by HitTest3D /
+        // CheckIfOverHandles3D), a non-null `color` (so models render
+        // with the layout-edit override colour rather than effect
+        // output), and Selected(true) on the chosen model so
+        // DisplayModelOnWindow's built-in DrawHandles fires
+        // (Model.cpp:3254). House Preview keeps the playback /
+        // effect-color path (c=nullptr, allowSelected=false).
+        const bool allowSel = _isLayoutEditor ? true : false;
+        // Default = xlLIGHT_GREY, Selected = xlYELLOW. Hardcoded
+        // because ColorManager lives in src-ui-wx; defaults match
+        // ColorManager.h:141-142.
+        static const xlColor sLayoutDefaultColor = xlLIGHT_GREY;
+        static const xlColor sLayoutSelectedColor = xlYELLOW;
         for (const auto& [model, z] : keyed) {
+            const xlColor* useColor = nullptr;
+            if (_isLayoutEditor) {
+                bool isSel = (!_selectedModelName.empty() &&
+                              model->GetName() == _selectedModelName);
+                model->Selected(isSel);
+                // 3D gizmo: BoxedScreenLocation::DrawHandles (5-arg)
+                // only draws the centre sphere + DrawAxisTool gizmo
+                // (translate arrows / scale cubes / rotate rings)
+                // when `active_handle != NO_HANDLE`. Desktop sets it
+                // to CENTER_HANDLE on select (LayoutPanel.cpp:3152);
+                // mirror that so iPad sees the gizmo too. Clear on
+                // deselect.
+                auto& sloc = model->GetModelScreenLocation();
+                if (isSel) {
+                    if (sloc.GetActiveHandle() == NO_HANDLE) {
+                        sloc.SetActiveHandle(CENTER_HANDLE);
+                    }
+                } else if (sloc.GetActiveHandle() != NO_HANDLE) {
+                    sloc.SetActiveHandle(NO_HANDLE);
+                    sloc.SetActiveAxis(ModelScreenLocation::MSLAXIS::NO_AXIS);
+                }
+                useColor = isSel ? &sLayoutSelectedColor : &sLayoutDefaultColor;
+            }
             // Pass the current 2D/3D state rather than a hardcoded true —
             // it drives PrepareToDraw's draw_3d flag (which controls
             // worldPos_z usage and the 2D perspective rotation) and the
@@ -700,7 +1185,13 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
             // ortho left-handed near=1/far=0 any non-zero Z put geometry
             // outside the frustum.
             model->DisplayModelOnWindow(_preview.get(), graphicsCtx, solidProg, transparentProg,
-                                         is3d, nullptr, false, false, false, 0, nullptr);
+                                         is3d,
+                                         /* color */ useColor,
+                                         /* allowSelected */ allowSel,
+                                         /* wiring */ false,
+                                         /* highlightFirst */ _showFirstPixel,
+                                         /* highlightpixel */ 0,
+                                         /* boundingBox */ nullptr);
         }
 
         // View objects (house meshes, ground images, gridlines, terrain).
@@ -716,6 +1207,74 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
                 }
             }
         }
+
+        // J-2 — Layout Editor in-canvas overlays. 2D-only. The
+        // grid + canvas-bounding-box draw before the selection ring
+        // so the ring stays on top. Initial overlay state is seeded
+        // from rgbeffects.xml flags on the first draw; subsequent
+        // draws use whatever the user has toggled in the LayoutEditor
+        // controls overlay.
+        if (!_preview->Is3D()) {
+            if (!_layoutOverlaysSeeded) {
+                _showLayoutGrid = ctx->GetDisplay2DGrid() ? YES : NO;
+                _showLayoutBoundingBox = ctx->GetDisplay2DBoundingBox() ? YES : NO;
+                _layoutOverlaysSeeded = YES;
+            }
+            const int virtualW = ctx->GetPreviewWidth();
+            const int virtualH = ctx->GetPreviewHeight();
+            const long spacing = std::max((long)1, ctx->GetDisplay2DGridSpacing());
+            const bool center0 = ctx->GetDisplay2DCenter0();
+            const float xMin = center0 ? -(float)virtualW * 0.5f : 0.0f;
+            const float xMax = xMin + (float)virtualW;
+            const float yMin = 0.0f;
+            const float yMax = (float)virtualH;
+
+            if (_showLayoutGrid && virtualW > 0 && virtualH > 0) {
+                solidProg->addStep([xMin, xMax, yMin, yMax, spacing](xlGraphicsContext* c) {
+                    std::unique_ptr<xlVertexAccumulator> va(c->createVertexAccumulator());
+                    // 2 vertices per line; estimate count to avoid
+                    // realloc churn on dense grids.
+                    int nx = (int)((xMax - xMin) / (float)spacing) + 1;
+                    int ny = (int)((yMax - yMin) / (float)spacing) + 1;
+                    va->PreAlloc((nx + ny) * 2);
+                    // Vertical lines, snapped to spacing multiples so
+                    // a center0 layout has lines at -spacing, 0,
+                    // +spacing rather than at the irregular xMin.
+                    float xStart = std::floor(xMin / (float)spacing) * (float)spacing;
+                    for (float x = xStart; x <= xMax; x += (float)spacing) {
+                        if (x < xMin) continue;
+                        va->AddVertex(x, yMin);
+                        va->AddVertex(x, yMax);
+                    }
+                    for (float y = 0.0f; y <= yMax; y += (float)spacing) {
+                        va->AddVertex(xMin, y);
+                        va->AddVertex(xMax, y);
+                    }
+                    // Muted grey so the grid recedes against models.
+                    xlColor gridColor((uint8_t)100, (uint8_t)100, (uint8_t)100, (uint8_t)180);
+                    c->drawLines(va.get(), gridColor);
+                });
+            }
+
+            if (_showLayoutBoundingBox && virtualW > 0 && virtualH > 0) {
+                transparentProg->addStep([xMin, xMax, yMin, yMax](xlGraphicsContext* c) {
+                    std::unique_ptr<xlVertexAccumulator> va(c->createVertexAccumulator());
+                    va->PreAlloc(8);
+                    va->AddRectAsLines(xMin, yMin, xMax, yMax);
+                    // Translucent green — matches desktop's
+                    // `xlGREENTRANSLUCENT` for `_display2DBox`
+                    // (ModelPreview.cpp:1622).
+                    xlColor boxColor((uint8_t)0, (uint8_t)200, (uint8_t)0, (uint8_t)160);
+                    c->drawLines(va.get(), boxColor);
+                });
+            }
+        }
+
+        // Selection ring + per-type handles draw automatically inside
+        // Model::DisplayModelOnWindow when `Selected() && c != nullptr
+        // && allowSelected` (Model.cpp:3254). Both conditions are met
+        // for the LayoutEditor pane via the loop above, so no extra
+        // bridge-side rendering is needed here.
     }
 
     // Finish and present. `_errorReason` reflects this frame's state:

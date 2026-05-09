@@ -82,8 +82,9 @@ variants in `libdbg-ios/`.
 | E | Sequence management | ✓ complete | 1 follow-up (Data Layers tab) in [`followups.md`](plans/followups.md) |
 | F | Window system + Display Elements | ✓ complete 2026-04-21 | [`phase-f-window-system.md`](plans/phase-f-window-system.md) (residual) |
 | G | Document / iCloud polish | ✓ complete 2026-04-22 | [`phase-g-document.md`](plans/phase-g-document.md) (residual) |
-| H | App Store readiness | H-0..H-4 ✓; **H-5 metadata + screenshots remaining** | [`phase-h-app-store.md`](plans/phase-h-app-store.md) |
+| H | App Store readiness | H-0..H-4 ✓; submitted to App Store review 2026-05-07; H-5 metadata uploaded | [`phase-h-app-store.md`](plans/phase-h-app-store.md) |
 | I | Import Effects | I-1 + I-2 (`.xsq`/`.xsqz`) ✓ 2026-04-29; I-4 (`.sup`) ✓ 2026-05-02; **I-3 vendor regression, I-5 `.lms`/`.las` remaining** | [`phase-i-import-effects.md`](plans/phase-i-import-effects.md) |
+| J | Layout Editor | open — full Phase S scope, scoped 2026-05-07 (separate full-screen window via Tools → Edit Layout, model-focused, includes 3D gizmo) | [`phase-j-layout-editor.md`](plans/phase-j-layout-editor.md) |
 
 ---
 

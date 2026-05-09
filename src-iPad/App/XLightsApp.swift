@@ -167,6 +167,16 @@ struct XLightsApp: App {
         }
         .defaultSize(width: 380, height: 620)
         .windowResizability(.contentSize)
+
+        // J-0 — Layout Editor scene. Opened from Tools → Edit Layout.
+        // Same token-guarded auto-restore protection as the F-1
+        // detached previews; see `LayoutEditorWindowRoot`.
+        WindowGroup("Edit Layout", id: "layout-editor") {
+            LayoutEditorWindowRoot()
+                .environment(viewModel)
+        }
+        .defaultSize(width: 1100, height: 720)
+        .windowResizability(.contentSize)
     }
 }
 

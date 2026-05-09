@@ -132,6 +132,17 @@ struct PreviewPaneView: UIViewRepresentable {
         dblTap.numberOfTapsRequired = 2
         view.addGestureRecognizer(dblTap)
 
+        // Phase J-2 — single-tap to select a model. Only consumes the
+        // tap on the LayoutEditor pane (the handler bails on others).
+        // Set to require dblTap to fail so a real double-tap doesn't
+        // also fire two single-taps.
+        let singleTap = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleSingleTap(_:)))
+        singleTap.numberOfTapsRequired = 1
+        singleTap.require(toFail: dblTap)
+        view.addGestureRecognizer(singleTap)
+
         return view
     }
 
@@ -152,6 +163,37 @@ struct PreviewPaneView: UIViewRepresentable {
             if bridge.showViewObjects() != settings.showViewObjects {
                 bridge.setShowViewObjects(settings.showViewObjects)
                 uiView.setNeedsDisplay()
+            }
+            // J-2 — push the LayoutEditor selection through to the
+            // bridge whenever the view-model state changes (sidebar
+            // pick, canvas tap, group switch deselect). Repaint after
+            // the push so the ring appears immediately.
+            if previewName == "LayoutEditor" {
+                let newSel = viewModel.layoutEditorSelectedModel ?? ""
+                if context.coordinator.lastPushedSelection != newSel {
+                    bridge.setSelectedModel(viewModel.layoutEditorSelectedModel)
+                    context.coordinator.lastPushedSelection = newSel
+                    uiView.setNeedsDisplay()
+                }
+                // Grid + canvas-bbox overlays. Bridge holds the last-
+                // pushed value and repaints on change.
+                if bridge.showLayoutGrid() != settings.showLayoutGrid {
+                    bridge.setShowLayoutGrid(settings.showLayoutGrid)
+                    uiView.setNeedsDisplay()
+                }
+                if bridge.showLayoutBoundingBox() != settings.showLayoutBoundingBox {
+                    bridge.setShowLayoutBoundingBox(settings.showLayoutBoundingBox)
+                    uiView.setNeedsDisplay()
+                }
+                if bridge.snapToGrid() != settings.snapToGrid {
+                    bridge.setSnapToGrid(settings.snapToGrid)
+                    // No repaint needed — snap only affects future
+                    // moves, not current rendered state.
+                }
+                if bridge.showFirstPixel() != settings.showFirstPixel {
+                    bridge.setShowFirstPixel(settings.showFirstPixel)
+                    uiView.setNeedsDisplay()
+                }
             }
         }
 
@@ -176,6 +218,19 @@ struct PreviewPaneView: UIViewRepresentable {
         var settings: PreviewSettings?
         var status: PreviewStatus?
         weak var mtkView: MTKView?
+        /// J-2 — most recent selection name pushed into the bridge,
+        /// so updateUIView can detect Δ vs. the live view-model
+        /// state and repaint exactly when the selection changes.
+        var lastPushedSelection: String = ""
+        /// J-2 — true while a one-finger pan started on the
+        /// LayoutEditor's selected model and is dragging the model
+        /// rather than the camera. Set in .began, cleared in .ended.
+        var draggingLayoutModel: Bool = false
+        var layoutDragModelName: String? = nil
+        /// J-2 — index of the resize handle being dragged
+        /// (0..3 corners), -1 when not dragging a handle.
+        /// Mutually exclusive with `draggingLayoutModel`.
+        var draggingLayoutHandle: Int = -1
         // nonisolated(unsafe): touched from the nonisolated deinit. Real use is
         // main-thread-only (set/invalidated from display-link lifecycle calls).
         nonisolated(unsafe) var displayLink: CADisplayLink?
@@ -336,6 +391,21 @@ struct PreviewPaneView: UIViewRepresentable {
                 }
             })
 
+            // J-2 — repaint the canvas after a Layout Editor model
+            // edit that didn't go through the gesture path (keyboard
+            // nudge, undo, sidebar property commit). Drag's
+            // per-frame setNeedsDisplay handles the gesture path on
+            // its own.
+            notificationObservers.append(center.addObserver(
+                forName: .layoutEditorModelMoved, object: nil, queue: .main
+            ) { [weak self] note in
+                let objectName = note.object as? String
+                MainActor.assumeIsolated {
+                    guard let self, objectName == previewName else { return }
+                    self.mtkView?.setNeedsDisplay()
+                }
+            })
+
             // Viewpoint commands — scoped to this pane by previewName
             // (each pane has its own camera, so apply/save target the
             // correct one). The reply broadcasts via
@@ -470,14 +540,91 @@ struct PreviewPaneView: UIViewRepresentable {
             guard let bridge else { return }
             switch recognizer.state {
             case .began:
-                if bridge.is3D() {
-                    orbitStartAngleX = bridge.cameraAngleX()
-                    orbitStartAngleY = bridge.cameraAngleY()
-                } else {
-                    panStartX = bridge.cameraPanX()
-                    panStartY = bridge.cameraPanY()
+                // J-2 — on the LayoutEditor pane, a one-finger drag
+                // whose origin lands on a resize handle resizes the
+                // selected model. If it lands on the model's body
+                // (not a handle) it moves the model. Other panes
+                // (and drags on empty space / unselected models /
+                // 3D mode / locked models) keep the existing
+                // camera-pan behaviour.
+                draggingLayoutModel = false
+                draggingLayoutHandle = -1
+                if previewNameForNotifications == "LayoutEditor",
+                   let viewModel,
+                   let view = mtkView,
+                   let sel = viewModel.layoutEditorSelectedModel,
+                   !sel.isEmpty {
+                    let touch = recognizer.location(in: view)
+                    let viewSize = view.bounds.size
+                    // Handle hit-test runs first in both 2D and 3D —
+                    // ScreenLocation::CheckIfOverHandles[3D] returns
+                    // a per-type handle id (corners, rotate, vertex,
+                    // segment-control-point, etc.). A handle hit
+                    // routes to MoveHandle[3D]; otherwise we fall
+                    // back to the 2D body-drag path. 3D body-drag
+                    // requires camera-aware delta math we haven't
+                    // shipped yet, so it gates on !is3D().
+                    let handle = bridge.pickHandle(atScreenPoint: touch,
+                                                   viewSize: viewSize,
+                                                   for: viewModel.document)
+                    if handle >= 0 {
+                        draggingLayoutHandle = handle
+                        layoutDragModelName = sel
+                        viewModel.document.pushLayoutUndoSnapshot(forModel: sel)
+                        recognizer.setTranslation(.zero, in: view)
+                    } else if !bridge.is3D() {
+                        let hit = bridge.pickModel(atScreenPoint: touch,
+                                                   viewSize: viewSize,
+                                                   for: viewModel.document)
+                        if hit == sel {
+                            draggingLayoutModel = true
+                            layoutDragModelName = sel
+                            viewModel.document.pushLayoutUndoSnapshot(forModel: sel)
+                            recognizer.setTranslation(.zero, in: view)
+                        }
+                    }
+                }
+                if !draggingLayoutModel && draggingLayoutHandle < 0 {
+                    if bridge.is3D() {
+                        orbitStartAngleX = bridge.cameraAngleX()
+                        orbitStartAngleY = bridge.cameraAngleY()
+                    } else {
+                        panStartX = bridge.cameraPanX()
+                        panStartY = bridge.cameraPanY()
+                    }
                 }
             case .changed:
+                if draggingLayoutHandle >= 0,
+                   let view = mtkView,
+                   let viewModel {
+                    // Resize uses the absolute touch location (not a
+                    // delta) so the dragged corner stays under the
+                    // finger. The bridge anchors the opposite corner
+                    // and rebuilds width/height/centre.
+                    let touch = recognizer.location(in: view)
+                    bridge.dragHandle(draggingLayoutHandle,
+                                      toScreenPoint: touch,
+                                      viewSize: view.bounds.size,
+                                      for: viewModel.document)
+                    mtkView?.setNeedsDisplay()
+                    return
+                }
+                if draggingLayoutModel,
+                   let view = mtkView,
+                   let viewModel,
+                   let name = layoutDragModelName {
+                    let t = recognizer.translation(in: view)
+                    bridge.moveModel(name,
+                                     byDeltaDX: t.x,
+                                     dY: t.y,
+                                     viewSize: view.bounds.size,
+                                     for: viewModel.document)
+                    // Reset so the next .changed reports an
+                    // incremental delta rather than a cumulative one.
+                    recognizer.setTranslation(.zero, in: view)
+                    mtkView?.setNeedsDisplay()
+                    return
+                }
                 let t = recognizer.translation(in: mtkView)
                 if bridge.is3D() {
                     // 3D orbit: drag right -> rotate Y; drag down -> rotate X
@@ -490,6 +637,28 @@ struct PreviewPaneView: UIViewRepresentable {
                     bridge.setCameraPanX(px, panY: py)
                 }
                 mtkView?.setNeedsDisplay()
+            case .ended, .cancelled, .failed:
+                if (draggingLayoutModel || draggingLayoutHandle >= 0),
+                   let name = layoutDragModelName {
+                    // Final summary refresh so the side panel sees
+                    // the new centre + dimension values. Convention:
+                    // object = previewName so the bridge coordinator
+                    // can listen for repaint, model name in userInfo.
+                    NotificationCenter.default.post(
+                        name: .layoutEditorModelMoved,
+                        object: previewNameForNotifications,
+                        userInfo: ["model": name])
+                }
+                if draggingLayoutHandle >= 0,
+                   let viewModel {
+                    // Clear active_axis on the model so the next pick
+                    // starts clean (without this, MoveHandle3D's
+                    // switch hits stale axis state on the next drag).
+                    bridge.endHandleDrag(for: viewModel.document)
+                }
+                draggingLayoutModel = false
+                draggingLayoutHandle = -1
+                layoutDragModelName = nil
             default:
                 break
             }
@@ -518,6 +687,37 @@ struct PreviewPaneView: UIViewRepresentable {
         @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
             bridge?.resetCamera()
             mtkView?.setNeedsDisplay()
+        }
+
+        /// Phase J-2 — single-tap selects the topmost model under the
+        /// touch on the LayoutEditor pane only. Other panes ignore the
+        /// tap (the recognizer is installed for everyone, but the
+        /// handler is preview-name gated). 3D mode currently bails
+        /// (full ray-cast hit testing lands with the gizmo work).
+        @objc func handleSingleTap(_ recognizer: UITapGestureRecognizer) {
+            guard previewNameForNotifications == "LayoutEditor",
+                  let viewModel,
+                  let bridge,
+                  let view = mtkView else { return }
+            let point = recognizer.location(in: view)
+            let size = view.bounds.size
+            // 3D-only: tapping the active centre handle cycles
+            // translate / scale / rotate (mirrors desktop
+            // LayoutPanel.cpp:3725). Try this first so the tap is
+            // consumed before model-selection runs.
+            if bridge.handleCenterHandleTap(atScreenPoint: point,
+                                             viewSize: size,
+                                             for: viewModel.document) {
+                view.setNeedsDisplay()
+                return
+            }
+            // Bridge hit-test returns the model name (or nil for empty
+            // space). Tap on empty space deselects so the side panel
+            // collapses its property form back to the model list.
+            let hit = bridge.pickModel(atScreenPoint: point,
+                                       viewSize: size,
+                                       for: viewModel.document)
+            viewModel.layoutEditorSelectedModel = hit
         }
 
         // MARK: - Display link

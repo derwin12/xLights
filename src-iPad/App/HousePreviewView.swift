@@ -9,10 +9,25 @@ import SwiftUI
 final class PreviewSettings {
     var is3D: Bool
     var showViewObjects: Bool
+    /// J-2 — Layout Editor overlay toggles. House / Model previews
+    /// don't touch these. Defaults are unset so the bridge's first
+    /// draw can seed from `xlights_rgbeffects.xml`.
+    var showLayoutGrid: Bool
+    var showLayoutBoundingBox: Bool
+    /// J-2 — Layout Editor snap-to-grid for drag-to-move. Off by
+    /// default so unaware users don't get unexpected stair-stepping.
+    var snapToGrid: Bool
+    /// J-2 — first-pixel highlight (cyan dot on each model's node 0).
+    /// Off by default; mirrors desktop's `_showFirstPixel`.
+    var showFirstPixel: Bool
 
     init(is3DDefault: Bool, showViewObjectsDefault: Bool) {
         self.is3D = is3DDefault
         self.showViewObjects = showViewObjectsDefault
+        self.showLayoutGrid = false
+        self.showLayoutBoundingBox = false
+        self.snapToGrid = false
+        self.showFirstPixel = false
     }
 }
 
@@ -632,6 +647,15 @@ extension Notification.Name {
     /// delete). Carries `names: [String]` in userInfo. The overlay
     /// refreshes its menu from this.
     static let previewViewpointListChanged = Notification.Name("PreviewViewpointListChanged")
+    /// Phase J-2 — posted whenever a model on the Layout Editor
+    /// canvas has been moved by direct manipulation (drag),
+    /// keyboard nudge, or an undo restoring older state.
+    /// `object` follows the preview-name convention used by zoom /
+    /// reset / fit ("LayoutEditor"), so the bridge's coordinator
+    /// can listen and `setNeedsDisplay` on the canvas.
+    /// `userInfo["model"]` carries the affected model name; the
+    /// LayoutEditor side panel uses it to refresh its summary.
+    static let layoutEditorModelMoved = Notification.Name("LayoutEditorModelMoved")
 }
 
 /// Diagnostic banner painted over the preview pane when the bridge

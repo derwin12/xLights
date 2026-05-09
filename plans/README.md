@@ -12,6 +12,7 @@ for the details.
 |---|---|---|
 | [phase-h-app-store.md](phase-h-app-store.md) | H — App Store readiness | H-5: screenshots, App Store Connect metadata, submission |
 | [phase-i-import-effects.md](phase-i-import-effects.md) | I — Import Effects | I-3 vendor-sequence regression + Auto Map UX polish, I-5 (`.lms`/`.las`) |
+| [phase-j-layout-editor.md](phase-j-layout-editor.md) | J — Layout Editor | J-0 ✓; J-1 common-properties ✓ + J-2 select/ring/drag/grid+bbox/undo ✓ 2026-05-08; handles/labels/3D + J-3..J-4 ahead |
 | [phase-b-grid-parity.md](phase-b-grid-parity.md) | B — Effects grid parity | 1 P2 named (B77 MIDI) + 3 deferred (B91 LRCLIB landed 2026-05-02) |
 | [followups.md](followups.md) | Cross-phase | Small items left over from C / E (Data Layers tab, MH waypoint authoring, shader uniform grouping) |
 
@@ -46,7 +47,7 @@ notes / cross-references rather than open work.
 | [future-audio-authoring.md](future-audio-authoring.md) | Onset / tempo → timing tracks, spectrogram, pitch contour (Phase J) | shipped — A-1..A-3, A-9..A-11 all on iPad; A-7/A-13 VAMP-blocked |
 | [future-ai-palette-generate.md](future-ai-palette-generate.md) | AI palette generation (AI-1) | shipped |
 | [future-ai-image-generate.md](future-ai-image-generate.md) | AI image generation (AI-2..AI-5) | shipped |
-| [future-layout-editing.md](future-layout-editing.md) | Layout panel — model placement, world layout (Phase S / S-pro) | open — P2 / XXL, multi-year |
+| [future-layout-editing.md](future-layout-editing.md) | Layout panel — model placement, world layout (Phase S / S-pro) | Phase S promoted to [phase-j-layout-editor.md](phase-j-layout-editor.md) 2026-05-07; S-pro items still here |
 | [future-custom-models.md](future-custom-models.md) | Custom model + Face/State + DMX deep + Wiring (Phases T/U/V/W) | open — P2 / XXL |
 
 ## Hard misses (no realistic iOS path)

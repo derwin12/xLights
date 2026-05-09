@@ -839,6 +839,101 @@ NS_ASSUME_NONNULL_BEGIN
 // iPad layout editing stays desktop-only.
 - (BOOL)layoutMode3D;
 
+// MARK: - Layout Editor (Phase J-0, read-only)
+
+// Names of every model visible in the active layout group, in the
+// order desktop renders them (`iPadRenderContext::GetModelsForActivePreview`).
+// ModelGroup children are expanded; duplicates are NOT suppressed —
+// matches desktop's UpdateModelsList behaviour.
+- (NSArray<NSString*>*)modelsInActiveLayoutGroup;
+
+// Read-only snapshot of one model's layout-relevant state. Returns
+// nil for unknown names. Keys (all NSString unless noted):
+//   "name"              — model's display name
+//   "displayAs"         — model type string ("Arch", "Tree", "Custom", …)
+//   "centerX"/"Y"/"Z"   — NSNumber (double) world-space centre
+//   "width"/"height"/"depth" — NSNumber (double) world-space size
+//   "rotateX"/"Y"/"Z"   — NSNumber (double) Euler rotation in degrees
+//   "locked"            — NSNumber (BOOL)
+//   "layoutGroup"       — NSString
+//   "controllerName"    — NSString (empty if unassigned)
+//   "startChannel"      — NSNumber (uint32)
+//   "endChannel"        — NSNumber (uint32)
+//   "stringCount"       — NSNumber (int)
+//   "nodeCount"         — NSNumber (int)
+- (nullable NSDictionary<NSString*, id>*)modelLayoutSummary:(NSString*)name;
+
+// Mutate a single layout-relevant property on `name`. Returns YES
+// if the value changed; NO if `name` was unknown, the property key
+// was unsupported, the model is locked (for setters that respect
+// the lock), or the value was already at the requested setting.
+//
+// The change is staged in memory and tracked in
+// `_dirtyLayoutModels`; nothing hits disk until `saveLayoutChanges`
+// is called. Property keys mirror the `modelLayoutSummary` keys
+// (Phase J-1 v1, common-properties surface):
+//
+//   "centerX"/"centerY"/"centerZ"  — NSNumber (double)
+//   "width"/"height"/"depth"       — NSNumber (double)
+//   "rotateX"/"rotateY"/"rotateZ"  — NSNumber (double, degrees)
+//   "locked"                       — NSNumber (BOOL)
+//   "layoutGroup"                  — NSString
+//   "controllerName"               — NSString
+//
+// Per-model-type properties (string count, custom-model matrix,
+// DMX channel mapping, …) land in J-3.
+- (BOOL)setLayoutModelProperty:(NSString*)name
+                           key:(NSString*)key
+                         value:(id)value;
+
+// Flush every pending layout-property change to
+// `xlights_rgbeffects.xml`. Returns YES if the write succeeded (or
+// if nothing was dirty). One disk round-trip per call —
+// SwiftUI callers should batch by editing in-memory and saving on
+// commit / lose-focus / scene-close, not per-keystroke.
+- (BOOL)saveLayoutChanges;
+
+// YES iff at least one layout-property edit is staged in memory
+// and not yet persisted. The Layout Editor uses this to gate a
+// "Save" button + warn-on-close.
+- (BOOL)hasUnsavedLayoutChanges;
+
+// Drop the dirty-layout set without writing to disk. Used after
+// Discard Changes — every undo restore re-marked the model dirty
+// even though the in-memory state now matches what's on disk.
+- (void)clearDirtyLayoutChanges;
+
+// Phase J-2 — layout undo. Snapshot the named model's common-
+// properties surface (centre, dimensions, rotation, locked,
+// layoutGroup, controllerName) before making an edit; the most
+// recent snapshot is restored by `undoLastLayoutChange`. Stack is
+// capped at 100 entries inside the render context. Multiple
+// pushes for the same model just stack — undo walks them one at
+// a time. The drag handler pushes once at gesture-began, so a
+// single drag is one undo entry.
+- (void)pushLayoutUndoSnapshotForModel:(NSString*)modelName;
+
+// Pop and restore the most recent undo entry. Returns YES if a
+// snapshot was applied (model still exists, dirty marked); NO if
+// the stack was empty or the model has since been removed.
+- (BOOL)undoLastLayoutChange;
+
+// YES iff there's at least one layout-undo snapshot pending.
+- (BOOL)canUndoLayoutChange;
+
+// Read-only snapshot of layout-editor display state. Keys:
+//   "backgroundImage"        — NSString (FixFile-resolved, "" if none)
+//   "backgroundBrightness"   — NSNumber (int 0..100)
+//   "backgroundAlpha"        — NSNumber (int 0..100)
+//   "scaleBackgroundImage"   — NSNumber (BOOL)
+//   "display2DGrid"          — NSNumber (BOOL)
+//   "display2DGridSpacing"   — NSNumber (long, world units)
+//   "display2DBoundingBox"   — NSNumber (BOOL)
+//   "display2DCenter0"       — NSNumber (BOOL)
+//   "previewWidth"/"previewHeight" — NSNumber (int) virtual canvas size
+//   "layoutMode3D"           — NSNumber (BOOL)
+- (NSDictionary<NSString*, id>*)layoutDisplayState;
+
 // Effect editing
 - (BOOL)addEffectToRow:(int)rowIndex
                   name:(NSString*)effectName

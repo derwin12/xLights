@@ -298,6 +298,17 @@ class SequencerViewModel {
     // Flipped by the detached scene's `.onAppear` / `.onDisappear`.
     var housePreviewDetached: Bool = false
     var modelPreviewDetached: Bool = false
+
+    // J-0 layout editor — independent selection state so the editor's
+    // model-list highlight doesn't clobber `previewModelName` (which
+    // drives the Model Preview's single-model render mode and the
+    // effect grid's row-tap state). Empty / nil = nothing selected.
+    var layoutEditorSelectedModel: String? = nil
+    /// True when the standalone Layout Editor scene is open. The
+    /// Tools menu entry disables itself on a second press so we
+    /// don't fight `WindowGroup`'s "focus existing instance"
+    /// behaviour with a redundant token push.
+    var layoutEditorOpen: Bool = false
     // F-1c: set of inspector tabs currently open in their own
     // `inspector-tab` scene windows. The sidebar swaps to a
     // placeholder for any tab in this set.

@@ -6,10 +6,10 @@ All explicitly out of scope today: the iPad MVP loads a show's
 pre-existing layout and plays it back, but does not let the user
 *arrange* models.
 
-Revisit this file when — and only when — layout editing is in scope.
-Until then these items should not re-surface as gaps in other phase
-audits; the relevant phase plans should reference this file when
-calling them out-of-scope.
+**Phase S promoted to active work 2026-05-07** —
+[phase-j-layout-editor.md](phase-j-layout-editor.md) is the iPad-side
+sub-plan. The items below are kept for context; Phase S-pro items
+remain future work.
 
 The 2026-04-23 gap analysis (§2.2) split this work into two phases:
 

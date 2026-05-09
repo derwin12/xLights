@@ -2581,6 +2581,218 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     return _context->GetLayoutMode3D() ? YES : NO;
 }
 
+// MARK: - Layout Editor (Phase J-0, read-only)
+
+- (NSArray<NSString*>*)modelsInActiveLayoutGroup {
+    NSMutableArray<NSString*>* out = [NSMutableArray array];
+    if (!_context) return out;
+    for (Model* m : _context->GetModelsForActivePreview()) {
+        if (!m) continue;
+        // Layout editor doesn't surface submodels — they share
+        // the parent's screenLocation (SubModel.h:29) and aren't
+        // standalone layout entities. Matches desktop LayoutPanel
+        // which never lists them either.
+        if (m->GetDisplayAs() == DisplayAsType::SubModel) continue;
+        [out addObject:[NSString stringWithUTF8String:m->GetName().c_str()]];
+    }
+    return out;
+}
+
+- (nullable NSDictionary<NSString*, id>*)modelLayoutSummary:(NSString*)name {
+    if (!_context || !name) return nil;
+    Model* m = _context->GetModelManager()[std::string([name UTF8String])];
+    if (!m) return nil;
+
+    auto& loc = m->GetModelScreenLocation();
+    glm::vec3 rot = loc.GetRotation();
+
+    NSString* layoutGroup = [NSString stringWithUTF8String:m->GetLayoutGroup().c_str()];
+    NSString* controllerName = [NSString stringWithUTF8String:m->GetControllerName().c_str()];
+    NSString* displayAs = [NSString stringWithUTF8String:m->GetDisplayAsString().c_str()];
+
+    return @{
+        @"name":                 [NSString stringWithUTF8String:m->GetName().c_str()],
+        @"displayAs":            displayAs,
+        @"centerX":              @((double)loc.GetHcenterPos()),
+        @"centerY":              @((double)loc.GetVcenterPos()),
+        @"centerZ":              @((double)loc.GetDcenterPos()),
+        @"width":                @((double)loc.GetMWidth()),
+        @"height":               @((double)loc.GetMHeight()),
+        @"depth":                @((double)loc.GetMDepth()),
+        @"rotateX":              @((double)rot.x),
+        @"rotateY":              @((double)rot.y),
+        @"rotateZ":              @((double)rot.z),
+        @"locked":               @(loc.IsLocked() ? YES : NO),
+        @"layoutGroup":          layoutGroup,
+        @"controllerName":       controllerName,
+        @"startChannel":         @((unsigned long long)m->GetFirstChannel()),
+        @"endChannel":           @((unsigned long long)m->GetLastChannel()),
+        @"stringCount":          @(m->GetNumPhysicalStrings()),
+        @"nodeCount":            @((unsigned long long)m->GetNodeCount()),
+    };
+}
+
+- (BOOL)setLayoutModelProperty:(NSString*)name
+                           key:(NSString*)key
+                         value:(id)value {
+    if (!_context || !name || !key) return NO;
+    Model* m = _context->GetModelManager()[std::string([name UTF8String])];
+    if (!m) return NO;
+
+    auto& loc = m->GetModelScreenLocation();
+    std::string keyStr = [key UTF8String];
+
+    auto asDouble = ^double(BOOL* ok){
+        if ([value isKindOfClass:[NSNumber class]]) {
+            *ok = YES;
+            return [(NSNumber*)value doubleValue];
+        }
+        *ok = NO;
+        return 0.0;
+    };
+    auto asBool = ^BOOL(BOOL* ok){
+        if ([value isKindOfClass:[NSNumber class]]) {
+            *ok = YES;
+            return [(NSNumber*)value boolValue];
+        }
+        *ok = NO;
+        return NO;
+    };
+    auto asString = ^NSString*(BOOL* ok){
+        if ([value isKindOfClass:[NSString class]]) {
+            *ok = YES;
+            return (NSString*)value;
+        }
+        *ok = NO;
+        return nil;
+    };
+
+    BOOL changed = NO;
+    BOOL typeOk = NO;
+
+    if (keyStr == "centerX") {
+        double v = asDouble(&typeOk);
+        if (!typeOk) return NO;
+        if ((float)v != loc.GetHcenterPos()) { m->SetHcenterPos((float)v); changed = YES; }
+    } else if (keyStr == "centerY") {
+        double v = asDouble(&typeOk);
+        if (!typeOk) return NO;
+        if ((float)v != loc.GetVcenterPos()) { m->SetVcenterPos((float)v); changed = YES; }
+    } else if (keyStr == "centerZ") {
+        double v = asDouble(&typeOk);
+        if (!typeOk) return NO;
+        if ((float)v != loc.GetDcenterPos()) { m->SetDcenterPos((float)v); changed = YES; }
+    } else if (keyStr == "width") {
+        double v = asDouble(&typeOk);
+        if (!typeOk) return NO;
+        if ((float)v != loc.GetMWidth()) { m->SetWidth((float)v); changed = YES; }
+    } else if (keyStr == "height") {
+        double v = asDouble(&typeOk);
+        if (!typeOk) return NO;
+        if ((float)v != loc.GetMHeight()) { m->SetHeight((float)v); changed = YES; }
+    } else if (keyStr == "depth") {
+        double v = asDouble(&typeOk);
+        if (!typeOk) return NO;
+        if ((float)v != loc.GetMDepth()) { m->SetDepth((float)v); changed = YES; }
+    } else if (keyStr == "rotateX") {
+        double v = asDouble(&typeOk);
+        if (!typeOk) return NO;
+        if ((float)v != loc.GetRotation().x) { loc.SetRotateX((float)v); changed = YES; }
+    } else if (keyStr == "rotateY") {
+        double v = asDouble(&typeOk);
+        if (!typeOk) return NO;
+        if ((float)v != loc.GetRotation().y) { loc.SetRotateY((float)v); changed = YES; }
+    } else if (keyStr == "rotateZ") {
+        double v = asDouble(&typeOk);
+        if (!typeOk) return NO;
+        if ((float)v != loc.GetRotation().z) { loc.SetRotateZ((float)v); changed = YES; }
+    } else if (keyStr == "locked") {
+        BOOL v = asBool(&typeOk);
+        if (!typeOk) return NO;
+        if ((v ? true : false) != loc.IsLocked()) { loc.SetLocked(v ? true : false); changed = YES; }
+    } else if (keyStr == "layoutGroup") {
+        NSString* s = asString(&typeOk);
+        if (!typeOk) return NO;
+        std::string newGroup = [s UTF8String];
+        if (newGroup != m->GetLayoutGroup()) { m->SetLayoutGroup(newGroup); changed = YES; }
+    } else if (keyStr == "controllerName") {
+        NSString* s = asString(&typeOk);
+        if (!typeOk) return NO;
+        std::string newCtrl = [s UTF8String];
+        if (newCtrl != m->GetControllerName()) { m->SetControllerName(newCtrl); changed = YES; }
+    } else {
+        spdlog::warn("setLayoutModelProperty: unknown key '{}' for model '{}'",
+                     keyStr, [name UTF8String]);
+        return NO;
+    }
+
+    if (changed) {
+        _context->MarkLayoutModelDirty(std::string([name UTF8String]));
+    }
+    return changed;
+}
+
+- (BOOL)saveLayoutChanges {
+    if (!_context) return NO;
+    return _context->SaveLayoutChanges() ? YES : NO;
+}
+
+- (BOOL)hasUnsavedLayoutChanges {
+    if (!_context) return NO;
+    return _context->HasDirtyLayoutModels() ? YES : NO;
+}
+
+- (void)clearDirtyLayoutChanges {
+    if (_context) _context->ClearDirtyLayoutModels();
+}
+
+- (void)pushLayoutUndoSnapshotForModel:(NSString*)modelName {
+    if (!_context || !modelName) return;
+    _context->PushLayoutUndoSnapshotForModel(std::string([modelName UTF8String]));
+}
+
+- (BOOL)undoLastLayoutChange {
+    if (!_context) return NO;
+    return _context->UndoLastLayoutChange() ? YES : NO;
+}
+
+- (BOOL)canUndoLayoutChange {
+    if (!_context) return NO;
+    return _context->CanUndoLayoutChange() ? YES : NO;
+}
+
+- (NSDictionary<NSString*, id>*)layoutDisplayState {
+    if (!_context) {
+        return @{
+            @"backgroundImage":      @"",
+            @"backgroundBrightness": @100,
+            @"backgroundAlpha":      @100,
+            @"scaleBackgroundImage": @NO,
+            @"display2DGrid":        @NO,
+            @"display2DGridSpacing": @100,
+            @"display2DBoundingBox": @NO,
+            @"display2DCenter0":     @NO,
+            @"previewWidth":         @1280,
+            @"previewHeight":        @720,
+            @"layoutMode3D":         @YES,
+        };
+    }
+    NSString* bg = [NSString stringWithUTF8String:_context->GetActiveBackgroundImage().c_str()];
+    return @{
+        @"backgroundImage":      bg,
+        @"backgroundBrightness": @(_context->GetActiveBackgroundBrightness()),
+        @"backgroundAlpha":      @(_context->GetActiveBackgroundAlpha()),
+        @"scaleBackgroundImage": @(_context->GetActiveScaleBackgroundImage() ? YES : NO),
+        @"display2DGrid":        @(_context->GetDisplay2DGrid() ? YES : NO),
+        @"display2DGridSpacing": @((long)_context->GetDisplay2DGridSpacing()),
+        @"display2DBoundingBox": @(_context->GetDisplay2DBoundingBox() ? YES : NO),
+        @"display2DCenter0":     @(_context->GetDisplay2DCenter0() ? YES : NO),
+        @"previewWidth":         @(_context->GetPreviewWidth()),
+        @"previewHeight":        @(_context->GetPreviewHeight()),
+        @"layoutMode3D":         @(_context->GetLayoutMode3D() ? YES : NO),
+    };
+}
+
 // MARK: - Effect Editing
 
 - (BOOL)addEffectToRow:(int)rowIndex

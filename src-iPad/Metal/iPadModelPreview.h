@@ -46,7 +46,15 @@ public:
     int GetVirtualCanvasHeight() const override;
     void GetVirtualCanvasSize(int& w, int& h) const override;
 
-    float GetCameraZoomForHandles() const override { return ActiveCamera().GetZoom(); }
+    // Mirrors desktop ModelPreview::GetCameraZoomForHandles
+    // (ModelPreview.cpp:1304): 1.0 in 2D so the handle width is a
+    // fixed world-unit size and the View matrix's scale handles
+    // visual sizing. Returning the actual 2D zoom here would scale
+    // the handle math AND the View matrix, making handles
+    // quadratically tiny / huge as the user zooms.
+    float GetCameraZoomForHandles() const override {
+        return _is3d ? _camera3d.GetZoom() : 1.0f;
+    }
     int GetHandleScale() const override { return 1; }
     float GetCameraRotationX() const override { return ActiveCamera().GetAngleX(); }
     float GetCameraRotationY() const override { return ActiveCamera().GetAngleY(); }
