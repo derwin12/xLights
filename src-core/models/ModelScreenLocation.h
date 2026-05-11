@@ -42,6 +42,7 @@ class IModelPreview;
 class PreviewCamera;
 
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <vector>
