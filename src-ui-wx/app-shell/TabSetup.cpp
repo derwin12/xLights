@@ -1339,6 +1339,7 @@ void xLightsFrame::DoWork(uint32_t work, const std::string& type, BaseObject* m,
         logger_work->debug("    Selecting model '{}'.", (const char*)selectedModel.c_str());
         //SelectModel(selectModel);
         layoutPanel->SelectBaseObject(selectedModel);
+        layoutPanel->FocusModelTree();
     }
     if (work & OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW) {
         logger_work->debug("    WORK_REDRAW_LAYOUTPREVIEW.");
