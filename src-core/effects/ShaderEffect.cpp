@@ -678,7 +678,7 @@ void ShaderEffect::Render(Effect* eff, const SettingsMap& SettingsMap, RenderBuf
                 std::unique_lock<std::mutex> lock(ShaderRenderCache::shaderMapMutex);
                 if (ShaderRenderCache::warnedShaders.emplace(shaderFile).second) {
                     lock.unlock();
-                    DisplayWarning("Shader effect failed to load: " + shaderFile + "\nThis effect will render as solid red. Check the shader file's JSON header for syntax errors.");
+                    DisplayWarning("Shader effect failed to load: " + shaderFile + "\nThis effect will render as solid red. Check the shader file and xLights logs for details.");
                 }
             }
         } else {
