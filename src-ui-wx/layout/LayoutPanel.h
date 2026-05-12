@@ -351,6 +351,7 @@ class LayoutPanel: public wxPanel
         void UpdatePreview();
         void SelectBaseObject(const std::string & name, bool highlight_tree = true);
         void SelectBaseObject(BaseObject *base_object, bool highlight_tree = true);
+        void FocusModelTree();
         void SelectModel(const std::string & name, bool highlight_tree = true);
         void SelectModelGroupModels(ModelGroup* m, std::list<ModelGroup*>& processed);
         void SelectModel(Model *model, bool highlight_tree = true);
@@ -643,7 +644,7 @@ class LayoutPanel: public wxPanel
         void DisplayAddDmxPopup();
         void OnAddDmxPopup(wxCommandEvent& event);
         void SelectViewObject(ViewObject *v, bool highlight_tree = true);
-        void ImportModelsFromPreview(std::list<impTreeItemData*> models, wxString const& layoutGroup, bool includeEmptyGroups, float srcPerUnit = 0.0f);
+        std::string ImportModelsFromPreview(std::list<impTreeItemData*> models, wxString const& layoutGroup, bool includeEmptyGroups, float srcPerUnit = 0.0f);
         int GetColumnIndex(const std::string& name) const;
         wxSearchCtrl* ModelFilterCtrl = nullptr;
         wxString _filterString;

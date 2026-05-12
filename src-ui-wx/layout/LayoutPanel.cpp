@@ -7180,6 +7180,10 @@ void LayoutPanel::UnSelectAllModelsInTree() {
     PlatformHandleSelectionChanged();
 }
 
+void LayoutPanel::FocusModelTree() {
+    TreeListViewModels->SetFocus();
+}
+
 // Get unique models from selected tree model group included those deeply nested
 std::vector<Model *> LayoutPanel::GetSelectedModelsFromGroup(wxTreeListItem groupItem, bool nested) {
     std::vector<Model *> groupModels;
@@ -9328,8 +9332,9 @@ void LayoutPanel::PreviewSaveImage()
 	delete image;
 }
 
-void LayoutPanel::ImportModelsFromPreview(std::list<impTreeItemData*> models, wxString const& layoutGroup, bool includeEmptyGroups, float srcPerUnit)
+std::string LayoutPanel::ImportModelsFromPreview(std::list<impTreeItemData*> models, wxString const& layoutGroup, bool includeEmptyGroups, float srcPerUnit)
 {
+    std::string firstImported;
     float scaleFactor = 1.0f;
     if (srcPerUnit > 0.0f && RulerObject::GetRuler() != nullptr) {
         // srcPerUnit is already in metres/pixel (normalised in GetSourceRulerPerUnit).
@@ -9374,6 +9379,7 @@ void LayoutPanel::ImportModelsFromPreview(std::list<impTreeItemData*> models, wx
             it2->GetModelNode().append_attribute("LayoutGroup") = layoutGroup.ToStdString();
             scaleModelNode(it2->GetModelNode());
             xlights->AllModels.createAndAddModel(it2->GetModelNode(), modelPreview->getWidth(), modelPreview->getHeight());
+            if (firstImported.empty()) firstImported = newName;
             spdlog::debug("Imported model '{}' as '{}'.", (const char*)it2->GetName().c_str(), (const char*)newName.c_str());
         }
     }
@@ -9417,6 +9423,7 @@ void LayoutPanel::ImportModelsFromPreview(std::list<impTreeItemData*> models, wx
             }
         }
     }
+    return firstImported;
 }
 
 void LayoutPanel::ImportModelsFromRGBEffects()
@@ -9441,7 +9448,7 @@ void LayoutPanel::ImportModelsFromRGBEffects()
         if (lg == "All Models") lg = "Default";
 
         float srcPerUnit = dlg.GetSourceRulerPerUnit();
-        ImportModelsFromPreview(dlg.GetModelsInPreview(""), lg, dlg.GetIncludeEmptyGroups(), srcPerUnit);
+        std::string firstImported = ImportModelsFromPreview(dlg.GetModelsInPreview(""), lg, dlg.GetIncludeEmptyGroups(), srcPerUnit);
 
         for (const auto& it : dlg.GetPreviews())
         {
@@ -9462,11 +9469,13 @@ void LayoutPanel::ImportModelsFromRGBEffects()
                 xlights->LayoutGroups.emplace(it.ToStdString(), std::move(grp));
                 AddPreviewChoice(it.ToStdString());
             }
-            ImportModelsFromPreview(dlg.GetModelsInPreview(it), it, dlg.GetIncludeEmptyGroups(), srcPerUnit);
+            std::string name = ImportModelsFromPreview(dlg.GetModelsInPreview(it), it, dlg.GetIncludeEmptyGroups(), srcPerUnit);
+            if (firstImported.empty()) firstImported = name;
         }
         xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE |
                                                       OutputModelManager::WORK_RELOAD_ALLMODELS |
-                                                      OutputModelManager::WORK_RELOAD_MODELLIST, "LayoutPanel::ImportModelsFromRGBEffects");
+                                                      OutputModelManager::WORK_RELOAD_MODELLIST, "LayoutPanel::ImportModelsFromRGBEffects",
+                                                      nullptr, nullptr, firstImported);
     }
 }
 
