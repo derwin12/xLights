@@ -652,17 +652,19 @@ xLightsFrame::xLightsFrame(wxWindow* parent, int ab, wxWindowID id, bool renderO
     });
 
     AppCallbacks::SetDisplayMessageCallback([](AppCallbacks::DisplayMessageLevel level, const std::string& msg) {
-        switch (level) {
-        case AppCallbacks::DisplayMessageLevel::Error:
-            wxMessageBox(msg, "Error", wxICON_ERROR | wxOK);
-            break;
-        case AppCallbacks::DisplayMessageLevel::Warning:
-            wxMessageBox(msg, "Warning", wxICON_WARNING | wxOK);
-            break;
-        case AppCallbacks::DisplayMessageLevel::Info:
-            wxMessageBox(msg, "Information", wxICON_INFORMATION | wxOK);
-            break;
-        }
+        AppCallbacks::PostToMainThread([level, msg]() {
+            switch (level) {
+            case AppCallbacks::DisplayMessageLevel::Error:
+                wxMessageBox(msg, "Error", wxICON_ERROR | wxOK);
+                break;
+            case AppCallbacks::DisplayMessageLevel::Warning:
+                wxMessageBox(msg, "Warning", wxICON_WARNING | wxOK);
+                break;
+            case AppCallbacks::DisplayMessageLevel::Info:
+                wxMessageBox(msg, "Information", wxICON_INFORMATION | wxOK);
+                break;
+            }
+        });
     });
 
     ValueCurve::SetSequenceElements(&_sequenceElements);
