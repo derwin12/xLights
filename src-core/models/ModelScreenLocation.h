@@ -380,6 +380,7 @@ public:
     virtual int GetDefaultHandle() const { return CENTER_HANDLE; }
     virtual MSLTOOL GetDefaultTool() const { return MSLTOOL::TOOL_TRANSLATE; }
     virtual void MouseOverHandle(std::optional<handles::Id> handle);
+    const std::optional<handles::Id>& GetHighlightedHandleId() const { return highlighted_handle; }
     int GetNumSelectableHandles() const { return mSelectableHandles; }
     virtual bool IsXYTransHandle() const { return false; }
     virtual bool IsElevationHandle() const { return false; }

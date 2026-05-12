@@ -304,6 +304,11 @@ class SequencerViewModel {
     // drives the Model Preview's single-model render mode and the
     // effect grid's row-tap state). Empty / nil = nothing selected.
     var layoutEditorSelectedModel: String? = nil
+    /// Phase J-3 (touch UX) — when non-nil, the Layout Editor is
+    /// in "creation mode": the next tap on the canvas creates a
+    /// new model of this type at the touch point. Cleared on
+    /// creation, on Cancel, or when the editor closes.
+    var layoutPendingNewModelType: String? = nil
     /// True when the standalone Layout Editor scene is open. The
     /// Tools menu entry disables itself on a second press so we
     /// don't fight `WindowGroup`'s "focus existing instance"

@@ -20,6 +20,17 @@ final class PreviewSettings {
     /// J-2 — first-pixel highlight (cyan dot on each model's node 0).
     /// Off by default; mirrors desktop's `_showFirstPixel`.
     var showFirstPixel: Bool
+    /// J-2 (touch UX) — Layout Editor toolbar state. Replace
+    /// desktop's held-key modifiers (Shift / Ctrl).
+    /// `axisTool` is one of: "translate", "rotate", "scale",
+    /// "xy_trans", "elevate".
+    var axisTool: String
+    var uniformModifier: Bool
+    /// 0 = Free, 1 = X, 2 = Y, 3 = Z (matches MSLAXIS enum).
+    var lockAxis: Int
+    /// J-2 (touch UX) — model-name labels rendered as a SwiftUI
+    /// overlay above the Metal canvas. Off by default.
+    var showModelLabels: Bool
 
     init(is3DDefault: Bool, showViewObjectsDefault: Bool) {
         self.is3D = is3DDefault
@@ -28,6 +39,10 @@ final class PreviewSettings {
         self.showLayoutBoundingBox = false
         self.snapToGrid = false
         self.showFirstPixel = false
+        self.axisTool = "translate"
+        self.uniformModifier = false
+        self.lockAxis = 0
+        self.showModelLabels = false
     }
 }
 
@@ -656,6 +671,11 @@ extension Notification.Name {
     /// `userInfo["model"]` carries the affected model name; the
     /// LayoutEditor side panel uses it to refresh its summary.
     static let layoutEditorModelMoved = Notification.Name("LayoutEditorModelMoved")
+    /// Phase J-2 (touch UX) — long-press on a handle posts this
+    /// with `userInfo` matching the shape returned by
+    /// `XLMetalBridge.inspectHandleAtScreenPoint:` (keys: `type`,
+    /// `modelName`, plus the per-type indices).
+    static let layoutEditorContextMenu = Notification.Name("LayoutEditorContextMenu")
 }
 
 /// Diagnostic banner painted over the preview pane when the bridge
