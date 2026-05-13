@@ -1949,10 +1949,10 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
                 auto& sloc = model->GetModelScreenLocation();
                 if (isSel) {
                     if (!sloc.GetActiveHandleId().has_value()) {
-                        sloc.SetActiveHandle(CENTER_HANDLE);
+                        sloc.SetActiveHandleToCentre();
                     }
                 } else if (sloc.GetActiveHandleId().has_value()) {
-                    sloc.SetActiveHandle(NO_HANDLE);
+                    sloc.SetActiveHandle(std::nullopt);
                     sloc.SetActiveAxis(ModelScreenLocation::MSLAXIS::NO_AXIS);
                 }
                 useColor = isSel ? &sLayoutSelectedColor : &sLayoutDefaultColor;

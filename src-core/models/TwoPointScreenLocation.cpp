@@ -150,11 +150,16 @@ std::optional<handles::Id> TwoPointLegacyToId(int h) {
 }
 }
 
-void TwoPointScreenLocation::SetActiveHandle(int handle)
+void TwoPointScreenLocation::SetActiveHandleToCentre()
 {
-    active_handle = TwoPointLegacyToId(handle);
+    // TwoPoint's "centre" body marker is Endpoint(CENTER_HANDLE) —
+    // the midpoint sphere drawn between START and END in 3D.
+    // Diverges from the base default (CentreCycle) because
+    // TwoPoint's GetHandles + IsHandle checks pattern-match
+    // specifically on Role::Endpoint.
+    active_handle = TwoPointLegacyToId(CENTER_HANDLE);
     highlighted_handle.reset();
-    SetAxisTool(axis_tool);  // run logic to disallow certain tools
+    SetAxisTool(axis_tool);
 }
 
 void TwoPointScreenLocation::SetAxisTool(MSLTOOL mode)
@@ -352,62 +357,111 @@ void TwoPointScreenLocation::DrawBoundingBox(xlVertexColorAccumulator *vac, bool
 }
 
 
-int TwoPointScreenLocation::MoveHandle3D(float scale, int handle, glm::vec3 &rot, glm::vec3 &mov) {
-    if (handle == CENTER_HANDLE) {
-        constexpr float rscale = 10; //10 degrees per full 1.0 aka: max speed
-        Rotate(ModelScreenLocation::MSLAXIS::X_AXIS, rot.x * rscale);
-        Rotate(ModelScreenLocation::MSLAXIS::Y_AXIS, -rot.z * rscale);
-        Rotate(ModelScreenLocation::MSLAXIS::Z_AXIS, rot.y * rscale);
-        AddOffset(mov.x * scale, -mov.z * scale, mov.y * scale);
-    } else if (handle == START_HANDLE) {
-        worldPos_x += mov.x * scale;
-        worldPos_y += -mov.z * scale;
-        worldPos_z += mov.y * scale;
-        
-        x2 -= mov.x * scale;
-        y2 -= -mov.z * scale;
-        z2 -= mov.y * scale;
-        
-        
-        glm::vec3 sp = glm::vec3(worldPos_x, worldPos_y, worldPos_z);
-        glm::vec3 ep = glm::vec3(x2, y2, z2);
-        
-        glm::mat4 translateToOrigin = glm::translate(Identity, -sp);
-        glm::mat4 translateBack = glm::translate(Identity, sp);
+namespace {
+// SpaceMouse session for TwoPointScreenLocation. Three flavours:
+//   - CentreCycle / no id : rotate + translate the whole model
+//   - Endpoint(START)     : translate the start point, drag the
+//                            end with it as a rotation pivot
+//   - Endpoint(END)       : translate the end point, drag the
+//                            start with it as a rotation pivot
+// Ports the legacy MoveHandle3D math 1:1 — only the dispatch and
+// state holders change.
+class TwoPointSpaceMouseSession : public handles::SpaceMouseSession {
+public:
+    TwoPointSpaceMouseSession(TwoPointScreenLocation* loc,
+                              std::optional<handles::Id> id)
+        : _loc(loc), _id(id) {}
 
-        glm::mat4 Rotate = glm::rotate(Identity, glm::radians(rot.x*10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        Rotate = glm::rotate(Rotate, glm::radians(-rot.z*10.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        Rotate = glm::rotate(Rotate, glm::radians(rot.y*10.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-
-        ep = glm::vec3(translateBack * Rotate * translateToOrigin* glm::vec4(ep, 1.0f));
-        x2 = ep.x;
-        y2 = ep.y;
-        z2 = ep.z;
-    } else if (handle == END_HANDLE) {
-        x2 += mov.x * scale;
-        y2 += -mov.z * scale;
-        z2 += mov.y * scale;
-        
-        glm::vec3 sp = glm::vec3(worldPos_x, worldPos_y, worldPos_z);
-        glm::vec3 ep = glm::vec3(x2, y2, z2);
-        
-        glm::mat4 translateToOrigin = glm::translate(Identity, -ep);
-        glm::mat4 translateBack = glm::translate(Identity, ep);
-
-        glm::mat4 Rotate = glm::rotate(Identity, glm::radians(rot.x*10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        Rotate = glm::rotate(Rotate, glm::radians(-rot.z*10.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        Rotate = glm::rotate(Rotate, glm::radians(rot.y*10.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-
-        glm::vec3 sp2 = glm::vec3(translateBack * Rotate * translateToOrigin * glm::vec4(sp, 1.0f));
-        worldPos_x = sp2.x;
-        worldPos_y = sp2.y;
-        worldPos_z = sp2.z;
-        
-        x2 += sp.x - worldPos_x;
-        y2 += sp.y - worldPos_y;
-        z2 += sp.z - worldPos_z;
+    handles::SpaceMouseResult Apply(float scale,
+                                     const glm::vec3& rot,
+                                     const glm::vec3& mov) override {
+        if (!_loc) return handles::SpaceMouseResult::Unchanged;
+        const bool isStart = _id.has_value() && _id->role == handles::Role::Endpoint
+                             && _id->index == START_HANDLE;
+        const bool isEnd   = _id.has_value() && _id->role == handles::Role::Endpoint
+                             && _id->index == END_HANDLE;
+        if (isStart) {
+            _loc->ApplySpaceMouseStartHandle(scale, rot, mov);
+        } else if (isEnd) {
+            _loc->ApplySpaceMouseEndHandle(scale, rot, mov);
+        } else {
+            // CentreCycle / Endpoint(CENTER) / no id
+            constexpr float rscale = 10.0f;
+            _loc->Rotate(ModelScreenLocation::MSLAXIS::X_AXIS,  rot.x * rscale);
+            _loc->Rotate(ModelScreenLocation::MSLAXIS::Y_AXIS, -rot.z * rscale);
+            _loc->Rotate(ModelScreenLocation::MSLAXIS::Z_AXIS,  rot.y * rscale);
+            _loc->AddOffset(mov.x * scale, -mov.z * scale, mov.y * scale);
+        }
+        return handles::SpaceMouseResult::Dirty;
     }
-    return MODEL_UPDATE_RGBEFFECTS;
+
+    [[nodiscard]] std::optional<handles::Id> GetHandleId() const override {
+        return _id;
+    }
+
+private:
+    TwoPointScreenLocation*    _loc;
+    std::optional<handles::Id> _id;
+};
+} // namespace
+
+void TwoPointScreenLocation::ApplySpaceMouseStartHandle(float scale,
+                                                         const glm::vec3& rot,
+                                                         const glm::vec3& mov) {
+    worldPos_x += mov.x * scale;
+    worldPos_y += -mov.z * scale;
+    worldPos_z += mov.y * scale;
+
+    x2 -= mov.x * scale;
+    y2 -= -mov.z * scale;
+    z2 -= mov.y * scale;
+
+    glm::vec3 sp(worldPos_x, worldPos_y, worldPos_z);
+    glm::vec3 ep(x2, y2, z2);
+
+    glm::mat4 translateToOrigin = glm::translate(Identity, -sp);
+    glm::mat4 translateBack = glm::translate(Identity, sp);
+
+    glm::mat4 R = glm::rotate(Identity, glm::radians(rot.x * 10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    R = glm::rotate(R, glm::radians(-rot.z * 10.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    R = glm::rotate(R, glm::radians(rot.y * 10.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+    ep = glm::vec3(translateBack * R * translateToOrigin * glm::vec4(ep, 1.0f));
+    x2 = ep.x;
+    y2 = ep.y;
+    z2 = ep.z;
+}
+
+void TwoPointScreenLocation::ApplySpaceMouseEndHandle(float scale,
+                                                       const glm::vec3& rot,
+                                                       const glm::vec3& mov) {
+    x2 += mov.x * scale;
+    y2 += -mov.z * scale;
+    z2 += mov.y * scale;
+
+    glm::vec3 sp(worldPos_x, worldPos_y, worldPos_z);
+    glm::vec3 ep(x2, y2, z2);
+
+    glm::mat4 translateToOrigin = glm::translate(Identity, -ep);
+    glm::mat4 translateBack = glm::translate(Identity, ep);
+
+    glm::mat4 R = glm::rotate(Identity, glm::radians(rot.x * 10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    R = glm::rotate(R, glm::radians(-rot.z * 10.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    R = glm::rotate(R, glm::radians(rot.y * 10.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+    glm::vec3 sp2 = glm::vec3(translateBack * R * translateToOrigin * glm::vec4(sp, 1.0f));
+    worldPos_x = sp2.x;
+    worldPos_y = sp2.y;
+    worldPos_z = sp2.z;
+
+    x2 += sp.x - worldPos_x;
+    y2 += sp.y - worldPos_y;
+    z2 += sp.z - worldPos_z;
+}
+
+std::unique_ptr<handles::SpaceMouseSession>
+TwoPointScreenLocation::BeginSpaceMouseSession(const std::optional<handles::Id>& id) {
+    return std::make_unique<TwoPointSpaceMouseSession>(this, id);
 }
 
 

@@ -365,14 +365,6 @@ void PolyPointScreenLocation::SetSelectedHandle(int h) {
     selected_handle = id;
 }
 
-void PolyPointScreenLocation::SetActiveHandle(int handle)
-{
-    SetSelectedHandle(handle);
-    active_handle = selected_handle;  // same Id mapping
-    highlighted_handle.reset();
-    SetAxisTool(axis_tool);  // run logic to disallow certain tools
-}
-
 void PolyPointScreenLocation::SetActiveHandle(const std::optional<handles::Id>& id)
 {
     // Axis-gizmo roles are modifiers on the body handle — see the
@@ -771,45 +763,95 @@ bool PolyPointScreenLocation::DrawHandles(xlGraphicsProgram *program, float zoom
 }
 
 
-int PolyPointScreenLocation::MoveHandle3D(float scale, int handle, glm::vec3 &rot, glm::vec3 &mov) {
-    if (handle == CENTER_HANDLE) {
-        constexpr float rscale = 10; //10 degrees per full 1.0 aka: max speed
-        Rotate(ModelScreenLocation::MSLAXIS::X_AXIS, rot.x * rscale);
-        Rotate(ModelScreenLocation::MSLAXIS::Y_AXIS, -rot.z * rscale);
-        Rotate(ModelScreenLocation::MSLAXIS::Z_AXIS, rot.y * rscale);
-        AddOffset(mov.x * scale, -mov.z * scale, mov.y * scale);
-        return MODEL_UPDATE_RGBEFFECTS;
-    } else {
-        if (handle & HANDLE_CP0) {
-            int seg = handle & HANDLE_MASK;
-            if (seg < (int)mPos.size()) {
-                mPos[seg].cp0.x += mov.x * scale;
-                mPos[seg].cp0.y -= mov.z * scale;
-                mPos[seg].cp0.z += mov.y * scale;
-                if (mPos[seg].curve != nullptr) mPos[seg].curve->set_cp0(mPos[seg].cp0.x, mPos[seg].cp0.y, mPos[seg].cp0.z);
-                FixCurveHandles();
+namespace {
+// SpaceMouse session for PolyPointScreenLocation. Handle dispatch:
+//   - CentreCycle / no id   → rotate + translate whole model
+//   - CurveControl(seg, ix) → move that curve control point
+//   - Vertex(idx)           → move that vertex
+class PolyPointSpaceMouseSession : public handles::SpaceMouseSession {
+public:
+    PolyPointSpaceMouseSession(PolyPointScreenLocation* loc,
+                               std::optional<handles::Id> id)
+        : _loc(loc), _id(id) {}
+
+    handles::SpaceMouseResult Apply(float scale,
+                                     const glm::vec3& rot,
+                                     const glm::vec3& mov) override {
+        if (!_loc) return handles::SpaceMouseResult::Unchanged;
+        if (_id.has_value()) {
+            if (_id->role == handles::Role::CurveControl) {
+                _loc->ApplySpaceMouseCurveCp(_id->segment, _id->index, scale, mov);
+                return handles::SpaceMouseResult::NeedsInit;
             }
-        } else if (handle & HANDLE_CP1) {
-            int seg = handle & HANDLE_MASK;
-            if (seg < (int)mPos.size()) {
-                mPos[seg].cp1.x += mov.x * scale;
-                mPos[seg].cp1.y -= mov.z * scale;
-                mPos[seg].cp1.z += mov.y * scale;
-                if (mPos[seg].curve != nullptr) mPos[seg].curve->set_cp1(mPos[seg].cp1.x, mPos[seg].cp1.y, mPos[seg].cp1.z);
-                FixCurveHandles();
-            }
-        } else {
-            int point = handle - 1;
-            if (point < (int)mPos.size()) {
-                mPos[point].x += mov.x * scale;
-                mPos[point].y -= mov.z * scale;
-                mPos[point].z += mov.y * scale;
-                FixCurveHandles();
+            if (_id->role == handles::Role::Vertex) {
+                _loc->ApplySpaceMouseVertex(_id->index, scale, mov);
+                return handles::SpaceMouseResult::NeedsInit;
             }
         }
-        return MODEL_NEEDS_INIT;
+        _loc->ApplySpaceMouseCenter(scale, rot, mov);
+        return handles::SpaceMouseResult::Dirty;
     }
-    return MODEL_UNCHANGED;
+
+    [[nodiscard]] std::optional<handles::Id> GetHandleId() const override {
+        return _id;
+    }
+
+private:
+    PolyPointScreenLocation*    _loc;
+    std::optional<handles::Id>  _id;
+};
+} // namespace
+
+void PolyPointScreenLocation::ApplySpaceMouseCenter(float scale,
+                                                     const glm::vec3& rot,
+                                                     const glm::vec3& mov) {
+    constexpr float rscale = 10.0f;
+    Rotate(ModelScreenLocation::MSLAXIS::X_AXIS,  rot.x * rscale);
+    Rotate(ModelScreenLocation::MSLAXIS::Y_AXIS, -rot.z * rscale);
+    Rotate(ModelScreenLocation::MSLAXIS::Z_AXIS,  rot.y * rscale);
+    AddOffset(mov.x * scale, -mov.z * scale, mov.y * scale);
+}
+
+void PolyPointScreenLocation::ApplySpaceMouseCurveCp(int segment,
+                                                      int cpIndex,
+                                                      float scale,
+                                                      const glm::vec3& mov) {
+    if (segment < 0 || segment >= (int)mPos.size()) return;
+    if (cpIndex == 0) {
+        mPos[segment].cp0.x += mov.x * scale;
+        mPos[segment].cp0.y -= mov.z * scale;
+        mPos[segment].cp0.z += mov.y * scale;
+        if (mPos[segment].curve != nullptr) {
+            mPos[segment].curve->set_cp0(mPos[segment].cp0.x,
+                                          mPos[segment].cp0.y,
+                                          mPos[segment].cp0.z);
+        }
+    } else {
+        mPos[segment].cp1.x += mov.x * scale;
+        mPos[segment].cp1.y -= mov.z * scale;
+        mPos[segment].cp1.z += mov.y * scale;
+        if (mPos[segment].curve != nullptr) {
+            mPos[segment].curve->set_cp1(mPos[segment].cp1.x,
+                                          mPos[segment].cp1.y,
+                                          mPos[segment].cp1.z);
+        }
+    }
+    FixCurveHandles();
+}
+
+void PolyPointScreenLocation::ApplySpaceMouseVertex(int vertexIndex,
+                                                     float scale,
+                                                     const glm::vec3& mov) {
+    if (vertexIndex < 0 || vertexIndex >= (int)mPos.size()) return;
+    mPos[vertexIndex].x += mov.x * scale;
+    mPos[vertexIndex].y -= mov.z * scale;
+    mPos[vertexIndex].z += mov.y * scale;
+    FixCurveHandles();
+}
+
+std::unique_ptr<handles::SpaceMouseSession>
+PolyPointScreenLocation::BeginSpaceMouseSession(const std::optional<handles::Id>& id) {
+    return std::make_unique<PolyPointSpaceMouseSession>(this, id);
 }
 
 
