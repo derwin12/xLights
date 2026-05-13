@@ -3202,7 +3202,6 @@ void LayoutPanel::SelectBaseObject3D()
 
 void LayoutPanel::SelectBaseObject(const std::string & name, bool highlight_tree)
 {
-    
     if( editing_models ) {
         Model *m = xlights->AllModels[name];
         if (m == nullptr)
@@ -7184,6 +7183,45 @@ void LayoutPanel::FocusModelTree() {
     TreeListViewModels->SetFocus();
 }
 
+std::string LayoutPanel::FindNextModelNameAfterDelete(const wxArrayString& deletedNames) const
+{
+    std::set<std::string> deleted;
+    for (const auto& n : deletedNames) deleted.insert(n.ToStdString());
+
+    // Use the first selected item's parent as the context so we find siblings correctly
+    // even when the item is a child of a group rather than a root-level item.
+    wxTreeListItem parent = TreeListViewModels->GetRootItem();
+    for (const auto& sel : selectedTreeModels) {
+        if (sel.IsOk()) {
+            wxTreeListItem p = TreeListViewModels->GetItemParent(sel);
+            if (p.IsOk()) parent = p;
+            break;
+        }
+    }
+
+    std::vector<std::string> ordered;
+    for (wxTreeListItem it = TreeListViewModels->GetFirstChild(parent); it.IsOk(); it = TreeListViewModels->GetNextSibling(it)) {
+        std::string name = TreeListViewModels->GetItemText(it).ToStdString();
+        if (!name.empty() && name.front() == '<') name = name.substr(1, name.size() - 2);
+        ordered.push_back(name);
+    }
+
+    int lastDeletedIdx = -1;
+    for (int i = 0; i < (int)ordered.size(); ++i)
+        if (deleted.count(ordered[i])) lastDeletedIdx = i;
+    if (lastDeletedIdx < 0) return "";
+
+    for (int i = lastDeletedIdx + 1; i < (int)ordered.size(); ++i) {
+        if (!deleted.count(ordered[i])) return ordered[i];
+    }
+
+    for (int i = lastDeletedIdx - 1; i >= 0; --i) {
+        if (!deleted.count(ordered[i])) return ordered[i];
+    }
+
+    return "";
+}
+
 // Get unique models from selected tree model group included those deeply nested
 std::vector<Model *> LayoutPanel::GetSelectedModelsFromGroup(wxTreeListItem groupItem, bool nested) {
     std::vector<Model *> groupModels;
@@ -8077,6 +8115,8 @@ void LayoutPanel::DeleteSelectedModels()
         }
 
         if (wxMessageBox("Are you sure you want to delete the folowing model(s)?:\n\n" + modelsToConfirm, "Confirm Delete?", wxICON_QUESTION | wxYES_NO) == wxYES) {
+            std::string nextModel = FindNextModelNameAfterDelete(modelsToDelete);
+
             // we suspend deferred work because if the delete model pops a dialog then the ASAP work gets done prematurely
             xlights->GetOutputModelManager()->SuspendDeferredWork(true);
             xlights->UnselectEffect(); // we do this just in case the effect is on the model we are deleting
@@ -8106,12 +8146,14 @@ void LayoutPanel::DeleteSelectedModels()
             selectedBaseObject = nullptr;
 
             xlights->GetOutputModelManager()->SuspendDeferredWork(false);
+            xlights->GetOutputModelManager()->ClearSelectedModel();
             xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RELOAD_ALLMODELS |
                                                           OutputModelManager::WORK_RGBEFFECTS_CHANGE |
                                                           OutputModelManager::WORK_MODELS_CHANGE_REQUIRING_RERENDER |
                                                           OutputModelManager::WORK_MODELS_REWORK_STARTCHANNELS |
                                                           OutputModelManager::WORK_CALCULATE_START_CHANNELS |
-                                                          OutputModelManager::WORK_RELOAD_MODELLIST, "LayoutPanel::DeleteSelectedModels");
+                                                          OutputModelManager::WORK_RELOAD_MODELLIST, "LayoutPanel::DeleteSelectedModels",
+                                                          nullptr, nullptr, nextModel);
         }
     } else {
         wxBell();
@@ -8136,6 +8178,7 @@ void LayoutPanel::DeleteSelectedGroups()
 	}
 
 	if (wxMessageBox("Are you sure you want to delete the following group(s)?:\n\n" + groupsToConfirm, "Confirm Remove?", wxICON_QUESTION | wxYES_NO) == wxYES) {
+        std::string nextModel = FindNextModelNameAfterDelete(groupsToDelete);
 
 		CreateUndoPoint("All", wxJoin(groupsToDelete, ','));
 
@@ -8147,10 +8190,13 @@ void LayoutPanel::DeleteSelectedGroups()
 		}
 		UnSelectAllModels();
 
+        xlights->GetOutputModelManager()->ClearSelectedModel();
 		xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RELOAD_ALLMODELS |
                                                 OutputModelManager::WORK_RGBEFFECTS_CHANGE |
                                                 OutputModelManager::WORK_MODELS_CHANGE_REQUIRING_RERENDER |
-                                                OutputModelManager::WORK_RELOAD_PROPERTYGRID, "LayoutPanel::OnModelsPopup::ID_MNU_DELETE_MODEL_GROUP");
+                                                OutputModelManager::WORK_RELOAD_MODELLIST |
+                                                OutputModelManager::WORK_RELOAD_PROPERTYGRID, "LayoutPanel::OnModelsPopup::ID_MNU_DELETE_MODEL_GROUP",
+                                                nullptr, nullptr, nextModel);
 	}
 }
 
