@@ -218,6 +218,13 @@ struct LayoutEditorView: View {
                 break
             }
         }
+        // J-3 (touch UX) — Pencil Pro squeeze maps to layout undo.
+        // Posted by PreviewPaneView's UIPencilInteraction; same
+        // entry point as the toolbar's Undo button so undo state /
+        // dirty markers / canvas repaint stay consistent.
+        .onReceive(NotificationCenter.default.publisher(for: .layoutEditorPencilUndo)) { _ in
+            if canUndo { performUndo() }
+        }
         .confirmationDialog(contextMenuTarget?.title ?? "",
                             isPresented: Binding(
                                 get: { contextMenuTarget != nil },

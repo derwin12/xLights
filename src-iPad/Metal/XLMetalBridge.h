@@ -334,6 +334,13 @@ NS_ASSUME_NONNULL_BEGIN
                                   viewSize:(CGSize)viewSize
                                forDocument:(XLSequenceDocument*)doc;
 
+// Phase J-3 (touch UX) — Pencil double-tap. Advance the axis tool
+// (Translate → Scale → Rotate → …) on the selected model without
+// needing a position. Returns YES if a tool change happened
+// (caller should repaint); NO if no model is selected / model is
+// locked / 2D.
+- (BOOL)cycleAxisToolForSelectedModelForDocument:(XLSequenceDocument*)doc;
+
 // Diagnostic surface for the SwiftUI preview pane. `errorReason`
 // returns the most recent silent-fail reason (no Metal layer, 0×0
 // drawable, render context missing, StartDrawing failed, no models

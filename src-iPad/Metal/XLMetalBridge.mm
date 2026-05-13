@@ -1006,6 +1006,20 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     return YES;
 }
 
+- (BOOL)cycleAxisToolForSelectedModelForDocument:(XLSequenceDocument*)doc {
+    if (!_preview || !doc) return NO;
+    if (!_preview->Is3D()) return NO;
+    if (_selectedModelName.empty()) return NO;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return NO;
+    Model* m = rctx->GetModelManager()[_selectedModelName];
+    if (!m) return NO;
+    auto& loc = m->GetModelScreenLocation();
+    if (loc.IsLocked()) return NO;
+    loc.AdvanceAxisTool();
+    return YES;
+}
+
 - (void)endHandleDragForDocument:(XLSequenceDocument*)doc {
     _handleDragNeedsLatch = NO;
 

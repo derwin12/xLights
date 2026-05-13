@@ -676,6 +676,12 @@ extension Notification.Name {
     /// `XLMetalBridge.inspectHandleAtScreenPoint:` (keys: `type`,
     /// `modelName`, plus the per-type indices).
     static let layoutEditorContextMenu = Notification.Name("LayoutEditorContextMenu")
+    /// Phase J-3 (touch UX) — Pencil Pro squeeze on the canvas
+    /// asks the LayoutEditor to undo the last layout edit. Posted
+    /// by PreviewPaneView's UIPencilInteraction handler;
+    /// LayoutEditorView listens and calls its `performUndo()`.
+    /// No userInfo.
+    static let layoutEditorPencilUndo = Notification.Name("LayoutEditorPencilUndo")
 }
 
 /// Diagnostic banner painted over the preview pane when the bridge

@@ -175,6 +175,17 @@ struct PreviewPaneView: UIViewRepresentable {
         longPress.minimumPressDuration = 0.45
         view.addGestureRecognizer(longPress)
 
+        // Phase J-3 (touch UX) — Pencil 2 / Pencil Pro hardware
+        // gestures. Double-tap cycles the axis tool on the
+        // selected model (Move → Scale → Rotate); Pro-only squeeze
+        // triggers layout-undo. Both LayoutEditor-only — the
+        // coordinator gates by `previewNameForNotifications`
+        // before acting. Pencil 1 has neither — nothing breaks,
+        // delegate just never fires.
+        let pencil = UIPencilInteraction()
+        pencil.delegate = context.coordinator
+        view.addInteraction(pencil)
+
         return view
     }
 
@@ -257,7 +268,7 @@ struct PreviewPaneView: UIViewRepresentable {
         }
     }
 
-    class Coordinator: NSObject, MTKViewDelegate, UIGestureRecognizerDelegate {
+    class Coordinator: NSObject, MTKViewDelegate, UIGestureRecognizerDelegate, UIPencilInteractionDelegate {
         var bridge: XLMetalBridge?
         var viewModel: SequencerViewModel?
         var settings: PreviewSettings?
@@ -931,6 +942,60 @@ struct PreviewPaneView: UIViewRepresentable {
                 userInfo: info)
         }
 
+        // MARK: - Pencil interactions (J-3)
+
+        /// Phase J-3 (touch UX) — Pencil 2 / Pencil Pro double-tap
+        /// on the barrel. Cycles the axis tool on the selected
+        /// model so the user can swap between Move / Scale /
+        /// Rotate without going to the toolbar. Fires once on
+        /// `.ended` so a rapid double-tap doesn't double-advance.
+        /// Only acts when the editor pane has focus + a model is
+        /// selected. iOS hands us the user's preferred action via
+        /// `tap.action` (Switch Eraser / Show Palette / etc.); we
+        /// override entirely since we don't have eraser semantics.
+        func pencilInteraction(_ interaction: UIPencilInteraction,
+                                didReceiveTap tap: UIPencilInteraction.Tap) {
+            // Tap events are atomic (no phase) — fire once per
+            // double-tap. Just gate by pane + selection.
+            guard previewNameForNotifications == "LayoutEditor",
+                  let viewModel,
+                  let bridge,
+                  let view = mtkView else { return }
+            if bridge.cycleAxisToolForSelectedModel(for: viewModel.document),
+               let sel = viewModel.layoutEditorSelectedModel {
+                // Sync the SwiftUI toolbar's highlighted tool with
+                // the new bridge-side axis_tool. The toolbar reads
+                // from `settings.axisTool` (not the bridge), so
+                // without this push the gizmo cycles but the
+                // toolbar pill stays stale.
+                let next = viewModel.document.axisTool(forModel: sel)
+                if next != "none" {
+                    settings?.axisTool = next
+                }
+                // Repaint + property-panel refresh via the standard
+                // mutation notification.
+                NotificationCenter.default.post(
+                    name: .layoutEditorModelMoved,
+                    object: previewNameForNotifications,
+                    userInfo: ["model": sel])
+                view.setNeedsDisplay()
+            }
+        }
+
+        /// Phase J-3 (touch UX) — Pencil Pro squeeze on the barrel.
+        /// Maps to layout-undo; LayoutEditorView listens for the
+        /// notification and routes through its `performUndo()`.
+        /// Fires once on `.ended` so a quick squeeze undoes one
+        /// step, not the whole stack.
+        func pencilInteraction(_ interaction: UIPencilInteraction,
+                                didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+            guard squeeze.phase == .ended else { return }
+            guard previewNameForNotifications == "LayoutEditor" else { return }
+            NotificationCenter.default.post(
+                name: .layoutEditorPencilUndo,
+                object: previewNameForNotifications)
+        }
+
         /// Phase J-2 (touch UX) — Pencil / trackpad hover.
         /// `UIHoverGestureRecognizer` fires for both Pencil hover
         /// (M2+ iPads, Pencil 2 / Pencil Pro) and trackpad pointer
@@ -1031,6 +1096,14 @@ struct PreviewPaneView: UIViewRepresentable {
             if bridge.handleCenterHandleTap(atScreenPoint: point,
                                              viewSize: size,
                                              for: viewModel.document) {
+                // Sync the SwiftUI toolbar's highlighted tool with
+                // the bridge-side axis_tool we just advanced.
+                if let sel = viewModel.layoutEditorSelectedModel {
+                    let next = viewModel.document.axisTool(forModel: sel)
+                    if next != "none" {
+                        settings?.axisTool = next
+                    }
+                }
                 view.setNeedsDisplay()
                 return
             }
