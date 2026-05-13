@@ -3031,25 +3031,34 @@ class SequencerViewModel {
         XLAIServices.shared().generateLyricTrack(audioPath: audioPath,
                                                    forService: service.name) { words, starts, ends, error in
 
-            // The bridge marshals this completion to the main
-            // queue, but Swift's type system sees it as a non-
-            // isolated @Sendable closure. Hop explicitly to
-            // MainActor so reloadRows / registerUndo / setActionName
-            // / completion can safely touch MainActor state.
-            Task { @MainActor in
-                if let error = error {
+            // The bridge dispatches every completion path to the
+            // main queue (XLAIServices.mm:371-418). Convert the
+            // bridged NSArrays into Sendable Swift value types
+            // *before* entering the MainActor isolation so Swift 6
+            // strict concurrency doesn't flag the closure capture
+            // as a data-race risk. NSArray<NSNumber> isn't Sendable
+            // under strict mode; [Int] / [String] are.
+            let safeWords: [String]? = (words as? [String])
+            let safeStarts: [Int]? = (starts as? [NSNumber])?.map { $0.intValue }
+            let safeEnds: [Int]? = (ends as? [NSNumber])?.map { $0.intValue }
+            let safeError: String? = error
+
+            MainActor.assumeIsolated {
+                if let error = safeError {
                     completion(error)
                     return
                 }
-                guard let words = words, let starts = starts, let ends = ends, !words.isEmpty else {
+                guard let words = safeWords, let starts = safeStarts, let ends = safeEnds,
+                      !words.isEmpty else {
                     completion("Recognizer returned no words. Try again with the vocals stem (Tools → Stem Separation) or a clearer audio source.")
                     return
                 }
 
-                let trackName = doc.addLyricTimingTrack(named: name,
-                                                         words: words,
-                                                         startMS: starts,
-                                                         endMS: ends)
+                let trackName = doc.addLyricTimingTrack(
+                    named: name,
+                    words: words,
+                    startMS: starts.map { NSNumber(value: $0) },
+                    endMS: ends.map { NSNumber(value: $0) })
                 if trackName.isEmpty {
                     completion("Couldn't create the lyric timing track.")
                     return
