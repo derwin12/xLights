@@ -634,6 +634,64 @@ struct PreviewPaneView: UIViewRepresentable {
             guard let bridge else { return }
             switch recognizer.state {
             case .began:
+                // J-3 (touch UX) — Add Model drag-to-size. If the
+                // user picked a type from the Add menu, the next
+                // drag creates the model at touch-down and sizes
+                // it via the descriptor `BeginCreate` session as
+                // the finger moves. Mirrors desktop's click-drag-
+                // release flow.
+                if previewNameForNotifications == "LayoutEditor",
+                   let viewModel,
+                   let view = mtkView,
+                   let pendingType = viewModel.layoutPendingNewModelType {
+                    let touch = recognizer.location(in: view)
+                    if let newName = bridge.createModel(
+                        ofType: pendingType,
+                        atScreenPoint: touch,
+                        viewSize: view.bounds.size,
+                        for: viewModel.document) {
+                        viewModel.layoutPendingNewModelType = nil
+                        viewModel.layoutEditorSelectedModel = newName
+                        // Polyline-style models enter mid-create
+                        // mode after this drag; the .ended branch
+                        // keeps the in-progress flag set so the
+                        // next tap appends a vertex rather than
+                        // creating a fresh model.
+                        if bridge.modelUsesPolyPointLocation(newName,
+                                                              for: viewModel.document) {
+                            viewModel.layoutPolylineInProgress = newName
+                        }
+                        layoutDragModelName = newName
+                        // Sentinel: any non-negative value routes
+                        // .changed through `dragHandle`, which
+                        // forwards to whichever `_dragSession`
+                        // the bridge has open — including the
+                        // creation session.
+                        draggingLayoutHandle = 0
+                        draggingLayoutModel = false
+                        return
+                    }
+                }
+                // J-3 (touch UX) — polyline mid-creation drag.
+                // Each follow-on touch appends a vertex; pan
+                // continues to size that new segment. Same
+                // sentinel scheme as the fresh-create path so
+                // .changed routes through `dragHandle`.
+                if previewNameForNotifications == "LayoutEditor",
+                   let viewModel,
+                   let view = mtkView,
+                   let polyName = viewModel.layoutPolylineInProgress {
+                    let touch = recognizer.location(in: view)
+                    if bridge.appendVertex(toPolyline: polyName,
+                                            atScreenPoint: touch,
+                                            viewSize: view.bounds.size,
+                                            for: viewModel.document) {
+                        layoutDragModelName = polyName
+                        draggingLayoutHandle = 0
+                        draggingLayoutModel = false
+                        return
+                    }
+                }
                 // J-2 — on the LayoutEditor pane, a one-finger drag
                 // whose origin lands on a resize handle resizes the
                 // selected model. If it lands on the model's body
@@ -913,11 +971,34 @@ struct PreviewPaneView: UIViewRepresentable {
                   let view = mtkView else { return }
             let point = recognizer.location(in: view)
             let size = view.bounds.size
-            // J-3 (touch UX) — Add Model mode. If the user has
-            // picked a type from the Add menu, the next tap drops
-            // a model of that type at the touch point. Wins over
-            // every other tap handler so an in-flight creation
-            // can't accidentally turn into a model-pick.
+            // J-3 (touch UX) — polyline mid-creation. Each follow-
+            // on tap appends a vertex to the in-progress polyline.
+            // Checked before the fresh-model branch so the second-
+            // through-Nth tap routes here instead of starting a
+            // new model.
+            if let polyName = viewModel.layoutPolylineInProgress {
+                if bridge.appendVertex(toPolyline: polyName,
+                                        atScreenPoint: point,
+                                        viewSize: size,
+                                        for: viewModel.document) {
+                    // Tap-only: commit the BeginExtend session so
+                    // the new vertex stays put. The next tap opens
+                    // a fresh AddHandle + BeginExtend cycle.
+                    bridge.endHandleDrag(for: viewModel.document)
+                    NotificationCenter.default.post(
+                        name: .layoutEditorModelMoved,
+                        object: previewNameForNotifications,
+                        userInfo: ["model": polyName])
+                    view.setNeedsDisplay()
+                }
+                return
+            }
+            // J-3 (touch UX) — Add Model. Tap-without-drag: the
+            // user picked a type but didn't drag, so commit the
+            // model at its `CreateDefaultModel` geometry. The
+            // pan handler's drag-to-size path takes over when
+            // there IS movement; this branch only fires when the
+            // gesture never qualified as a pan.
             if let type = viewModel.layoutPendingNewModelType {
                 if let newName = bridge.createModel(ofType: type,
                                                      atScreenPoint: point,
@@ -925,6 +1006,16 @@ struct PreviewPaneView: UIViewRepresentable {
                                                      for: viewModel.document) {
                     viewModel.layoutPendingNewModelType = nil
                     viewModel.layoutEditorSelectedModel = newName
+                    // Polyline-style models stay in "append vertex"
+                    // mode until the user taps Done. Single-vertex
+                    // models commit the BeginCreate session here.
+                    if bridge.modelUsesPolyPointLocation(newName,
+                                                         for: viewModel.document) {
+                        viewModel.layoutPolylineInProgress = newName
+                        bridge.endHandleDrag(for: viewModel.document)
+                    } else {
+                        bridge.endHandleDrag(for: viewModel.document)
+                    }
                     NotificationCenter.default.post(
                         name: .layoutEditorModelMoved,
                         object: previewNameForNotifications,

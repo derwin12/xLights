@@ -309,6 +309,14 @@ class SequencerViewModel {
     /// new model of this type at the touch point. Cleared on
     /// creation, on Cancel, or when the editor closes.
     var layoutPendingNewModelType: String? = nil
+    /// Phase J-3 (touch UX) — when non-nil, a polyline-style model
+    /// (Poly Line / MultiPoint) is mid-creation and each follow-on
+    /// tap appends a vertex. Cleared by an explicit Done, Esc /
+    /// Return key, or when the editor closes. Set after the first
+    /// vertex of a polyline is placed; mutually exclusive with
+    /// `layoutPendingNewModelType` (which only governs the first
+    /// vertex / fresh-model placement).
+    var layoutPolylineInProgress: String? = nil
     /// True when the standalone Layout Editor scene is open. The
     /// Tools menu entry disables itself on a second press so we
     /// don't fight `WindowGroup`'s "focus existing instance"

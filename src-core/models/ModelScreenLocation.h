@@ -390,7 +390,19 @@ public:
 
     MSLPLANE GetPreferredSelectionPlane() { return preferred_selection_plane; }
     void SetPreferredSelectionPlane( MSLPLANE plane ) { preferred_selection_plane = plane; }
+    MSLPLANE GetActivePlane() const { return active_plane; }
     void SetActivePlane( MSLPLANE plane ) { active_plane = plane; }
+    // Choose the best world plane (XY / XZ / YZ) for projecting a
+    // drag based on the camera angles, then write it to
+    // `active_plane`. Sessions that read `GetActivePlane()` (e.g.
+    // PolyPointCreationSession) will then constrain drags to the
+    // plane most aligned with the current view. Caller should
+    // invoke right before opening a drag session.
+    void RefreshActivePlaneFromCamera(IModelPreview* preview) {
+        if (!preview) return;
+        bool rotate = false;
+        active_plane = GetBestIntersection(preferred_selection_plane, rotate, preview);
+    }
     void FindPlaneIntersection( int x, int y, IModelPreview* preview );
     void CreateWithDepth(bool b) {
         createWithDepth = b;

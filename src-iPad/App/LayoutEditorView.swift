@@ -60,6 +60,14 @@ struct LayoutEditorView: View {
     /// refresh time so changes to the curated list don't require
     /// a rebuild.
     @State private var availableModelTypes: [String] = []
+    /// J-3 (touch UX) — drives the Add-Model sheet. Using a sheet
+    /// instead of an inline Menu avoids whatever launch-time issue
+    /// the SwiftUI Menu in the canvas overlay triggers.
+    @State private var addModelSheetVisible: Bool = false
+    /// J-3 (touch UX) — pending delete confirmation. Set when the
+    /// user taps the trash icon in the inline action bar; cleared
+    /// after the alert resolves either way.
+    @State private var pendingDeleteModelName: String? = nil
 
     var body: some View {
         @Bindable var vm = viewModel
@@ -134,6 +142,7 @@ struct LayoutEditorView: View {
             // fresh next time rather than re-entering creation mode
             // on a stale type.
             viewModel.layoutPendingNewModelType = nil
+            viewModel.layoutPolylineInProgress = nil
         }
         .onChange(of: viewModel.isShowFolderLoaded) { _, _ in refresh() }
         .onChange(of: activeLayoutGroup) { _, newValue in
@@ -159,6 +168,11 @@ struct LayoutEditorView: View {
         .onKeyPress(.downArrow,  phases: .down) { keyPress in nudge(0,  -1, keyPress) }
         .onKeyPress(.leftArrow,  phases: .down) { keyPress in nudge(-1,  0, keyPress) }
         .onKeyPress(.rightArrow, phases: .down) { keyPress in nudge(+1,  0, keyPress) }
+        // J-3 (touch UX) — Esc/Return end mid-polyline creation
+        // (mirrors desktop's polyline create commit hot-keys).
+        // Also drops fresh-model placement mode if armed.
+        .onKeyPress(.escape, phases: .down) { _ in endCreationModes() }
+        .onKeyPress(.return, phases: .down) { _ in endCreationModes() }
         .onReceive(NotificationCenter.default.publisher(for: .layoutEditorModelMoved)) { note in
             // Drag-to-move on the canvas (or a keyboard nudge / undo)
             // mutates the bridge directly; refresh the summary +
@@ -211,12 +225,35 @@ struct LayoutEditorView: View {
                             titleVisibility: .visible) {
             contextMenuButtons
         }
+        .sheet(isPresented: $addModelSheetVisible) {
+            AddModelSheet(types: availableModelTypes,
+                           labelFor: modelTypeLabel) { type in
+                viewModel.layoutPendingNewModelType = type
+                addModelSheetVisible = false
+            }
+        }
         .alert("Save failed",
                isPresented: Binding(get: { saveErrorMessage != nil },
                                     set: { if !$0 { saveErrorMessage = nil } })) {
             Button("OK", role: .cancel) { }
         } message: {
             Text(saveErrorMessage ?? "")
+        }
+        // J-3 (touch UX) — delete-model confirmation. Triggered by
+        // the trash icon in the inline action bar. The delete is
+        // an in-memory mutation through the bridge; user must still
+        // hit Save to persist (matches every other layout edit).
+        .alert("Delete \(pendingDeleteModelName ?? "")?",
+               isPresented: Binding(get: { pendingDeleteModelName != nil },
+                                    set: { if !$0 { pendingDeleteModelName = nil } })) {
+            Button("Delete", role: .destructive) {
+                if let name = pendingDeleteModelName {
+                    deleteModel(name: name)
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Removes this model from the current layout. Save the layout to make the change permanent; Undo or Discard will roll it back.")
         }
         // Confirm-before-save. xlights_rgbeffects.xml is the show's
         // master layout file; an unintended save during testing is
@@ -324,21 +361,19 @@ struct LayoutEditorView: View {
                 .background(Color.black)
 
             VStack(alignment: .trailing, spacing: 4) {
-                // J-3 (touch UX) — Add Model. Lives in the canvas
-                // overlay so it's reachable even when the
+                // J-3 (touch UX) — Add Model. Reachable when the
                 // NavigationSplitView's nav bar is hidden (which
-                // is most of the time on iPad in this scene).
-                Menu {
-                    ForEach(availableModelTypes, id: \.self) { type in
-                        Button(modelTypeLabel(type)) {
-                            viewModel.layoutPendingNewModelType = type
-                        }
-                    }
+                // is most of the time on iPad in this scene). Tap
+                // → set `addModelSheetVisible`; the sheet on the
+                // root view presents the type picker.
+                Button {
+                    addModelSheetVisible = true
                 } label: {
                     Image(systemName: "plus.circle.fill")
                         .font(.title3)
                 }
-                .menuStyle(.borderlessButton)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 .disabled(!viewModel.isShowFolderLoaded || availableModelTypes.isEmpty)
 
                 Button {
@@ -360,22 +395,42 @@ struct LayoutEditorView: View {
             }
             .padding(8)
 
-            // J-3 (touch UX) — creation-mode banner. Visible only
-            // while `layoutPendingNewModelType` is set; shows
-            // which type the next tap will create and offers a
-            // Cancel to drop out of the mode.
+            // J-3 (touch UX) — creation-mode banner. Visible while
+            // `layoutPendingNewModelType` is set (first-vertex tap)
+            // OR `layoutPolylineInProgress` is set (mid-polyline
+            // appending). The polyline branch swaps Cancel for Done
+            // so the user can stop adding vertices.
             if let pendingType = viewModel.layoutPendingNewModelType {
                 VStack {
                     HStack(spacing: 12) {
                         Image(systemName: "plus.circle.fill")
                             .foregroundStyle(.green)
-                        Text("Tap canvas to place ")
-                            .foregroundStyle(.white) +
-                        Text(modelTypeLabel(pendingType))
+                        Text("Tap canvas to place \(Text(modelTypeLabel(pendingType)).fontWeight(.semibold))")
                             .foregroundStyle(.white)
-                            .fontWeight(.semibold)
                         Button("Cancel") {
                             viewModel.layoutPendingNewModelType = nil
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(radius: 3, y: 2)
+                    .padding(.top, 12)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+                .allowsHitTesting(true)
+            } else if let polyName = viewModel.layoutPolylineInProgress {
+                VStack {
+                    HStack(spacing: 12) {
+                        Image(systemName: "scribble.variable")
+                            .foregroundStyle(.green)
+                        Text("Tap to add vertex to \(Text(polyName).fontWeight(.semibold))")
+                            .foregroundStyle(.white)
+                        Button("Done") {
+                            viewModel.layoutPolylineInProgress = nil
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
@@ -413,6 +468,9 @@ struct LayoutEditorView: View {
                                           summaryToken &+= 1
                                           hasUnsavedChanges =
                                               viewModel.document.hasUnsavedLayoutChanges()
+                                      },
+                                      onRequestDelete: {
+                                          pendingDeleteModelName = selected
                                       })
                     .allowsHitTesting(true)
             }
@@ -623,6 +681,43 @@ struct LayoutEditorView: View {
                                             object: "LayoutEditor",
                                             userInfo: ["model": sel])
         }
+    }
+
+    /// J-3 (touch UX) — exit fresh-model placement and / or mid-
+    /// polyline create. Returns `.handled` if either mode was
+    /// active so the keypress is consumed (otherwise Esc/Return
+    /// would fall through to focused controls / sidebar).
+    private func endCreationModes() -> KeyPress.Result {
+        var consumed = false
+        if viewModel.layoutPendingNewModelType != nil {
+            viewModel.layoutPendingNewModelType = nil
+            consumed = true
+        }
+        if viewModel.layoutPolylineInProgress != nil {
+            viewModel.layoutPolylineInProgress = nil
+            consumed = true
+        }
+        return consumed ? .handled : .ignored
+    }
+
+    /// J-3 (touch UX) — delete the named model from the bridge,
+    /// clear selection so the action bar/toolbar go away, then
+    /// refresh the sidebar list and dirty/undo state. Repaint the
+    /// canvas via the standard layout-mutation notification so the
+    /// model disappears immediately. Persisting requires Save —
+    /// matches every other layout edit.
+    private func deleteModel(name: String) {
+        guard viewModel.document.deleteModel(name) else { return }
+        if viewModel.layoutEditorSelectedModel == name {
+            viewModel.layoutEditorSelectedModel = nil
+        }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        canUndo = viewModel.document.canUndoLayoutChange()
+        refreshModelList()
+        NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                        object: "LayoutEditor",
+                                        userInfo: ["model": name])
     }
 
     private func saveLayoutChanges() {
@@ -894,18 +989,60 @@ private struct LayoutEditorStringField: View {
 //
 // First-cut actions: Lock toggle + a "deselect" affordance. Add
 // Duplicate / Delete once the bridge supports them.
+// Phase J-3 (touch UX) — model-type picker. A sheet (rather than
+// an inline Menu) so the list of 18 types is comfortable to
+// browse on touch and presents a familiar iOS modal model.
+// Cancel via swipe-down or tap outside; selection dismisses
+// automatically.
+private struct AddModelSheet: View {
+    let types: [String]
+    let labelFor: (String) -> String
+    let onSelect: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List(types, id: \.self) { type in
+                Button {
+                    onSelect(type)
+                } label: {
+                    HStack {
+                        Image(systemName: "plus.rectangle.on.rectangle")
+                            .foregroundStyle(.secondary)
+                        Text(labelFor(type))
+                            .foregroundStyle(.primary)
+                    }
+                }
+            }
+            .navigationTitle("Add Model")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
 private struct InlineModelActionBar: View {
     @Environment(SequencerViewModel.self) var viewModel
     let modelName: String
     let summaryToken: Int
     let onPropertyChange: () -> Void
+    let onRequestDelete: () -> Void
 
     var body: some View {
         // `TimelineView(.animation)` refreshes its content every
         // CADisplayLink tick — exactly when we want to recompute
         // the screen anchor (matches Metal redraw cadence).
-        TimelineView(.animation) { _ in
-            anchoredBar
+        // GeometryReader gives us the canvas height for clamping
+        // the bottom-anchored bar above the viewport's lower edge.
+        GeometryReader { geo in
+            TimelineView(.animation) { _ in
+                anchoredBar(canvasHeight: geo.size.height)
+            }
         }
     }
 
@@ -917,7 +1054,7 @@ private struct InlineModelActionBar: View {
     }
 
     @ViewBuilder
-    private var anchoredBar: some View {
+    private func anchoredBar(canvasHeight: CGFloat) -> some View {
         if let value = XLightsBridgeBox.bridgeForLayoutEditor()?
                                        .screenAnchorPoint(forModel: modelName,
                                                           for: viewModel.document) {
@@ -960,6 +1097,15 @@ private struct InlineModelActionBar: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
 
+                Button(role: .destructive) {
+                    onRequestDelete()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.red)
+
                 Button {
                     viewModel.layoutEditorSelectedModel = nil
                 } label: {
@@ -973,10 +1119,15 @@ private struct InlineModelActionBar: View {
             .padding(.vertical, 4)
             .background(.regularMaterial, in: Capsule())
             .shadow(radius: 2, y: 1)
-            // Position the bar above the model's screen-top with a
-            // small offset. Clamp to viewport so the bar stays
-            // visible even when the anchor is near the screen edge.
-            .position(x: anchor.x, y: max(28, anchor.y - 30))
+            // Position the bar BELOW the model's screen-bottom
+            // anchor with a small offset. Bottom-anchor avoids
+            // overlap with the gizmo handles (Y axis arrow, rotate
+            // ring, shear puck) which all live at or above the
+            // model's top edge. Reads the GeometryReader's height
+            // to clamp the bar above the canvas's bottom edge so
+            // it stays visible when the model is near the bottom.
+            .position(x: anchor.x,
+                       y: min(canvasHeight - 28, anchor.y + 30))
             .transition(.opacity)
         }
     }

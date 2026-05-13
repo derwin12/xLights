@@ -247,6 +247,25 @@ NS_ASSUME_NONNULL_BEGIN
                                 viewSize:(CGSize)viewSize
                              forDocument:(XLSequenceDocument*)doc;
 
+// Phase J-3 (touch UX) — multi-vertex polyline create. Returns
+// YES if `name` is a PolyPoint-style model (Poly Line / MultiPoint).
+// Used by the SwiftUI gesture layer to decide whether the next tap
+// should append a vertex or place a fresh model.
+- (BOOL)modelUsesPolyPointLocation:(NSString*)name
+                       forDocument:(XLSequenceDocument*)doc;
+
+// Phase J-3 (touch UX) — append a new vertex to an in-progress
+// polyline create. Commits any open drag session, calls
+// `AddHandle` to push a new vertex at the projected touch point,
+// then opens a `BeginExtend` session on that vertex so a follow-on
+// drag (via `dragHandle:toScreenPoint:`) sizes the new segment.
+// Returns NO if `name` is missing, not a PolyPoint model, locked,
+// or the projection fails.
+- (BOOL)appendVertexToPolyline:(NSString*)name
+                  atScreenPoint:(CGPoint)point
+                       viewSize:(CGSize)viewSize
+                    forDocument:(XLSequenceDocument*)doc;
+
 // Phase J-2 (touch UX) — batched name + anchor query for every
 // model in the active layout group. Used by the SwiftUI label
 // overlay to draw model-name text on the canvas. One bridge call

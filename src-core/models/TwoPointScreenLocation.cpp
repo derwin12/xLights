@@ -1089,31 +1089,106 @@ private:
     bool                    _changed = false;
 };
 
+// 3D drag-to-size for newly-created TwoPoint models. Intersects
+// the drag ray with the plane FindPlaneIntersection chose at
+// click time (XY / XZ / YZ) and writes x2/y2/z2 to (intersect -
+// worldPos). Free planar motion — no axis lock — so dragging
+// diagonally produces a diagonal line in the chosen plane, which
+// matches what users get from desktop's MoveHandle3D path.
+class TwoPointPlaneCreateSession : public handles::DragSession {
+public:
+    TwoPointPlaneCreateSession(TwoPointScreenLocation* loc,
+                                std::string modelName,
+                                handles::Id handleId,
+                                ModelScreenLocation::MSLPLANE plane)
+        : _loc(loc),
+          _modelName(std::move(modelName)),
+          _handleId(handleId),
+          _plane(plane),
+          _savedX2(loc->GetX2()),
+          _savedY2(loc->GetY2()),
+          _savedZ2(loc->GetZ2()),
+          _origin(loc->GetWorldPosition()) {
+        switch (_plane) {
+            case ModelScreenLocation::MSLPLANE::XY_PLANE:
+                _normal = glm::vec3(0, 0, 1); break;
+            case ModelScreenLocation::MSLPLANE::YZ_PLANE:
+                _normal = glm::vec3(1, 0, 0); break;
+            case ModelScreenLocation::MSLPLANE::XZ_PLANE:
+            default:
+                _normal = glm::vec3(0, 1, 0); break;
+        }
+    }
+
+    handles::UpdateResult Update(const handles::WorldRay& ray,
+                                  handles::Modifier /*mods*/) override {
+        const float denom = glm::dot(ray.direction, _normal);
+        if (std::fabs(denom) < 1e-6f) {
+            // Ray is parallel to the plane — no defined intersection.
+            return handles::UpdateResult::Unchanged;
+        }
+        const float t = glm::dot(_origin - ray.origin, _normal) / denom;
+        if (t < 0.0f) {
+            // Intersection is behind the camera; ignore so we
+            // don't snap to a wildly distant point when the user
+            // drags off-plane.
+            return handles::UpdateResult::Unchanged;
+        }
+        const glm::vec3 hit = ray.origin + ray.direction * t;
+        _loc->SetX2(hit.x - _origin.x);
+        _loc->SetY2(hit.y - _origin.y);
+        _loc->SetZ2(hit.z - _origin.z);
+        _changed = true;
+        return handles::UpdateResult::Updated;
+    }
+
+    void Revert() override {
+        _loc->SetX2(_savedX2);
+        _loc->SetY2(_savedY2);
+        _loc->SetZ2(_savedZ2);
+        _changed = false;
+    }
+
+    CommitResult Commit() override {
+        return CommitResult{
+            _modelName,
+            _changed ? handles::DirtyField::Endpoint : handles::DirtyField::None
+        };
+    }
+
+    handles::Id GetHandleId() const override { return _handleId; }
+
+private:
+    TwoPointScreenLocation*       _loc;
+    std::string                   _modelName;
+    handles::Id                   _handleId;
+    ModelScreenLocation::MSLPLANE _plane;
+    glm::vec3                     _normal{0, 1, 0};
+    glm::vec3                     _origin{0, 0, 0};
+    float                         _savedX2 = 0;
+    float                         _savedY2 = 0;
+    float                         _savedZ2 = 0;
+    bool                          _changed = false;
+};
+
 // placement gesture for newly-created TwoPoint models.
-// Routes to the existing endpoint sessions:
-//   3D: TwoPointTranslateSession on END_HANDLE along whatever
-//       axis InitializeLocation's FindPlaneIntersection picked.
+// Routes to:
+//   3D: TwoPointPlaneCreateSession on END_HANDLE — free drag in
+//       the plane FindPlaneIntersection picked (XY/XZ/YZ).
 //   2D: TwoPointEndpointSession on END_HANDLE.
 class TwoPointCreationSession : public handles::DragSession {
 public:
     TwoPointCreationSession(TwoPointScreenLocation* loc,
                             std::string modelName,
-                            const handles::WorldRay& clickRay,
+                            const handles::WorldRay& /*clickRay*/,
                             handles::ViewMode mode)
         : _modelName(modelName) {
         if (mode == handles::ViewMode::ThreeD) {
             handles::Id id;
-            id.role  = handles::Role::AxisArrow;
+            id.role  = handles::Role::Endpoint;
             id.index = END_HANDLE;
-            // Honor whatever active_axis FindPlaneIntersection picked.
-            switch (loc->GetActiveAxis()) {
-                case ModelScreenLocation::MSLAXIS::Y_AXIS: id.axis = handles::Axis::Y; break;
-                case ModelScreenLocation::MSLAXIS::Z_AXIS: id.axis = handles::Axis::Z; break;
-                default:                                   id.axis = handles::Axis::X; break;
-            }
-            const glm::vec3 endPos = loc->GetPoint2();
-            _inner = std::make_unique<TwoPointTranslateSession>(
-                loc, modelName, id, clickRay, endPos);
+            _inner = std::make_unique<TwoPointPlaneCreateSession>(
+                loc, modelName, id, loc->GetActivePlane());
             _innerId = id;
         } else {
             handles::Id id;

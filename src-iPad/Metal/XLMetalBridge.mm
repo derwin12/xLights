@@ -19,6 +19,8 @@
 #include "models/ViewObjectManager.h"
 #include "render/ViewpointMgr.h"
 #include "models/ModelScreenLocation.h"
+#include "models/PolyPointScreenLocation.h"
+#include "models/PolyLineModel.h"
 #include "utils/VectorMath.h"
 #include "graphics/xlGraphicsContext.h"
 #include "models/handles/Handles.h"
@@ -29,6 +31,7 @@
 
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
+#import <UIKit/UIKit.h>
 
 #include <cmath>
 #include <cstring>
@@ -64,12 +67,17 @@
     BOOL _handleDragNeedsLatch;      // J-2 — true on first dragHandle call after a pick
     // J-2 UX — 3D body-drag anchor. Latched on
     // `beginBodyDrag3DForModel:` so subsequent drag updates can
-    // compute the world delta on a fixed XY plane through the
-    // model's start-of-drag centre Z.
+    // compute the world delta on a fixed plane chosen at drag-
+    // begin time. The plane is whichever of XY / XZ / YZ best
+    // matches the current camera (top-down → XZ, side → YZ,
+    // front → XY), so a drag from above slides the model along
+    // the floor (X+Z) instead of fighting the user's view.
     BOOL _bodyDrag3DActive;
-    glm::vec2 _bodyDrag3DSavedCenterXY;
-    glm::vec2 _bodyDrag3DAnchorXY;
-    float _bodyDrag3DPlaneZ;
+    glm::vec3 _bodyDrag3DSavedCenter;
+    glm::vec3 _bodyDrag3DAnchor;
+    glm::vec3 _bodyDrag3DPlanePoint;
+    glm::vec3 _bodyDrag3DPlaneNormal;
+    ModelScreenLocation::MSLPLANE _bodyDrag3DPlane;
     std::string _bodyDrag3DModelName;
     // J-2 UX — pinch-on-model = uniform scale.
     BOOL _pinchScaleActive;
@@ -827,7 +835,6 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     if (loc.IsLocked()) return -1;
     if (m->IsFromBase()) return -1;
 
-    int handle = NO_HANDLE;
     if (_preview->Is3D()) {
         handles::Tool newApiTool = handles::Tool::Translate;
         bool toolSupportedByNewApi = false;
@@ -869,12 +876,27 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
             };
             handles::HitTestOptions opts;
             opts.handleTolerance     = 60.0f;  // touch slop in pixels
+            opts.axisHandleTolerance = 28.0f;  // tighter on the X/Y/Z gizmos
+                                                // — their heads project near the
+                                                // model body in top-down / side
+                                                // views and a 60pt halo would
+                                                // swallow body-drag taps.
             opts.preferAxisHandles   = true;
             opts.ignoreNonEditable   = true;
             if (auto hit = handles::HitTest(descriptors, proj, touchPx, opts)) {
                 handles::WorldRay startRay;
                 TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
                                       startRay.origin, startRay.direction);
+                // Refresh `active_plane` from the current camera
+                // angles for PolyPoint vertex/segment drags. The
+                // session reads this on construction to pick which
+                // world plane to project drags onto — without the
+                // refresh the plane stays at whatever
+                // `InitializeLocation` (or a prior camera) seeded,
+                // and post-orbit drags slide along the wrong axis.
+                if (dynamic_cast<PolyPointScreenLocation*>(&loc)) {
+                    loc.RefreshActivePlaneFromCamera(_preview.get());
+                }
                 auto session = m->BeginDrag(hit->id, startRay);
                 if (session) {
                     _dragSession = std::move(session);
@@ -992,16 +1014,31 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     // picks up the change.
     if (_dragSession) {
         auto result = _dragSession->Commit();
-        if (handles::HasDirty(result.dirty, handles::DirtyField::Position) ||
+        const bool geometryDirty =
+            handles::HasDirty(result.dirty, handles::DirtyField::Position) ||
             handles::HasDirty(result.dirty, handles::DirtyField::Dimensions) ||
             handles::HasDirty(result.dirty, handles::DirtyField::Rotation) ||
             handles::HasDirty(result.dirty, handles::DirtyField::Endpoint) ||
             handles::HasDirty(result.dirty, handles::DirtyField::Vertex) ||
             handles::HasDirty(result.dirty, handles::DirtyField::Curve) ||
-            handles::HasDirty(result.dirty, handles::DirtyField::Shear)) {
+            handles::HasDirty(result.dirty, handles::DirtyField::Shear);
+        if (geometryDirty) {
             iPadRenderContext* rctx = ContextFromDoc(doc);
             if (rctx && !result.modelName.empty()) {
                 rctx->MarkLayoutModelDirty(result.modelName);
+                // PolyPoint-style models (Poly Line, MultiPoint)
+                // recompute node positions in `InitModel` from
+                // per-segment counts and mPos[]. Without an
+                // explicit Reinitialize the nodes stay distributed
+                // along the pre-drag geometry — visible as lights
+                // not following a moved vertex. Desktop achieves
+                // the same via WORK_MODELS_CHANGE_REQUIRING_RERENDER
+                // queued from LayoutPanel; the iPad bridge runs the
+                // re-init directly since we have no work queue.
+                Model* m = rctx->GetModelManager()[result.modelName];
+                if (m && dynamic_cast<PolyPointScreenLocation*>(&m->GetModelScreenLocation())) {
+                    m->Reinitialize();
+                }
             }
         }
         _dragSession.reset();
@@ -1068,6 +1105,16 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
             result == handles::UpdateResult::NeedsInit) {
             iPadRenderContext* rctx = ContextFromDoc(doc);
             if (rctx) rctx->MarkLayoutModelDirty(_selectedModelName);
+            // PolyPoint-style models keep their light positions in
+            // `Nodes[]` and only recompute them in `InitModel`. Live
+            // dragging a vertex without re-init leaves the lights
+            // anchored to the pre-drag mPos[] until the user
+            // releases. Mirrors desktop's per-frame
+            // WORK_MODELS_CHANGE_REQUIRING_RERENDER queueing.
+            Model* m = rctx ? rctx->GetModelManager()[_selectedModelName] : nullptr;
+            if (m && dynamic_cast<PolyPointScreenLocation*>(&m->GetModelScreenLocation())) {
+                m->Reinitialize();
+            }
         }
         return YES;
     }
@@ -1154,23 +1201,48 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     auto& loc = m->GetModelScreenLocation();
     if (loc.IsLocked()) return NO;
 
+    // Choose the drag plane (XY / XZ / YZ) from the current camera
+    // angles so a top-down view drags along the floor, a side view
+    // drags vertically, etc. SetActivePlane keeps it on the screen
+    // location for any downstream code (e.g. handle gizmos).
+    loc.RefreshActivePlaneFromCamera(_preview.get());
+    const auto plane = loc.GetActivePlane();
+    const glm::vec3 center(loc.GetHcenterPos(),
+                            loc.GetVcenterPos(),
+                            loc.GetDcenterPos());
+    glm::vec3 planePt{0.0f}, planeN{0.0f};
+    switch (plane) {
+        case ModelScreenLocation::MSLPLANE::XZ_PLANE:
+            planeN = glm::vec3(0.0f, 1.0f, 0.0f);
+            planePt = glm::vec3(0.0f, center.y, 0.0f);
+            break;
+        case ModelScreenLocation::MSLPLANE::YZ_PLANE:
+            planeN = glm::vec3(1.0f, 0.0f, 0.0f);
+            planePt = glm::vec3(center.x, 0.0f, 0.0f);
+            break;
+        case ModelScreenLocation::MSLPLANE::XY_PLANE:
+        default:
+            planeN = glm::vec3(0.0f, 0.0f, 1.0f);
+            planePt = glm::vec3(0.0f, 0.0f, center.z);
+            break;
+    }
+
     glm::vec3 origin, dir;
     TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
                           origin, dir);
-    const float planeZ = loc.GetDcenterPos();
-    const glm::vec3 planePt{0.0f, 0.0f, planeZ};
-    const glm::vec3 planeN{0.0f, 0.0f, 1.0f};
     glm::vec3 hit;
     if (!VectorMath::GetPlaneIntersect(origin, dir, planePt, planeN, hit)) {
         // Camera nearly parallel to plane — body-drag can't define
         // a delta. Fall back to camera orbit by reporting failure.
         return NO;
     }
-    _bodyDrag3DActive          = YES;
-    _bodyDrag3DSavedCenterXY   = glm::vec2(loc.GetHcenterPos(), loc.GetVcenterPos());
-    _bodyDrag3DAnchorXY        = glm::vec2(hit.x, hit.y);
-    _bodyDrag3DPlaneZ          = planeZ;
-    _bodyDrag3DModelName       = name.UTF8String;
+    _bodyDrag3DActive       = YES;
+    _bodyDrag3DSavedCenter  = center;
+    _bodyDrag3DAnchor       = hit;
+    _bodyDrag3DPlane        = plane;
+    _bodyDrag3DPlanePoint   = planePt;
+    _bodyDrag3DPlaneNormal  = planeN;
+    _bodyDrag3DModelName    = name.UTF8String;
     return YES;
 }
 
@@ -1188,34 +1260,48 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     glm::vec3 origin, dir;
     TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
                           origin, dir);
-    const glm::vec3 planePt{0.0f, 0.0f, _bodyDrag3DPlaneZ};
-    const glm::vec3 planeN{0.0f, 0.0f, 1.0f};
     glm::vec3 hit;
-    if (!VectorMath::GetPlaneIntersect(origin, dir, planePt, planeN, hit)) {
+    if (!VectorMath::GetPlaneIntersect(origin, dir, _bodyDrag3DPlanePoint,
+                                         _bodyDrag3DPlaneNormal, hit)) {
         // Ray rotated parallel mid-drag — just hold position.
         return NO;
     }
+    const glm::vec3 delta = hit - _bodyDrag3DAnchor;
 
-    float newX = _bodyDrag3DSavedCenterXY.x + (hit.x - _bodyDrag3DAnchorXY.x);
-    float newY = _bodyDrag3DSavedCenterXY.y + (hit.y - _bodyDrag3DAnchorXY.y);
-
-    // Apply toolbar modifiers.
-    if (_lockAxis == 2 /*Y*/) {
-        newX = _bodyDrag3DSavedCenterXY.x;
-    } else if (_lockAxis == 1 /*X*/) {
-        newY = _bodyDrag3DSavedCenterXY.y;
+    // Only the two in-plane axes move; the perpendicular one
+    // keeps its saved value so the model stays on the chosen plane.
+    glm::vec3 newCenter = _bodyDrag3DSavedCenter;
+    switch (_bodyDrag3DPlane) {
+        case ModelScreenLocation::MSLPLANE::XZ_PLANE:
+            newCenter.x += delta.x;
+            newCenter.z += delta.z;
+            break;
+        case ModelScreenLocation::MSLPLANE::YZ_PLANE:
+            newCenter.y += delta.y;
+            newCenter.z += delta.z;
+            break;
+        case ModelScreenLocation::MSLPLANE::XY_PLANE:
+        default:
+            newCenter.x += delta.x;
+            newCenter.y += delta.y;
+            break;
     }
-    // Lock Axis Z is meaningless on the XY-plane body drag — we'd
-    // need to redefine the drag plane to slide vertically. Skip;
-    // axis arrows are the right tool for Z translation.
+
+    // Toolbar Lock Axis: clamp the named axis back to saved.
+    if (_lockAxis == 1 /*X*/) newCenter.x = _bodyDrag3DSavedCenter.x;
+    else if (_lockAxis == 2 /*Y*/) newCenter.y = _bodyDrag3DSavedCenter.y;
+    else if (_lockAxis == 3 /*Z*/) newCenter.z = _bodyDrag3DSavedCenter.z;
+
     if (_snapToGrid) {
         const float spacing = (float)std::max((long)1, rctx->GetDisplay2DGridSpacing());
-        newX = std::round(newX / spacing) * spacing;
-        newY = std::round(newY / spacing) * spacing;
+        newCenter.x = std::round(newCenter.x / spacing) * spacing;
+        newCenter.y = std::round(newCenter.y / spacing) * spacing;
+        newCenter.z = std::round(newCenter.z / spacing) * spacing;
     }
 
-    loc.SetHcenterPos(newX);
-    loc.SetVcenterPos(newY);
+    loc.SetHcenterPos(newCenter.x);
+    loc.SetVcenterPos(newCenter.y);
+    loc.SetDcenterPos(newCenter.z);
     rctx->MarkLayoutModelDirty(_bodyDrag3DModelName);
     return YES;
 }
@@ -1320,10 +1406,12 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     Model* m = rctx->GetModelManager()[modelName.UTF8String];
     if (!m) return nil;
     auto& loc = m->GetModelScreenLocation();
-    // Top-centre in world coords. Y growth is up in xLights world
-    // coords; for 3D include Z so the anchor tracks tilted views.
+    // Bottom-centre in world coords. The action bar used to anchor
+    // to the top, but every gizmo handle (Y axis arrow, rotate
+    // ring, shear puck) lives at or above the model's top edge —
+    // bottom is the only side that's consistently clear.
     const glm::vec3 anchor(loc.GetHcenterPos(),
-                            loc.GetVcenterPos() + loc.GetMHeight() * 0.5f,
+                            loc.GetVcenterPos() - loc.GetMHeight() * 0.5f,
                             loc.GetDcenterPos());
     CGPoint pt;
     if (![self projectWorldPoint:anchor toViewPoint:&pt marginPts:80.0]) {
@@ -1340,57 +1428,181 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     iPadRenderContext* rctx = ContextFromDoc(doc);
     if (!rctx) return nil;
 
-    // Unproject the touch onto the XY plane at z=0 — matches the
-    // desktop create-flow convention of dropping new models on the
-    // floor. For 3D, this also works when the camera is tilted
-    // (ray-plane intersection); when the ray is parallel to the
-    // plane, fall back to (0,0).
-    float worldX = 0.0f;
-    float worldY = 0.0f;
-    if (_preview->Is3D()) {
-        glm::vec3 origin, dir;
-        TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
-                              origin, dir);
-        const glm::vec3 planePt{0.0f, 0.0f, 0.0f};
-        const glm::vec3 planeN{0.0f, 0.0f, 1.0f};
-        glm::vec3 hit;
-        if (VectorMath::GetPlaneIntersect(origin, dir, planePt, planeN, hit)) {
-            worldX = hit.x;
-            worldY = hit.y;
-        }
-    } else {
-        float denom = 0.0f;
-        if (![self unprojectScreenPoint:point toWorldX:&worldX worldY:&worldY
-                              worldDenom:&denom forContext:rctx]) {
-            return nil;
-        }
-    }
-
     Model* m = rctx->GetModelManager().CreateDefaultModel(type.UTF8String, "1");
     if (!m) return nil;
 
-    // Drop the model at the touch point. CreateDefaultModel
-    // returns a model with a generated name and default geometry;
-    // SetHcenterPos / SetVcenterPos works pre-Reinitialize because
-    // it just adjusts worldPos_x/y on the screen location.
-    m->SetHcenterPos(worldX);
-    m->SetVcenterPos(worldY);
-    // Honour the active layout group so the new model is visible
-    // immediately in the currently-displayed group.
+    auto& loc = m->GetModelScreenLocation();
+
+    // Mirror desktop's create flow exactly:
+    //   `InitializeLocation` calls `FindPlaneIntersection`, which
+    //   picks the best world plane (XZ floor / XY wall / YZ side)
+    //   based on the current camera angles, then unprojects the
+    //   touch onto that plane and sets `worldPos_x/y/z`. This is
+    //   why desktop placement of, say, icicles along a roof line
+    //   naturally follows the roof's screen-space slope — the
+    //   click projects onto the XY wall at Z=0, so a drag along
+    //   the roof in screen coords produces a sloped line in
+    //   world coords. Hard-coding the XZ floor would always land
+    //   on Y=0 regardless of where the user clicked.
+    //
+    // Desktop's mouseX/mouseY are window-pixel coords; convert
+    // the UIKit point through the canvas's scale factor.
+    double scaleFactor = _canvas->getScaleFactor();
+    if (scaleFactor <= 0) scaleFactor = 1.0;
+    const int px = static_cast<int>(point.x * scaleFactor);
+    const int py = static_cast<int>(point.y * scaleFactor);
+    int initHandle = 0;
+    std::vector<NodeBaseClassPtr> emptyNodes;
+    loc.InitializeLocation(initHandle, px, py, emptyNodes, _preview.get());
+
     std::string layoutGroup = rctx->GetActiveLayoutGroup();
     if (layoutGroup.empty() || layoutGroup == "All Models") {
         layoutGroup = "Default";
     }
     m->SetLayoutGroup(layoutGroup);
-    // No controller assignment — user picks a controller later via
-    // the property panel. Desktop calls SetControllerName(
-    // NO_CONTROLLER) here; mirror that for consistency.
     m->SetControllerName("");
 
     rctx->GetModelManager().AddModel(m);
     rctx->MarkLayoutModelDirty(m->GetName());
 
+    // Start the placement `BeginCreate` session so subsequent
+    // `dragHandle` calls size the model as the user drags. If the
+    // user lifts without dragging, `endHandleDrag` commits the
+    // session and the model stays at whatever `InitializeLocation`
+    // left it at — same as desktop's tap-without-drag behaviour.
+    handles::WorldRay startRay;
+    TouchPointToWorldRay(point, scaleFactor, _preview.get(),
+                          startRay.origin, startRay.direction);
+    auto session = loc.BeginCreate(
+        m->GetName(), startRay,
+        _preview->Is3D() ? handles::ViewMode::ThreeD : handles::ViewMode::TwoD);
+    if (session) {
+        _dragSession = std::move(session);
+        _dragSessionStartId = _dragSession->GetHandleId();
+    }
+
     return [NSString stringWithUTF8String:m->GetName().c_str()];
+}
+
+- (BOOL)modelUsesPolyPointLocation:(NSString*)name
+                       forDocument:(XLSequenceDocument*)doc {
+    if (!doc || !name || name.length == 0) return NO;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return NO;
+    Model* m = rctx->GetModelManager()[name.UTF8String];
+    if (!m) return NO;
+    return dynamic_cast<PolyPointScreenLocation*>(&m->GetModelScreenLocation()) != nullptr;
+}
+
+- (BOOL)appendVertexToPolyline:(NSString*)name
+                  atScreenPoint:(CGPoint)point
+                       viewSize:(CGSize)viewSize
+                    forDocument:(XLSequenceDocument*)doc {
+    if (!_preview || !doc || !name || name.length == 0) return NO;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return NO;
+    Model* m = rctx->GetModelManager()[name.UTF8String];
+    if (!m) return NO;
+    auto* poly = dynamic_cast<PolyPointScreenLocation*>(&m->GetModelScreenLocation());
+    if (!poly) return NO;
+    if (poly->IsLocked()) return NO;
+
+    // Commit whatever the previous tap/drag left open (the
+    // BeginCreate session from the first vertex, or the
+    // BeginExtend session from the previous appended vertex).
+    // Inlined instead of calling -endHandleDragForDocument:
+    // because that path resets `active_axis` to NO_AXIS when no
+    // session is active — but `AddHandle` below relies on the
+    // axis InitializeLocation seeded for plane projection, so
+    // wiping it asserts inside `DragHandle`.
+    if (_dragSession) {
+        auto result = _dragSession->Commit();
+        if (handles::HasDirty(result.dirty, handles::DirtyField::Position) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Dimensions) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Rotation) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Endpoint) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Vertex) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Curve) ||
+            handles::HasDirty(result.dirty, handles::DirtyField::Shear)) {
+            if (!result.modelName.empty()) {
+                rctx->MarkLayoutModelDirty(result.modelName);
+            }
+        }
+        _dragSession.reset();
+        _dragSessionStartId = handles::Id{};
+    }
+
+    double scaleFactor = _canvas->getScaleFactor();
+    if (scaleFactor <= 0) scaleFactor = 1.0;
+    const int px = static_cast<int>(point.x * scaleFactor);
+    const int py = static_cast<int>(point.y * scaleFactor);
+
+    // CreateDefaultModel for a polyline initialises num_points=2
+    // with mPos[0] and mPos[1] both at (0,0,0). On the FIRST
+    // append after create the placeholder vertex 1 still equals
+    // vertex 0 — promote it to the tap position rather than
+    // appending a third vertex (otherwise the zero-length
+    // segment 0→1 burns light nodes at the origin). On
+    // subsequent appends the placeholder has moved, so a normal
+    // AddHandle is correct.
+    bool promotePlaceholder = false;
+    if (poly->GetNumPoints() == 2) {
+        const glm::vec3 p0 = poly->GetPoint(0);
+        const glm::vec3 p1 = poly->GetPoint(1);
+        if (p0.x == p1.x && p0.y == p1.y && p0.z == p1.z) {
+            promotePlaceholder = true;
+        }
+    }
+    if (promotePlaceholder) {
+        // AddHandle appends vertex 2 at the tap, then drop the
+        // coincident vertex 1; net effect: vertex 1 moves to the
+        // tap projection while preserving AddHandle's plane logic.
+        // num_points stays at 2 so no per-segment growth is needed.
+        poly->AddHandle(_preview.get(), px, py);
+        poly->DeleteHandle(1);
+    } else {
+        poly->AddHandle(_preview.get(), px, py);
+        // Match desktop's polyline-create flow
+        // (LayoutPanel.cpp:4117-4120): a PolyLineModel keeps a
+        // per-segment vector (`_polyLineSizes`) that must grow
+        // when a vertex is added. Without it, `InitModel`
+        // re-distributes lights based on a stale segment count
+        // and nothing renders along the new path until the user
+        // touches the model again. MultiPoint has no per-segment
+        // array, so the dynamic_cast skip is fine there.
+        if (auto* polyModel = dynamic_cast<PolyLineModel*>(m)) {
+            polyModel->AddHandle();
+        }
+    }
+    m->Reinitialize();
+    const int newIdx = poly->GetNumPoints() - 1;
+    if (newIdx <= 0) return NO;
+
+    // Refresh active_plane from the camera before opening the
+    // extension session so the new-vertex drag uses the plane
+    // that matches the current view (top-down → XZ, side → YZ,
+    // front → XY) instead of whatever InitializeLocation seeded
+    // at first-vertex create time.
+    poly->RefreshActivePlaneFromCamera(_preview.get());
+
+    // Start an extension session on the new vertex so a follow-on
+    // drag through `dragHandle:toScreenPoint:` sizes that segment.
+    // Tap-without-drag leaves the vertex where AddHandle put it
+    // (the next endHandleDragForDocument call commits cleanly).
+    handles::WorldRay startRay;
+    TouchPointToWorldRay(point, scaleFactor, _preview.get(),
+                          startRay.origin, startRay.direction);
+    auto session = poly->BeginExtend(
+        m->GetName(), startRay,
+        _preview->Is3D() ? handles::ViewMode::ThreeD : handles::ViewMode::TwoD,
+        newIdx);
+    if (session) {
+        _dragSession = std::move(session);
+        _dragSessionStartId = _dragSession->GetHandleId();
+    }
+
+    rctx->MarkLayoutModelDirty(m->GetName());
+    return YES;
 }
 
 - (NSArray<NSDictionary*>*)modelLabelAnchorsForDocument:(XLSequenceDocument*)doc {
