@@ -761,24 +761,65 @@ class SequencerViewModel {
     /// deferred until the queue drains; media folders we still can't
     /// access after the re-grant pass are dropped (matches the previous
     /// silent-drop behavior in `iPadRenderContext::LoadShowFolder`).
+    ///
+    /// The actual work — obtainAccess pre-flight, the C++
+    /// iPadRenderContext::LoadShowFolder call, and the recursive .xsq scan
+    /// — runs on a detached task. Each step does synchronous file I/O that
+    /// blocks on iCloud download for evicted folders; on the main actor
+    /// (this method is called from the Done button in FolderConfigView and
+    /// from the launch-time .task in XLightsApp), the cumulative time was
+    /// exceeding the 5-second 0x8BADF00D watchdog deadline and getting
+    /// the app killed. The detach keeps the main actor free while the
+    /// load runs, then we hop back to apply state. The method returns
+    /// immediately; observers should watch `isShowFolderLoaded`.
     func loadShowFolder(path: String, mediaFolders: [String]) {
         showFolderPath = path
         mediaFolderPaths = mediaFolders
 
-        let showOK = XLSequenceDocument.obtainAccess(toPath: path, enforceWritable: false)
-        var stale: [(path: String, label: String)] = []
-        if !showOK {
-            stale.append((path, "show folder"))
-        }
-        for folder in mediaFolders where !XLSequenceDocument.obtainAccess(toPath: folder, enforceWritable: false) {
-            stale.append((folder, "media folder"))
-        }
+        Task.detached { [document, weak self] in
+            let showOK = XLSequenceDocument.obtainAccess(toPath: path, enforceWritable: false)
+            var stale: [(path: String, label: String)] = []
+            if !showOK {
+                stale.append((path, "show folder"))
+            }
+            for folder in mediaFolders where !XLSequenceDocument.obtainAccess(toPath: folder, enforceWritable: false) {
+                stale.append((folder, "media folder"))
+            }
 
-        if stale.isEmpty {
-            performLoadShowFolder(path: path, mediaFolders: mediaFolders)
-            return
-        }
+            if stale.isEmpty {
+                let loaded = document.loadShowFolder(path, mediaFolders: mediaFolders)
+                let scanned: [SequenceEntry] = loaded ? SequenceScanner.scan(showFolder: path) : []
+                await self?.applyLoadResult(loaded: loaded, sequenceFiles: scanned, path: path)
+                return
+            }
 
+            await self?.queueStaleRepromptsThenReload(stale: stale, path: path, mediaFolders: mediaFolders)
+        }
+    }
+
+    /// MainActor-side completion handler for a successful (or failed)
+    /// detached show-folder load. Lives separately from `loadShowFolder`
+    /// so the Task closure only needs to send Sendable values across the
+    /// actor boundary.
+    private func applyLoadResult(loaded: Bool, sequenceFiles: [SequenceEntry], path: String) {
+        self.isShowFolderLoaded = loaded
+        self.sequenceFiles = sequenceFiles
+        if loaded {
+            // L-1b: record successful loads so the folder picker can
+            // surface them as one-tap MRU entries on the next visit.
+            RecentShowFolders.record(path: path)
+        }
+    }
+
+    /// MainActor-side handler for the stale-bookmark branch: surfaces the
+    /// re-prompt sheets, then on completion re-enters `loadShowFolder` so
+    /// the second pass picks up the freshly-granted bookmarks (and detaches
+    /// again for its own heavy work).
+    private func queueStaleRepromptsThenReload(
+        stale: [(path: String, label: String)],
+        path: String,
+        mediaFolders: [String]
+    ) {
         for entry in stale {
             enqueueAccessReprompt(label: entry.label, originalPath: entry.path, pickPath: entry.path)
         }
@@ -787,8 +828,10 @@ class SequencerViewModel {
             // After the re-grant pass: if the show folder is still not
             // accessible (user skipped, picked a different folder),
             // leave the app un-loaded so ContentView keeps showing the
-            // setup affordance. Otherwise load with whatever media
-            // folders survived re-grant.
+            // setup affordance. Otherwise re-enter loadShowFolder, which
+            // detaches the heavy work again. Media folders the user
+            // still hasn't granted are dropped to match the previous
+            // silent-drop behavior in iPadRenderContext::LoadShowFolder.
             guard XLSequenceDocument.obtainAccess(toPath: path, enforceWritable: false) else {
                 self.isShowFolderLoaded = false
                 return
@@ -796,32 +839,23 @@ class SequencerViewModel {
             let surviving = mediaFolders.filter {
                 XLSequenceDocument.obtainAccess(toPath: $0, enforceWritable: false)
             }
-            self.performLoadShowFolder(path: path, mediaFolders: surviving)
+            self.loadShowFolder(path: path, mediaFolders: surviving)
         }
         runNextAccessReprompt()
     }
 
-    private func performLoadShowFolder(path: String, mediaFolders: [String]) {
-        isShowFolderLoaded = document.loadShowFolder(path, mediaFolders: mediaFolders)
-        if isShowFolderLoaded {
-            scanForSequenceFiles(at: path)
-            // L-1b: record successful loads so the folder picker can
-            // surface them as one-tap MRU entries on the next visit.
-            RecentShowFolders.record(path: path)
-        }
-    }
-
     /// Attempt to load the persisted show folder at app startup.
-    /// Returns true if a show folder was configured and loaded successfully.
-    /// May also return false transiently when a re-prompt is queued —
-    /// the queued operation finishes the load asynchronously once the
-    /// user re-picks the folder.
+    /// Returns true if a show folder is configured (and a load is being
+    /// kicked off). Since the load itself runs on a detached task,
+    /// `isShowFolderLoaded` is generally still false at the moment this
+    /// returns — callers should observe `viewModel.isShowFolderLoaded`
+    /// with `.onChange` to react to completion.
     @discardableResult
     func restorePersistedShowFolder() -> Bool {
         guard let path = FolderConfig.showFolder else { return false }
         let mediaFolders = FolderConfig.mediaFolders
         loadShowFolder(path: path, mediaFolders: mediaFolders)
-        return isShowFolderLoaded
+        return true
     }
 
     // MARK: - Access re-prompt queue
@@ -5928,10 +5962,6 @@ class SequencerViewModel {
         }
 
         rows = newRows
-    }
-
-    private func scanForSequenceFiles(at path: String) {
-        sequenceFiles = SequenceScanner.scan(showFolder: path)
     }
 }
 
