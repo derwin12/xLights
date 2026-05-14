@@ -386,6 +386,159 @@ The long tail. Per-model property pages and the Add Model toolbar.
   with two columns (in-group / available) similar to
   `DisplayElementsSheet`.
 
+### J-17 — Objects tab finish ✓ 2026-05-14
+
+Closes the remaining Objects-tab deferred items in one pass.
+
+**View-object rename:**
+
+- `renameViewObject:to:` — sanitizes via `Model::SafeModelName`,
+  refuses collisions / 2D Background. Calls
+  `ViewObjectManager::Rename` (returns false on the desktop
+  because its cross-reference iteration is commented out — we
+  verify by lookup instead).
+- `iPadRenderContext::_renamedViewObjects` map + extended
+  HasDirty / Clear / SaveLayoutChanges entry guard.
+- `SaveLayoutChanges` view-object patch branch: when a dirty
+  VO has a pending rename, locates the on-disk element by the
+  OLD name, updates the `name` attribute, then patches the
+  rest.
+
+**View-object duplicate (shallow):**
+
+- `duplicateViewObject:` — round-trips through
+  `XmlSerializingVisitor` → `ViewObjectManager::CreateObject`
+  so per-type attrs (Mesh ObjFile, Image bitmap, Terrain
+  heightmap PointData) come along automatically. Unique name
+  via `GenerateObjectName`, position offset (+50, +50, 0),
+  lock cleared. 2D Background refused.
+
+**Unified undo for VOs + heightmap:**
+
+- `LayoutUndoEntry` now discriminated by `UndoTarget::
+  {Model, ViewObject, ViewObjectHeightmap}`. VO entries
+  snapshot world position + scale (via
+  `BoxedScreenLocation::GetScaleX/Y/Z` for boxed VOs;
+  `GetScaleMatrix()` fallback for others) + rotation + locked
+  + layoutGroup. Heightmap entries snapshot just the
+  PointData string.
+- New bridge methods:
+  `pushLayoutUndoSnapshotForViewObject:` and
+  `pushTerrainHeightmapUndoSnapshot:`.
+- `UndoLastLayoutChange` dispatches by entry kind. One Undo
+  button reverts whatever the user did last regardless of
+  kind.
+- Push sites added: `commitObjectProperty`, every VO drag /
+  pinch / twist gesture begin (handle drag, body drag in
+  2D + 3D, pinch, twist), and the terrain heightmap tap
+  before each brush.
+
+**SwiftUI:**
+
+- VO property pane "Name" row gets pencil + duplicate icons
+  alongside the name. Pencil → opens
+  `RenameGroupSheet` (now generic — accepts `kindLabel:
+  "Object"` to title the sheet correctly). Duplicate → fires
+  the bridge, auto-selects the new copy so the user can drag
+  it into place.
+- `RenameGroupSheet` generalized: new `kindLabel` parameter
+  (defaults to "Group") swaps title + footer text. Same
+  sanitization preview + collision check.
+- `ViewObjectCrudModifiers` gained the rename sheet sheet
+  hosting + sanitize callback + existing-names lookup
+  (model + group + object names combined for collision).
+
+### J-16 — Group name sanitization ✓ 2026-05-14
+
+Follow-up to the rename work: neither the create nor the rename
+sheet validated against the desktop's character restrictions. The
+canonical sanitizer is `Model::SafeModelName` which strips
+`, ~ ! ; < > " ' & : | @ / \ \t \r \n` plus surrounding
+whitespace. (`,` and `/` are wire-format delimiters — `,`
+separates members in a group's `models` attribute, `/` separates
+parent from submodel in fully-qualified names.)
+
+**Bridge** (`XLSequenceDocument`):
+
+- New `sanitizedModelName:` wraps `Model::SafeModelName` so the
+  SwiftUI sheets can preview the sanitized form before submit.
+- `createModelGroup:` and `renameModelGroup:to:` now run the
+  same sanitizer internally as defence-in-depth — passing a
+  name with illegal characters doesn't fail, it just takes
+  effect with the bad characters silently stripped (matches
+  desktop convention).
+
+**SwiftUI:**
+
+- `NewGroupSheet` and `RenameGroupSheet` both:
+  - Live-preview the sanitized name with an info banner
+    ("Will save as 'X'") when input differs from sanitized.
+  - Caption listing the disallowed characters so the user knows
+    what got stripped without trial-and-error.
+  - Disable Create/Rename when sanitized result is empty or
+    collides with another model/group.
+  - Submit the sanitized name (not the raw text).
+
+### J-16 — Group rename ✓ 2026-05-14
+
+Closes the last J-7 / J-9 group-CRUD deferral.
+
+**Bridge** (`XLSequenceDocument`):
+
+- `renameModelGroup:to:` — refuses collisions with existing
+  model/group names, empty/same-as-old. Calls
+  `ModelManager::Rename` which updates the in-memory
+  references in every group containing this one (member list
+  vectors get the name fix). After rename, walks all groups
+  and marks any that now directly reference the new name as
+  dirty so the save patcher rewrites their `models` attribute.
+
+**Render context** (`iPadRenderContext`):
+
+- New `_renamedGroups: map<newName → oldOnDiskName>` slot. The
+  `MarkGroupRenamed` helper handles the edge cases:
+  rename-after-rename collapses to the original on-disk name;
+  renaming back to the original drops the pending rename;
+  rename of an in-memory-only created group just retitles the
+  pending creation.
+- `MarkGroupDeleted` cleans up any pending rename for the
+  deleted name so the delete pass finds the right element on
+  disk.
+- `HasDirtyLayoutModels` + `ClearDirtyLayoutModels` /
+  `SaveLayoutChanges` entry guard now include
+  `_renamedGroups`.
+- `SaveLayoutChanges` group-patch branch: when a dirty group
+  has a renamed-from entry, finds the element by the OLD name
+  and updates its `name` attribute before patching the rest.
+
+**SwiftUI:**
+
+- New `RenameGroupSheet` — text field pre-filled with the
+  current name, live collision check against models AND groups
+  (excluding the current name so submitting unchanged closes
+  cleanly), Cancel / Rename buttons.
+- Group property pane's "Name" row gains a small pencil icon.
+  Tap → opens the rename sheet.
+- `handleRenameGroup` re-points the sidebar selection to the
+  new name on success so the property pane reopens on the
+  renamed group.
+
+**Dropped from the deferred list:**
+
+- ~~Cross-pane drag from Models list onto Group member list~~
+  — out of scope; the AddMember sheet's tree picker covers
+  the use case.
+- ~~Member-count cap warnings~~ — controllers don't see
+  groups; the cap concept only applies to models.
+
+**Still deferred (with re-framed semantics):**
+
+- Group duplicate — when prioritized, will be a **shallow
+  copy**: new group named `<name>-1` with the same
+  `ModelNames` vector + copy of group settings. Members are
+  not cloned. (The earlier "semantics question" framing was
+  me overthinking — shallow is what users want.)
+
 ### J-15 — VO 3D drag + pinch + twist ✓ 2026-05-14
 
 Closes the J-13 deferred gestures: 3D body-drag, pinch-to-scale,

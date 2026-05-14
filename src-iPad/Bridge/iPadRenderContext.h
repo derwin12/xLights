@@ -366,10 +366,36 @@ public:
         if (objectName.empty()) return;
         if (_createdViewObjects.erase(objectName) > 0) {
             _dirtyLayoutViewObjects.erase(objectName);
+            _renamedViewObjects.erase(objectName);
             return;
         }
         _deletedViewObjects.insert(objectName);
         _dirtyLayoutViewObjects.erase(objectName);
+        if (auto it = _renamedViewObjects.find(objectName); it != _renamedViewObjects.end()) {
+            _deletedViewObjects.insert(it->second);
+            _deletedViewObjects.erase(objectName);
+            _renamedViewObjects.erase(it);
+        }
+    }
+    // J-17 (view object rename) — same plumbing pattern as the
+    // group rename: track new→old so the save patcher can locate
+    // the on-disk element by its original name.
+    void MarkViewObjectRenamed(const std::string& oldName, const std::string& newName) {
+        if (oldName.empty() || newName.empty() || oldName == newName) return;
+        if (_createdViewObjects.erase(oldName) > 0) {
+            _createdViewObjects.insert(newName);
+            return;
+        }
+        std::string disk = oldName;
+        if (auto it = _renamedViewObjects.find(disk); it != _renamedViewObjects.end()) {
+            disk = it->second;
+            _renamedViewObjects.erase(it);
+        }
+        if (disk == newName) {
+            _renamedViewObjects.erase(newName);
+            return;
+        }
+        _renamedViewObjects[newName] = disk;
     }
     // J-7 (group CRUD) — structural group lifecycle. A newly-
     // created group needs a fresh `<modelGroup>` element appended;
@@ -388,10 +414,47 @@ public:
         // delete cancels out — nothing on disk to remove.
         if (_createdGroups.erase(groupName) > 0) {
             _dirtyLayoutModels.erase(groupName);
+            _renamedGroups.erase(groupName);
             return;
         }
         _deletedGroups.insert(groupName);
         _dirtyLayoutModels.erase(groupName);
+        // Collapse any pending rename onto the on-disk name so the
+        // patcher's delete pass finds the right `<modelGroup>`.
+        if (auto it = _renamedGroups.find(groupName); it != _renamedGroups.end()) {
+            _deletedGroups.insert(it->second);
+            _deletedGroups.erase(groupName);
+            _renamedGroups.erase(it);
+        }
+    }
+    // J-16 (group rename) — record a pending rename so
+    // SaveLayoutChanges can locate the on-disk `<modelGroup>` by
+    // its OLD name, then update the name attribute. Keyed by NEW
+    // name (the value already living in ModelManager). Handles
+    // rename chains by collapsing to the original on-disk name.
+    void MarkGroupRenamed(const std::string& oldName, const std::string& newName) {
+        if (oldName.empty() || newName.empty() || oldName == newName) return;
+        // If the group was created in-memory and never saved, the
+        // rename just retitles the pending creation — no on-disk
+        // node to find.
+        if (_createdGroups.erase(oldName) > 0) {
+            _createdGroups.insert(newName);
+            return;
+        }
+        // Walk back to the original on-disk name in case of
+        // rename-after-rename (A → B → C — patcher needs to find
+        // <modelGroup name="A"> not B).
+        std::string disk = oldName;
+        if (auto it = _renamedGroups.find(disk); it != _renamedGroups.end()) {
+            disk = it->second;
+            _renamedGroups.erase(it);
+        }
+        // Renaming back to the original drops the pending rename.
+        if (disk == newName) {
+            _renamedGroups.erase(newName);
+            return;
+        }
+        _renamedGroups[newName] = disk;
     }
     bool HasDirtyLayoutModels() const {
         return !_dirtyLayoutModels.empty() ||
@@ -400,7 +463,9 @@ public:
                !_deletedGroups.empty() ||
                !_dirtyBackgroundGroups.empty() ||
                !_createdViewObjects.empty() ||
-               !_deletedViewObjects.empty();
+               !_deletedViewObjects.empty() ||
+               !_renamedGroups.empty() ||
+               !_renamedViewObjects.empty();
     }
     bool SaveLayoutChanges();
     // Clear the dirty set without writing to disk — used after a
@@ -416,6 +481,8 @@ public:
         _dirtyBackgroundGroups.clear();
         _createdViewObjects.clear();
         _deletedViewObjects.clear();
+        _renamedGroups.clear();
+        _renamedViewObjects.clear();
     }
 
     // Phase J-2 — layout undo. Snapshot the common-properties
@@ -426,16 +493,37 @@ public:
     // through the regular setters, which marks the model dirty
     // again so the change persists on next save. Stack is capped
     // at 100 entries (oldest dropped on overflow).
+    // J-17 — undo entry now discriminated. Models capture
+    // hcenter/vcenter/dcenter + width/height/depth + rotation +
+    // locked + layoutGroup + controllerName. View objects use
+    // world-pos + scale matrix instead of width/height/depth.
+    // Heightmap entries snapshot just the PointData string.
+    enum class UndoTarget : uint8_t {
+        Model,
+        ViewObject,
+        ViewObjectHeightmap,
+    };
     struct LayoutUndoEntry {
-        std::string modelName;
-        float hcenter, vcenter, dcenter;
-        float width, height, depth;
-        float rotateX, rotateY, rotateZ;
-        bool locked;
+        UndoTarget target = UndoTarget::Model;
+        std::string modelName;          // Model name OR VO name.
+        // Common transform fields (used by Model + VO entries).
+        float hcenter = 0, vcenter = 0, dcenter = 0;
+        float width = 0, height = 0, depth = 0;   // Model only.
+        float scaleX = 1, scaleY = 1, scaleZ = 1; // VO only.
+        float rotateX = 0, rotateY = 0, rotateZ = 0;
+        bool  locked = false;
         std::string layoutGroup;
-        std::string controllerName;
+        std::string controllerName;     // Model only.
+        // Heightmap snapshot — comma-delimited point data string.
+        std::string pointData;
     };
     void PushLayoutUndoSnapshotForModel(const std::string& modelName);
+    // J-17 — capture a view-object's common transform + locked
+    // state. Caller pushes BEFORE the edit.
+    void PushLayoutUndoSnapshotForViewObject(const std::string& objectName);
+    // J-17 — capture a terrain VO's heightmap data. Called once
+    // per edit-tap so undo rolls back individual brushes.
+    void PushTerrainHeightmapUndoSnapshot(const std::string& terrainName);
     bool UndoLastLayoutChange();
     bool CanUndoLayoutChange() const { return !_layoutUndoStack.empty(); }
     size_t LayoutUndoDepth() const { return _layoutUndoStack.size(); }
@@ -530,6 +618,13 @@ private:
     // J-7 — model groups that should be removed from disk on
     // next save (already gone from in-memory ModelManager).
     std::set<std::string> _deletedGroups;
+    // J-16 — pending group renames. Key = current name in
+    // ModelManager (the NEW name); value = on-disk name (the
+    // OLD name) so the save patcher can locate the
+    // `<modelGroup>` element via the original.
+    std::map<std::string, std::string> _renamedGroups;
+    // J-17 — same plumbing for view-object renames.
+    std::map<std::string, std::string> _renamedViewObjects;
     // J-12 — view objects created in-memory that need full
     // serialization on next save (append to <view_objects>).
     std::set<std::string> _createdViewObjects;

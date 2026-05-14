@@ -59,6 +59,7 @@
 #include "models/RulerObject.h"
 #include "models/BoxedScreenLocation.h"
 #include "models/TwoPointScreenLocation.h"
+#include "XmlSerializer/XmlSerializingVisitor.h"
 #include "models/ArchesModel.h"
 #include "models/CandyCaneModel.h"
 #include "models/ChannelBlockModel.h"
@@ -3146,7 +3147,11 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
                   members:(NSArray<NSString*>*)initialMembers {
     if (!_context || !_context->HasModelManager() ||
         !groupName || groupName.length == 0) return NO;
-    std::string name = groupName.UTF8String;
+    // J-16 — sanitize via the canonical desktop helper. The
+    // SwiftUI sheet should preview the sanitized form so this is
+    // defense-in-depth rather than a surprise to the user.
+    std::string name = Model::SafeModelName(groupName.UTF8String);
+    if (name.empty()) return NO;
     auto& mgr = _context->GetModelManager();
     // Collision check — desktop allows model + group to share a
     // name but it confuses every selection lookup; refuse.
@@ -3186,6 +3191,54 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     if (!_context->GetModelManager().Delete(name)) return NO;
     _context->MarkGroupDeleted(name);
     return YES;
+}
+
+- (BOOL)renameModelGroup:(NSString*)oldName to:(NSString*)newName {
+    if (!_context || !_context->HasModelManager()) return NO;
+    if (!oldName || !newName) return NO;
+    std::string oldStd = oldName.UTF8String;
+    // J-16 — sanitize the new name through the same canonical
+    // path the desktop uses. Strips illegal characters silently
+    // (`, ~ ! ; < > " ' & : | @ / \ \t \r \n`) rather than
+    // rejecting them, matching the desktop convention.
+    std::string newStd = Model::SafeModelName(newName.UTF8String);
+    if (newStd.empty() || oldStd == newStd) return NO;
+
+    auto& mgr = _context->GetModelManager();
+    Model* g = mgr[oldStd];
+    if (!g || g->GetDisplayAs() != DisplayAsType::ModelGroup) return NO;
+    // Refuse collision with an existing model or group.
+    if (mgr.GetModel(newStd)) return NO;
+
+    // ModelManager::Rename updates the in-memory references
+    // (group's own name, plus member-name vectors of every other
+    // ModelGroup that contained the old name). It does NOT mark
+    // anything dirty for save — we do that below.
+    if (!mgr.Rename(oldStd, newStd)) return NO;
+
+    _context->MarkGroupRenamed(oldStd, newStd);
+    _context->MarkLayoutModelDirty(newStd);
+
+    // Mark every group that now contains the new name dirty so
+    // their on-disk `models` comma-list gets rewritten. We can't
+    // tell from Rename's return value which groups were affected,
+    // so we walk and check membership. Cheap on realistic show
+    // sizes.
+    for (const auto& [name, model] : mgr.GetModels()) {
+        if (!model) continue;
+        if (model->GetDisplayAs() != DisplayAsType::ModelGroup) continue;
+        auto* mg = static_cast<ModelGroup*>(model);
+        if (mg->DirectlyContainsModel(newStd)) {
+            _context->MarkLayoutModelDirty(name);
+        }
+    }
+    return YES;
+}
+
+- (NSString*)sanitizedModelName:(NSString*)name {
+    if (!name) return @"";
+    std::string clean = Model::SafeModelName(name.UTF8String);
+    return [NSString stringWithUTF8String:clean.c_str()];
 }
 
 - (NSArray<NSString*>*)submodelsForModel:(NSString*)modelName {
@@ -3402,6 +3455,64 @@ static NSString* const kBackgroundPseudoObjectName = @"2D Background";
     _context->GetAllObjects().Delete(nm);
     _context->MarkViewObjectDeleted(nm);
     return YES;
+}
+
+- (BOOL)renameViewObject:(NSString*)oldName to:(NSString*)newName {
+    if (!_context || !_context->HasViewObjectManager()) return NO;
+    if (!oldName || !newName) return NO;
+    if ([oldName isEqualToString:kBackgroundPseudoObjectName]) return NO;
+    std::string oldStd = oldName.UTF8String;
+    std::string newStd = Model::SafeModelName(newName.UTF8String);
+    if (newStd.empty() || oldStd == newStd) return NO;
+
+    auto& vm = _context->GetAllObjects();
+    if (!vm.GetViewObject(oldStd)) return NO;
+    if (vm.GetViewObject(newStd)) return NO;
+
+    vm.Rename(oldStd, newStd);
+    // ViewObjectManager::Rename returns `changed` based on cross-
+    // reference iteration that's currently commented out on the
+    // desktop, so we verify by lookup.
+    if (!vm.GetViewObject(newStd)) return NO;
+
+    _context->MarkViewObjectRenamed(oldStd, newStd);
+    _context->MarkLayoutViewObjectDirty(newStd);
+    return YES;
+}
+
+- (nullable NSString*)duplicateViewObject:(NSString*)name {
+    if (!_context || !_context->HasViewObjectManager()) return nil;
+    if (!name || name.length == 0) return nil;
+    if ([name isEqualToString:kBackgroundPseudoObjectName]) return nil;
+
+    auto& vm = _context->GetAllObjects();
+    ViewObject* src = vm.GetViewObject(name.UTF8String);
+    if (!src) return nil;
+
+    // Serialize source through the visitor to produce a fresh
+    // <view_object> node, then deserialize into a new object.
+    // Per-type attrs (Mesh ObjFile, Image bitmap, terrain heightmap)
+    // round-trip via the visitor; no per-type copy code needed here.
+    pugi::xml_document doc;
+    pugi::xml_node parent = doc.append_child("view_objects");
+    parent.append_attribute("type") = "exported";
+    XmlSerializingVisitor visitor(parent, /*exporting*/ true);
+    src->Accept(visitor);
+    pugi::xml_node serObject = parent.first_child();
+    if (!serObject) return nil;
+
+    ViewObject* dup = vm.CreateObject(serObject);
+    if (!dup) return nil;
+
+    std::string newName = vm.GenerateObjectName(dup->GetName());
+    dup->SetName(newName);
+    dup->GetBaseObjectScreenLocation().Lock(false);
+    // Offset world position so the duplicate doesn't sit on top
+    // of the source. Matches desktop's paste-VO offset.
+    dup->AddOffset(50.0, 50.0, 0.0);
+    vm.AddViewObject(dup);
+    _context->MarkViewObjectCreated(newName);
+    return [NSString stringWithUTF8String:newName.c_str()];
 }
 
 - (BOOL)setLayoutViewObjectProperty:(NSString*)name
@@ -4422,6 +4533,17 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
 - (void)pushLayoutUndoSnapshotForModel:(NSString*)modelName {
     if (!_context || !modelName) return;
     _context->PushLayoutUndoSnapshotForModel(std::string([modelName UTF8String]));
+}
+
+- (void)pushLayoutUndoSnapshotForViewObject:(NSString*)objectName {
+    if (!_context || !objectName) return;
+    if ([objectName isEqualToString:kBackgroundPseudoObjectName]) return;
+    _context->PushLayoutUndoSnapshotForViewObject(std::string([objectName UTF8String]));
+}
+
+- (void)pushTerrainHeightmapUndoSnapshot:(NSString*)terrainName {
+    if (!_context || !terrainName) return;
+    _context->PushTerrainHeightmapUndoSnapshot(std::string([terrainName UTF8String]));
 }
 
 - (BOOL)undoLastLayoutChange {

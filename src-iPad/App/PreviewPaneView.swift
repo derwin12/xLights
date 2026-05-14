@@ -662,6 +662,7 @@ struct PreviewPaneView: UIViewRepresentable {
                     if voHit == voSel,
                        bridge.beginPinchScale(forViewObject: voSel,
                                                for: viewModel.document) {
+                        viewModel.document.pushLayoutUndoSnapshot(forViewObject: voSel)
                         pinchingLayoutModel = true
                         pinchScaleModelName = voSel
                     }
@@ -796,6 +797,8 @@ struct PreviewPaneView: UIViewRepresentable {
                                                                 viewSize: viewSize,
                                                                 for: viewModel.document)
                     if voHandle >= 0 {
+                        // J-17 — undo snapshot before the edit.
+                        viewModel.document.pushLayoutUndoSnapshot(forViewObject: voSel)
                         draggingLayoutHandle = voHandle
                         layoutDragModelName = voSel
                         recognizer.setTranslation(.zero, in: view)
@@ -813,10 +816,12 @@ struct PreviewPaneView: UIViewRepresentable {
                                                           atScreenPoint: touch,
                                                           viewSize: viewSize,
                                                           for: viewModel.document) {
+                                    viewModel.document.pushLayoutUndoSnapshot(forViewObject: voSel)
                                     draggingLayoutViewObject = true
                                     layoutDragViewObjectName = voSel
                                 }
                             } else {
+                                viewModel.document.pushLayoutUndoSnapshot(forViewObject: voSel)
                                 draggingLayoutViewObject = true
                                 layoutDragViewObjectName = voSel
                                 recognizer.setTranslation(.zero, in: view)
@@ -1055,6 +1060,7 @@ struct PreviewPaneView: UIViewRepresentable {
                     if voHit == voSel,
                        bridge.beginTwistRotate(forViewObject: voSel,
                                                 for: viewModel.document) {
+                        viewModel.document.pushLayoutUndoSnapshot(forViewObject: voSel)
                         twistingLayoutModel = true
                         twistRotateModelName = voSel
                     }
@@ -1312,6 +1318,9 @@ struct PreviewPaneView: UIViewRepresentable {
                 let signed = viewModel.terrainEditRaise
                     ? viewModel.terrainEditDelta
                     : -viewModel.terrainEditDelta
+                // J-17 — snapshot PointData BEFORE the edit so
+                // each tap is independently undoable.
+                viewModel.document.pushTerrainHeightmapUndoSnapshot(terrainName)
                 let ok = bridge.editTerrainHeight(terrainName,
                                                    atScreenPoint: point,
                                                    viewSize: size,

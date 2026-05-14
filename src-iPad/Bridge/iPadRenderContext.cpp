@@ -28,6 +28,8 @@
 #include "models/TerrainObject.h"
 #include "models/RulerObject.h"
 #include "models/TwoPointScreenLocation.h"
+#include "models/BoxedScreenLocation.h"
+#include "models/TerrainScreenLocation.h"
 #include "models/MatrixModel.h"
 #include "models/ModelScreenLocation.h"
 #include "models/Node.h"
@@ -448,7 +450,9 @@ bool iPadRenderContext::SaveLayoutChanges() {
         _deletedGroups.empty() &&
         _createdViewObjects.empty() &&
         _deletedViewObjects.empty() &&
-        _dirtyBackgroundGroups.empty()) {
+        _dirtyBackgroundGroups.empty() &&
+        _renamedGroups.empty() &&
+        _renamedViewObjects.empty()) {
         return true;
     }
     if (_showDir.empty()) return false;
@@ -577,18 +581,32 @@ bool iPadRenderContext::SaveLayoutChanges() {
                              modelName);
                 continue;
             }
+            // J-16 — rename support. If this group was renamed in
+            // memory, the on-disk `<modelGroup>` still has the OLD
+            // name. Look it up via the renames map, find by old
+            // name, then update the name attribute below.
+            std::string findName = modelName;
+            bool renamed = false;
+            if (auto it = _renamedGroups.find(modelName); it != _renamedGroups.end()) {
+                findName = it->second;
+                renamed = true;
+            }
             pugi::xml_node existing;
             for (auto n = modelGroupsNode.first_child(); n; n = n.next_sibling()) {
                 if (std::string_view(n.name()) != "modelGroup") continue;
-                if (modelName == n.attribute("name").as_string()) {
+                if (findName == n.attribute("name").as_string()) {
                     existing = n;
                     break;
                 }
             }
             if (!existing) {
                 spdlog::warn("iPadRenderContext::SaveLayoutChanges: <modelGroup name='{}'> not found",
-                             modelName);
+                             findName);
                 continue;
+            }
+            if (renamed) {
+                if (existing.attribute("name")) existing.remove_attribute("name");
+                existing.append_attribute("name") = modelName.c_str();
             }
             ModelGroup* g = static_cast<ModelGroup*>(m);
             auto setAttr = [&](const char* k, const std::string& v) {
@@ -712,18 +730,33 @@ bool iPadRenderContext::SaveLayoutChanges() {
                                  objName);
                     continue;
                 }
+                // J-17 — rename support: if this VO was renamed
+                // in memory, the on-disk `<view_object>` still
+                // has the OLD name. Look up via the renames map
+                // and update the name attribute below.
+                std::string findName = objName;
+                bool renamed = false;
+                if (auto it = _renamedViewObjects.find(objName);
+                    it != _renamedViewObjects.end()) {
+                    findName = it->second;
+                    renamed = true;
+                }
                 pugi::xml_node existing;
                 for (auto n = viewObjectsNode.first_child(); n; n = n.next_sibling()) {
                     if (std::string_view(n.name()) != "view_object") continue;
-                    if (objName == n.attribute("name").as_string()) {
+                    if (findName == n.attribute("name").as_string()) {
                         existing = n;
                         break;
                     }
                 }
                 if (!existing) {
                     spdlog::warn("iPadRenderContext::SaveLayoutChanges: <view_object name='{}'> not found",
-                                 objName);
+                                 findName);
                     continue;
+                }
+                if (renamed) {
+                    if (existing.attribute("name")) existing.remove_attribute("name");
+                    existing.append_attribute("name") = objName.c_str();
                 }
                 auto& loc = vo->GetObjectScreenLocation();
                 auto setAttr = [&](const char* k, const std::string& v) {
@@ -913,6 +946,8 @@ bool iPadRenderContext::SaveLayoutChanges() {
     _dirtyBackgroundGroups.clear();
     _createdViewObjects.clear();
     _deletedViewObjects.clear();
+    _renamedGroups.clear();
+    _renamedViewObjects.clear();
     return true;
 }
 
@@ -923,6 +958,7 @@ void iPadRenderContext::PushLayoutUndoSnapshotForModel(const std::string& modelN
     auto& loc = m->GetModelScreenLocation();
     glm::vec3 rot = loc.GetRotation();
     LayoutUndoEntry e;
+    e.target = UndoTarget::Model;
     e.modelName = modelName;
     e.hcenter = loc.GetHcenterPos();
     e.vcenter = loc.GetVcenterPos();
@@ -943,34 +979,124 @@ void iPadRenderContext::PushLayoutUndoSnapshotForModel(const std::string& modelN
     }
 }
 
+// J-17 — VO common-transform snapshot. ScaleX/Y/Z come from the
+// BoxedScreenLocation; objects on other screen-loc types (Ruler
+// uses TwoPoint) get all-1 scale and the undo applies just the
+// world pos / rotation — close enough for those types.
+void iPadRenderContext::PushLayoutUndoSnapshotForViewObject(const std::string& objectName) {
+    if (objectName.empty() || !_viewObjectManager) return;
+    ViewObject* vo = _viewObjectManager->GetViewObject(objectName);
+    if (!vo) return;
+    auto& loc = vo->GetObjectScreenLocation();
+    glm::vec3 rot = loc.GetRotation();
+    LayoutUndoEntry e;
+    e.target = UndoTarget::ViewObject;
+    e.modelName = objectName;
+    e.hcenter = loc.GetHcenterPos();
+    e.vcenter = loc.GetVcenterPos();
+    e.dcenter = loc.GetDcenterPos();
+    if (auto* bsl = dynamic_cast<BoxedScreenLocation*>(&loc)) {
+        e.scaleX = bsl->GetScaleX();
+        e.scaleY = bsl->GetScaleY();
+        e.scaleZ = bsl->GetScaleZ();
+    } else {
+        glm::vec3 sm = loc.GetScaleMatrix();
+        e.scaleX = sm.x;
+        e.scaleY = sm.y;
+        e.scaleZ = sm.z;
+    }
+    e.rotateX = rot.x;
+    e.rotateY = rot.y;
+    e.rotateZ = rot.z;
+    e.locked  = loc.IsLocked();
+    e.layoutGroup = vo->GetLayoutGroup();
+    _layoutUndoStack.push_back(std::move(e));
+    while (_layoutUndoStack.size() > kLayoutUndoMaxDepth) {
+        _layoutUndoStack.pop_front();
+    }
+}
+
+void iPadRenderContext::PushTerrainHeightmapUndoSnapshot(const std::string& terrainName) {
+    if (terrainName.empty() || !_viewObjectManager) return;
+    ViewObject* vo = _viewObjectManager->GetViewObject(terrainName);
+    auto* terrain = dynamic_cast<TerrainObject*>(vo);
+    if (!terrain) return;
+    auto& sloc = dynamic_cast<TerrainScreenLocation&>(terrain->GetBaseObjectScreenLocation());
+    LayoutUndoEntry e;
+    e.target = UndoTarget::ViewObjectHeightmap;
+    e.modelName = terrainName;
+    e.pointData = sloc.GetDataAsString();
+    _layoutUndoStack.push_back(std::move(e));
+    while (_layoutUndoStack.size() > kLayoutUndoMaxDepth) {
+        _layoutUndoStack.pop_front();
+    }
+}
+
 bool iPadRenderContext::UndoLastLayoutChange() {
-    if (_layoutUndoStack.empty() || !_modelManager) return false;
+    if (_layoutUndoStack.empty()) return false;
     LayoutUndoEntry e = _layoutUndoStack.back();
     _layoutUndoStack.pop_back();
 
-    Model* m = _modelManager->GetModel(e.modelName);
-    if (!m) return false;
-    auto& loc = m->GetModelScreenLocation();
-
-    // Apply via the same setters as the forward edit. They check
-    // IsLocked / IsFromBase, so an undo on a now-locked model is
-    // a no-op for position/dimension fields. layoutGroup +
-    // controllerName always apply (no lock gate).
-    m->SetHcenterPos(e.hcenter);
-    m->SetVcenterPos(e.vcenter);
-    m->SetDcenterPos(e.dcenter);
-    m->SetWidth(e.width);
-    m->SetHeight(e.height);
-    m->SetDepth(e.depth);
-    loc.SetRotateX(e.rotateX);
-    loc.SetRotateY(e.rotateY);
-    loc.SetRotateZ(e.rotateZ);
-    loc.SetLocked(e.locked);
-    if (m->GetLayoutGroup() != e.layoutGroup) m->SetLayoutGroup(e.layoutGroup);
-    if (m->GetControllerName() != e.controllerName) m->SetControllerName(e.controllerName);
-
-    MarkLayoutModelDirty(e.modelName);
-    return true;
+    switch (e.target) {
+    case UndoTarget::Model: {
+        if (!_modelManager) return false;
+        Model* m = _modelManager->GetModel(e.modelName);
+        if (!m) return false;
+        auto& loc = m->GetModelScreenLocation();
+        m->SetHcenterPos(e.hcenter);
+        m->SetVcenterPos(e.vcenter);
+        m->SetDcenterPos(e.dcenter);
+        m->SetWidth(e.width);
+        m->SetHeight(e.height);
+        m->SetDepth(e.depth);
+        loc.SetRotateX(e.rotateX);
+        loc.SetRotateY(e.rotateY);
+        loc.SetRotateZ(e.rotateZ);
+        loc.SetLocked(e.locked);
+        if (m->GetLayoutGroup() != e.layoutGroup) m->SetLayoutGroup(e.layoutGroup);
+        if (m->GetControllerName() != e.controllerName) m->SetControllerName(e.controllerName);
+        MarkLayoutModelDirty(e.modelName);
+        return true;
+    }
+    case UndoTarget::ViewObject: {
+        if (!_viewObjectManager) return false;
+        ViewObject* vo = _viewObjectManager->GetViewObject(e.modelName);
+        if (!vo) return false;
+        auto& loc = vo->GetObjectScreenLocation();
+        vo->SetHcenterPos(e.hcenter);
+        vo->SetVcenterPos(e.vcenter);
+        vo->SetDcenterPos(e.dcenter);
+        if (auto* bsl = dynamic_cast<BoxedScreenLocation*>(&loc)) {
+            bsl->SetScaleX(e.scaleX);
+            bsl->SetScaleY(e.scaleY);
+            bsl->SetScaleZ(e.scaleZ);
+        } else {
+            loc.SetScaleMatrix(glm::vec3(e.scaleX, e.scaleY, e.scaleZ));
+        }
+        loc.SetRotateX(e.rotateX);
+        loc.SetRotateY(e.rotateY);
+        loc.SetRotateZ(e.rotateZ);
+        loc.SetLocked(e.locked);
+        if (vo->GetLayoutGroup() != e.layoutGroup) vo->SetLayoutGroup(e.layoutGroup);
+        vo->IncrementChangeCount();
+        vo->ReloadModel();
+        MarkLayoutViewObjectDirty(e.modelName);
+        return true;
+    }
+    case UndoTarget::ViewObjectHeightmap: {
+        if (!_viewObjectManager) return false;
+        ViewObject* vo = _viewObjectManager->GetViewObject(e.modelName);
+        auto* terrain = dynamic_cast<TerrainObject*>(vo);
+        if (!terrain) return false;
+        auto& sloc = dynamic_cast<TerrainScreenLocation&>(terrain->GetBaseObjectScreenLocation());
+        sloc.SetDataFromString(e.pointData);
+        terrain->IncrementChangeCount();
+        terrain->ReloadModel();
+        MarkLayoutViewObjectDirty(e.modelName);
+        return true;
+    }
+    }
+    return false;
 }
 
 void iPadRenderContext::SetActiveLayoutGroup(const std::string& name) {

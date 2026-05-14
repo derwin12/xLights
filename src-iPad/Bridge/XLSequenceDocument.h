@@ -1014,6 +1014,20 @@ NS_ASSUME_NONNULL_BEGIN
 // Background pseudo-object is never deletable.
 - (BOOL)deleteViewObject:(NSString*)name;
 
+// J-17 — rename a view object. Calls `ViewObjectManager::Rename`
+// (which updates the manager map). Sanitizes via
+// `Model::SafeModelName` to match group rename semantics.
+// Returns NO on collision / empty / 2D Background pseudo-object.
+- (BOOL)renameViewObject:(NSString*)oldName
+                      to:(NSString*)newName;
+
+// J-17 — shallow-copy duplicate of a view object. Round-trips
+// through `XmlSerializer::SerializeObject` → `CreateObject`,
+// generates a unique name via `GenerateObjectName`, offsets
+// world position by (+50, +50, 0). Returns the new name on
+// success, nil for the background pseudo or other failure.
+- (nullable NSString*)duplicateViewObject:(NSString*)name;
+
 // J-12 — types accepted by `createViewObjectWithType:`. Ruler
 // is filtered out when one already exists in the show (it's a
 // singleton). Order matches desktop's Objects → Add menu.
@@ -1050,6 +1064,26 @@ NS_ASSUME_NONNULL_BEGIN
 // groups containing this one) is NOT cleaned up — Reset on the
 // next layout reload handles it (matches desktop behaviour).
 - (BOOL)deleteModelGroup:(NSString*)groupName;
+
+// J-16 — rename a ModelGroup. `ModelManager::Rename` updates
+// every in-memory reference (other groups containing this one
+// get their member lists fixed); the save patcher uses the
+// stored old name to locate the on-disk `<modelGroup>` element
+// and rewrites its `name` attribute. The new name is sanitized
+// via `Model::SafeModelName` (strips `, ~ ! ; < > " ' & : | @ /
+// \ \t \r \n` + surrounding whitespace) before being applied,
+// so passing a name with illegal characters won't fail —
+// callers see the sanitized name take effect. Returns NO if
+// the sanitized name is empty, equal to the old name, or
+// collides with an existing model/group.
+- (BOOL)renameModelGroup:(NSString*)oldName
+                      to:(NSString*)newName;
+
+// J-16 — preview of the sanitized form of `name`. Mirrors
+// `Model::SafeModelName` so the SwiftUI sheets can show the
+// user what their input will be reduced to before they submit
+// (matches the desktop convention of silently stripping).
+- (NSString*)sanitizedModelName:(NSString*)name;
 
 // Phase J-6 (per-type properties) — descriptors for a model's
 // type-specific surface (Tree branches, Matrix strings, Star
@@ -1102,6 +1136,17 @@ NS_ASSUME_NONNULL_BEGIN
 // a time. The drag handler pushes once at gesture-began, so a
 // single drag is one undo entry.
 - (void)pushLayoutUndoSnapshotForModel:(NSString*)modelName;
+
+// J-17 — push a view-object snapshot onto the same unified
+// undo stack the model path uses. UndoLast dispatches by entry
+// kind so one button reverts whatever the user did last.
+- (void)pushLayoutUndoSnapshotForViewObject:(NSString*)objectName;
+
+// J-17 — push a terrain VO's heightmap data onto the undo
+// stack. Heightmap edits are destructive (each tap mutates
+// PointData in place), so the tap handler calls this BEFORE
+// applying the brush.
+- (void)pushTerrainHeightmapUndoSnapshot:(NSString*)terrainName;
 
 // Pop and restore the most recent undo entry. Returns YES if a
 // snapshot was applied (model still exists, dirty marked); NO if

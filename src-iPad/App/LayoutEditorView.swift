@@ -127,6 +127,10 @@ struct LayoutEditorView: View {
     @State private var addMemberSheetVisible: Bool = false
     @State private var pendingDeleteGroupName: String? = nil
 
+    /// J-16 (group rename) — rename-sheet visibility + target.
+    @State private var renameGroupSheetVisible: Bool = false
+    @State private var pendingRenameGroupOldName: String? = nil
+
     /// J-7 (multi-select) — when true, the next NewGroupSheet
     /// "Create" passes the current selection as the initial member
     /// list instead of creating an empty group. Cleared after use.
@@ -147,6 +151,10 @@ struct LayoutEditorView: View {
     @State private var addViewObjectSheetVisible: Bool = false
     /// J-12 — pending delete confirmation for a view object.
     @State private var pendingDeleteObjectName: String? = nil
+
+    /// J-17 (view object rename) — rename sheet visibility + target.
+    @State private var renameObjectSheetVisible: Bool = false
+    @State private var pendingRenameObjectOldName: String? = nil
 
     /// J-4 (import) — UTTypes the .fileImporter accepts. Declared
     /// as a static so the SwiftUI type-checker can resolve the
@@ -170,6 +178,31 @@ struct LayoutEditorView: View {
         NotificationCenter.default.post(name: .layoutEditorModelMoved,
                                          object: "LayoutEditor",
                                          userInfo: ["model": name])
+    }
+
+    /// J-17 — view-object rename sheet "Rename" callback.
+    private func handleRenameViewObject(_ oldName: String, _ newName: String) {
+        guard viewModel.document.renameViewObject(oldName, to: newName) else { return }
+        if viewModel.layoutEditorSelectedObject == oldName {
+            viewModel.layoutEditorSelectedObject = newName
+        }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        refreshModelList()
+    }
+
+    /// J-17 — duplicate the named view object and auto-select
+    /// the new copy so the user can immediately drag it into
+    /// position.
+    private func handleDuplicateViewObject(_ name: String) {
+        guard let dup = viewModel.document.duplicateViewObject(name) else { return }
+        viewModel.layoutEditorSelectedObject = dup
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        refreshModelList()
+        NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                         object: "LayoutEditor",
+                                         userInfo: ["model": dup])
     }
 
     /// J-12 — Delete-confirmation alert → bridge delete.
@@ -394,15 +427,21 @@ struct LayoutEditorView: View {
             newGroupSheetVisible: $newGroupSheetVisible,
             addMemberSheetVisible: $addMemberSheetVisible,
             pendingDeleteGroupName: $pendingDeleteGroupName,
+            renameGroupSheetVisible: $renameGroupSheetVisible,
+            pendingRenameGroupOldName: $pendingRenameGroupOldName,
             groupNames: groupNames,
             modelNames: modelNames,
             onCreateGroup: handleCreateGroup,
             onAddMembers: handleAddMembers,
             onDeleteGroup: handleDeleteGroup,
+            onRenameGroup: handleRenameGroup,
             selectedGroupName: viewModel.layoutEditorSelectedGroup,
             currentMembers: selectedGroupMembers,
             submodelsFor: { parent in
                 viewModel.document.submodels(forModel: parent)
+            },
+            sanitizeName: { raw in
+                viewModel.document.sanitizedModelName(raw)
             }
         ))
         // J-4 (import) — .xmodel file picker. iPadOS's
@@ -427,10 +466,17 @@ struct LayoutEditorView: View {
             objectFilePickerTypes: objectFilePickerTypes,
             addViewObjectSheetVisible: $addViewObjectSheetVisible,
             pendingDeleteObjectName: $pendingDeleteObjectName,
+            renameObjectSheetVisible: $renameObjectSheetVisible,
+            pendingRenameObjectOldName: $pendingRenameObjectOldName,
             availableTypes: viewModel.document.availableViewObjectTypes(),
             onCreateObject: handleCreateViewObject,
             onDeleteObject: handleDeleteViewObject,
-            onFilePicked: handleObjectFilePick
+            onRenameObject: handleRenameViewObject,
+            onFilePicked: handleObjectFilePick,
+            existingNames: Set(objectNames + modelNames + groupNames),
+            sanitizeName: { raw in
+                viewModel.document.sanitizedModelName(raw)
+            }
         ))
         .alert("Import failed",
                isPresented: Binding(get: { importErrorMessage != nil },
@@ -791,6 +837,10 @@ struct LayoutEditorView: View {
                         commitGroupProperty(groupName: name,
                                             key: "members",
                                             value: newOrder as NSArray)
+                    },
+                    onRenameRequest: {
+                        pendingRenameGroupOldName = name
+                        renameGroupSheetVisible = true
                     }
                 )
             } else {
@@ -824,6 +874,13 @@ struct LayoutEditorView: View {
                             pendingObjectFilePickKey = key
                             objectFilePickerTypes = types
                             objectFilePickerVisible = true
+                        },
+                        onRenameRequest: {
+                            pendingRenameObjectOldName = name
+                            renameObjectSheetVisible = true
+                        },
+                        onDuplicate: {
+                            handleDuplicateViewObject(name)
                         }
                     )
                 }
@@ -1422,21 +1479,22 @@ struct LayoutEditorView: View {
         }
     }
 
-    /// J-6 (objects) — commit a view-object property edit. View
-    /// objects don't participate in the model undo stack yet (the
-    /// stack snapshots Models specifically); on undo the user can
-    /// still Discard Changes for a full rollback through the dirty
-    /// set. Bumps the summary token + repaints the canvas like the
-    /// model path.
+    /// J-6 / J-17 (objects) — commit a view-object property edit.
+    /// Pushes an undo snapshot before the edit (skipping the
+    /// 2D Background pseudo-object — its undo would have to walk
+    /// per-group background settings). Bumps the summary token +
+    /// repaints the canvas like the model path.
     private func commitObjectProperty(objectName: String, key: String, value: Any) {
+        if objectName != "2D Background" {
+            viewModel.document.pushLayoutUndoSnapshot(forViewObject: objectName)
+        }
         let changed = viewModel.document.setLayoutViewObjectProperty(objectName,
                                                                      key: key,
                                                                      value: value)
         if changed {
             summaryToken &+= 1
             hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
-            // canUndo is intentionally NOT bumped — view-object
-            // edits aren't on the undo stack today.
+            canUndo = viewModel.document.canUndoLayoutChange()
             if key == "layoutGroup" {
                 refreshModelList()
             }
@@ -1508,6 +1566,20 @@ struct LayoutEditorView: View {
             hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
             refreshModelList()
         }
+    }
+
+    /// J-16 — rename-group sheet "Rename" callback. On success,
+    /// re-points the sidebar selection to the new name (so the
+    /// property pane reopens on the renamed group) and refreshes
+    /// the roster.
+    private func handleRenameGroup(_ oldName: String, _ newName: String) {
+        guard viewModel.document.renameModelGroup(oldName, to: newName) else { return }
+        if viewModel.layoutEditorSelectedGroup == oldName {
+            viewModel.layoutEditorSelectedGroup = newName
+        }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        refreshModelList()
     }
 
     /// J-5 (groups) — commit a group property edit. Mirrors
@@ -2264,10 +2336,16 @@ private struct ViewObjectCrudModifiers: ViewModifier {
     let objectFilePickerTypes: [UTType]
     @Binding var addViewObjectSheetVisible: Bool
     @Binding var pendingDeleteObjectName: String?
+    @Binding var renameObjectSheetVisible: Bool
+    @Binding var pendingRenameObjectOldName: String?
     let availableTypes: [String]
     let onCreateObject: (String) -> Void
     let onDeleteObject: (String) -> Void
+    let onRenameObject: (String, String) -> Void
     let onFilePicked: (Result<[URL], Error>) -> Void
+    /// J-17 — existing-name lookup for rename collision check.
+    let existingNames: Set<String>
+    let sanitizeName: (String) -> String
 
     func body(content: Content) -> some View {
         content
@@ -2285,6 +2363,25 @@ private struct ViewObjectCrudModifiers: ViewModifier {
                     },
                     onCancel: { addViewObjectSheetVisible = false }
                 )
+            }
+            .sheet(isPresented: $renameObjectSheetVisible) {
+                if let oldName = pendingRenameObjectOldName {
+                    RenameGroupSheet(
+                        oldName: oldName,
+                        existingNames: Set(existingNames.filter { $0 != oldName }),
+                        onRename: { newName in
+                            onRenameObject(oldName, newName)
+                            renameObjectSheetVisible = false
+                            pendingRenameObjectOldName = nil
+                        },
+                        onCancel: {
+                            renameObjectSheetVisible = false
+                            pendingRenameObjectOldName = nil
+                        },
+                        sanitize: sanitizeName,
+                        kindLabel: "Object"
+                    )
+                }
             }
             .alert(deleteTitle,
                    isPresented: Binding(
@@ -2444,17 +2541,22 @@ private struct GroupCrudModifiers: ViewModifier {
     @Binding var newGroupSheetVisible: Bool
     @Binding var addMemberSheetVisible: Bool
     @Binding var pendingDeleteGroupName: String?
+    @Binding var renameGroupSheetVisible: Bool
+    @Binding var pendingRenameGroupOldName: String?
     let groupNames: [String]
     let modelNames: [String]
     let onCreateGroup: (String) -> Void
     let onAddMembers: ([String]) -> Void
     let onDeleteGroup: (String) -> Void
+    let onRenameGroup: (String, String) -> Void
     let selectedGroupName: String?
     let currentMembers: Set<String>
     /// J-9 — bridge lookup so the AddMemberSheet's tree can lazily
     /// fetch submodels for a parent. Captured at the call site so
     /// the sheet itself doesn't need a view-model handle.
     let submodelsFor: (String) -> [String]
+    /// J-16 — name sanitizer (wraps `Model::SafeModelName`).
+    let sanitizeName: (String) -> String
 
     func body(content: Content) -> some View {
         content
@@ -2462,16 +2564,12 @@ private struct GroupCrudModifiers: ViewModifier {
                 NewGroupSheet(
                     existingNames: Set(groupNames + modelNames),
                     onCreate: onCreateGroup,
-                    onCancel: { newGroupSheetVisible = false }
+                    onCancel: { newGroupSheetVisible = false },
+                    sanitize: sanitizeName
                 )
             }
             .sheet(isPresented: $addMemberSheetVisible) {
                 if let groupName = selectedGroupName {
-                    // Candidates = every visible model whose top-
-                    // level name isn't already a direct group
-                    // member. Submodels live inside the tree and
-                    // are filtered separately (an "already a
-                    // member" hint is shown but they still appear).
                     let candidates = modelNames.filter { !currentMembers.contains($0) }
                     AddMemberSheet(
                         groupName: groupName,
@@ -2480,6 +2578,30 @@ private struct GroupCrudModifiers: ViewModifier {
                         submodelsFor: submodelsFor,
                         onAdd: onAddMembers,
                         onCancel: { addMemberSheetVisible = false }
+                    )
+                }
+            }
+            .sheet(isPresented: $renameGroupSheetVisible) {
+                if let oldName = pendingRenameGroupOldName {
+                    // Exclude the current name from the
+                    // collision set (computed inline via filter
+                    // so the closure stays expression-only and
+                    // SwiftUI's ViewBuilder is happy).
+                    RenameGroupSheet(
+                        oldName: oldName,
+                        existingNames: Set(
+                            (groupNames + modelNames).filter { $0 != oldName }
+                        ),
+                        onRename: { newName in
+                            onRenameGroup(oldName, newName)
+                            renameGroupSheetVisible = false
+                            pendingRenameGroupOldName = nil
+                        },
+                        onCancel: {
+                            renameGroupSheetVisible = false
+                            pendingRenameGroupOldName = nil
+                        },
+                        sanitize: sanitizeName
                     )
                 }
             }
@@ -2498,6 +2620,99 @@ private struct GroupCrudModifiers: ViewModifier {
 
     private var deleteAlertTitle: String {
         "Delete \(pendingDeleteGroupName ?? "")?"
+    }
+}
+
+/// J-16 / J-17 — generic rename sheet. Used for both ModelGroup
+/// and ViewObject renames; the `kindLabel` parameter swaps "Group"
+/// vs. "Object" in the title and description text. Mirrors
+/// NewGroupSheet's UX (text field + collision check + Cancel /
+/// Rename buttons) but pre-fills with the current name.
+private struct RenameGroupSheet: View {
+    let oldName: String
+    let existingNames: Set<String>
+    let onRename: (String) -> Void
+    let onCancel: () -> Void
+    let sanitize: (String) -> String
+    /// "Group" / "Object" — used in the navigation title and the
+    /// description footer. Defaults to "Group" for backwards
+    /// compatibility with J-16 group-rename call sites.
+    var kindLabel: String = "Group"
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String = ""
+    @FocusState private var nameFocused: Bool
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private var sanitizedName: String { sanitize(trimmedName) }
+    private var nameChanged: Bool { sanitizedName != trimmedName }
+    private var collision: Bool {
+        !sanitizedName.isEmpty && existingNames.contains(sanitizedName)
+    }
+    private var canRename: Bool {
+        !sanitizedName.isEmpty && !collision && sanitizedName != oldName
+    }
+    private var footerText: String {
+        if kindLabel == "Group" {
+            return "Other groups that reference this one (and any sequences targeting it) update their references automatically. Save the layout to persist."
+        }
+        return "References to this view object update automatically. Save the layout to persist."
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Old Name") {
+                    Text(oldName)
+                        .foregroundStyle(.secondary)
+                }
+                Section("New Name") {
+                    TextField("Group name", text: $name)
+                        .focused($nameFocused)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.words)
+                }
+                if nameChanged && !sanitizedName.isEmpty {
+                    Section {
+                        Label("Will save as \"\(sanitizedName)\"",
+                               systemImage: "info.circle")
+                            .foregroundStyle(.blue)
+                        Text("These characters can't appear in group names: , ~ ! ; < > \" ' & : | @ / \\")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if collision {
+                    Section {
+                        Label("\"\(sanitizedName)\" is already in use",
+                               systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Section {
+                    Text(footerText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Rename \(kindLabel)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onCancel() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Rename") { onRename(sanitizedName) }
+                        .disabled(!canRename)
+                }
+            }
+            .onAppear {
+                name = oldName
+                nameFocused = true
+            }
+        }
+        .presentationDetents([.medium])
     }
 }
 
@@ -2635,6 +2850,7 @@ private struct LayoutEditorGroupPropertiesView: View {
     let onRemoveMember: (_ memberName: String) -> Void
     let onAddMember: () -> Void
     let onReorderMembers: (_ newOrder: [String]) -> Void
+    let onRenameRequest: () -> Void
 
     /// J-10 — drag-target tracking for the manual VStack member
     /// list. Storing the dragged name + hovered index here lets us
@@ -2646,7 +2862,21 @@ private struct LayoutEditorGroupPropertiesView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            row("Name") { Text(groupName).truncationMode(.middle) }
+            row("Name") {
+                HStack(spacing: 6) {
+                    Text(groupName)
+                        .truncationMode(.middle)
+                    Button {
+                        onRenameRequest()
+                    } label: {
+                        Image(systemName: "pencil")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Rename group")
+                }
+            }
             row("Type") { Text(summary["displayAs"] as? String ?? "ModelGroup") }
             row("Layout group") { layoutGroupPicker }
             row("Locked") {
@@ -3125,6 +3355,8 @@ private struct LayoutEditorObjectPropertiesView: View {
     let token: Int
     let commit: (_ key: String, _ value: Any) -> Void
     let onPickFile: (_ key: String, _ accepting: [UTType]) -> Void
+    let onRenameRequest: () -> Void
+    let onDuplicate: () -> Void
 
     @State private var expandedTypeProps: Bool = true
     @State private var expandedAppearance: Bool = false
@@ -3135,7 +3367,30 @@ private struct LayoutEditorObjectPropertiesView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            row("Name") { Text(objectName).truncationMode(.middle) }
+            row("Name") {
+                HStack(spacing: 6) {
+                    Text(objectName)
+                        .truncationMode(.middle)
+                    Button {
+                        onRenameRequest()
+                    } label: {
+                        Image(systemName: "pencil")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Rename object")
+                    Button {
+                        onDuplicate()
+                    } label: {
+                        Image(systemName: "plus.square.on.square")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Duplicate object")
+                }
+            }
             row("Type") { Text(summary["displayAs"] as? String ?? "—") }
 
             if typeKind != "other" {
@@ -3673,6 +3928,10 @@ private struct NewGroupSheet: View {
     let existingNames: Set<String>
     let onCreate: (String) -> Void
     let onCancel: () -> Void
+    /// J-16 — sanitizer lookup (wraps `Model::SafeModelName` via
+    /// the bridge). Lets the sheet show a live preview of what
+    /// illegal characters will be stripped on commit.
+    let sanitize: (String) -> String
     @Environment(\.dismiss) private var dismiss
     @State private var name: String = ""
     @FocusState private var nameFocused: Bool
@@ -3680,11 +3939,13 @@ private struct NewGroupSheet: View {
     private var trimmedName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+    private var sanitizedName: String { sanitize(trimmedName) }
+    private var nameChanged: Bool { sanitizedName != trimmedName }
     private var collision: Bool {
-        !trimmedName.isEmpty && existingNames.contains(trimmedName)
+        !sanitizedName.isEmpty && existingNames.contains(sanitizedName)
     }
     private var canCreate: Bool {
-        !trimmedName.isEmpty && !collision
+        !sanitizedName.isEmpty && !collision
     }
 
     var body: some View {
@@ -3696,9 +3957,19 @@ private struct NewGroupSheet: View {
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.words)
                 }
+                if nameChanged && !sanitizedName.isEmpty {
+                    Section {
+                        Label("Will save as \"\(sanitizedName)\"",
+                               systemImage: "info.circle")
+                            .foregroundStyle(.blue)
+                        Text("These characters can't appear in group names: , ~ ! ; < > \" ' & : | @ / \\")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 if collision {
                     Section {
-                        Label("\"\(trimmedName)\" is already in use",
+                        Label("\"\(sanitizedName)\" is already in use",
                                systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
                     }
@@ -3717,7 +3988,7 @@ private struct NewGroupSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
-                        onCreate(trimmedName)
+                        onCreate(sanitizedName)
                     }
                     .disabled(!canCreate)
                 }
