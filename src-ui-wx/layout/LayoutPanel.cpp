@@ -1346,7 +1346,8 @@ void LayoutPanel::OnPropertyGridChange(wxPropertyGridEvent& event) {
                         }
                     }
                     std::string oldname = selectedModel->name;
-                    if (oldname != safename) {
+                    bool nameChanged = (oldname != safename);
+                    if (nameChanged) {
                         RenameModelInTree(selectedModel, safename);
                         selectedBaseObject = nullptr;
                         xlights->RenameModel(oldname, safename);
@@ -1354,7 +1355,10 @@ void LayoutPanel::OnPropertyGridChange(wxPropertyGridEvent& event) {
                             lastModelName = safename;
                         }
                     }
-                    xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RGBEFFECTS_CHANGE |
+                    uint32_t extraWork = (nameChanged && !ModelMatchesFilter(selectedModel))
+                                        ? OutputModelManager::WORK_RELOAD_ALLMODELS : 0;
+                    xlights->GetOutputModelManager()->AddASAPWork(extraWork |
+                                                                  OutputModelManager::WORK_RGBEFFECTS_CHANGE |
                                                                   OutputModelManager::WORK_MODELS_CHANGE_REQUIRING_RERENDER |
                                                                   OutputModelManager::WORK_CALCULATE_START_CHANNELS, "LayoutPanel::OnPropertyGridChange::ModelName", nullptr, nullptr, safename);
                 }
@@ -3222,7 +3226,7 @@ void LayoutPanel::SelectBaseObject(const std::string & name, bool highlight_tree
         }
         if (m != nullptr && m != selectedBaseObject)
         {
-            SelectModelInTree(m);
+            SelectModelInTree(m, true);
         }
     } else {
         ViewObject *v = xlights->AllObjects[name];
@@ -7129,8 +7133,8 @@ Model* LayoutPanel::GetModelFromTreeItem(wxTreeListItem treeItem) {
 }
 
 // Select a Model in the tree, currently only selects top level model if found
-void LayoutPanel::SelectModelInTree(Model* modelToSelect) {
-    if (modelToSelect != nullptr && !_filterString.IsEmpty() && !ModelMatchesFilter(modelToSelect)) {
+void LayoutPanel::SelectModelInTree(Model* modelToSelect, bool preserveFilter) {
+    if (!preserveFilter && modelToSelect != nullptr && !_filterString.IsEmpty() && !ModelMatchesFilter(modelToSelect)) {
         wxCommandEvent dummy;
         OnModelFilterCancelBtn(dummy);
     }
