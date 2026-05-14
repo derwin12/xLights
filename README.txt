@@ -11,6 +11,13 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.09  May ??, 2026
+    -bug (dkulp)                OpenGL (Windows): check the LoadGLFunctions return value before initializing
+                                shaders, and check every required GL entry point (not just glCreateShader)
+                                inside ShaderProgram::Init.
+    -bug (dkulp)                EffectsPanel::SetDefaultEffectValues: null-check effectManager and
+                                effectPanelManager before iterating.
+    -bug (dkulp)                LayoutPanel::FinalizeModel: null-check the dynamic_cast<PolyLineModel*> of
+                                _newModel before calling ClearPolyLineCreate/GetNumHandles. 
     -bug (dkulp)                LayoutPanel: null-check event.GetProperty() in OnPropertyGridChanging.
                                 wxPropertyGrid can fire CHANGING with a null property during a grid rebuild
                                 (the prior selection was already detached); the three CreateUndoPoint call

@@ -4738,12 +4738,23 @@ void LayoutPanel::FinalizeModel()
     }
     if (m_polyline_active && m_polyline_create_handle > 1) {
         Model *m = _newModel;
-        if (m != nullptr)
+        // dynamic_cast below returns null when _newModel isn't a polyline,
+        // but m_polyline_active was true. That state invariant (polyline-
+        // active <=> _newModel is a polyline) can drift when an
+        // in-progress create gets interrupted — e.g. selectedButton swaps
+        // mid-gesture, an error path nulls _newModel, or _newModel is
+        // re-assigned to a different model type without resetting
+        // m_polyline_active. Top Windows crash bucket as of 2026.08: 20
+        // reports across 2 reporters all hit the unguarded
+        // plm->ClearPolyLineCreate() below. Fall through to the normal
+        // state cleanup at the bottom of the function so we don't leave
+        // the polyline flags set.
+        PolyLineModel* plm = dynamic_cast<PolyLineModel*>(m);
+        if (m != nullptr && plm != nullptr)
         {
             xlights->AddTraceMessage("LayoutPanel::FinalizeModel Polyline deleting handle.");
             m->DeleteHandle(m_polyline_create_handle);
 
-            auto plm = dynamic_cast<PolyLineModel*>(m);
             plm->ClearPolyLineCreate(); // disable the auto-distribute node feature
             if (plm->GetNumHandles() < 2) {
                 // If we end up with less than 2 points then we destroy the polyline
@@ -4755,6 +4766,8 @@ void LayoutPanel::FinalizeModel()
                 xlights->GetOutputModelManager()->AddASAPWork(OutputModelManager::WORK_RELOAD_ALLMODELS |
                                                               OutputModelManager::WORK_REDRAW_LAYOUTPREVIEW, "FinalizeModel");
             }
+        } else if (m != nullptr) {
+            spdlog::warn("LayoutPanel::FinalizeModel: m_polyline_active true but _newModel is not a PolyLineModel (got '{}'); clearing polyline state.", m->GetName());
         }
     }
     m_moving_handle = false;
