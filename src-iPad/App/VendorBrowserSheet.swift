@@ -66,18 +66,28 @@ struct VendorBrowserSheet: View {
     private func startLoad() async {
         let c = XLVendorCatalog()
         catalog = c
+        // The bridge (XLVendorCatalog.mm) dispatches both progress
+        // and completion blocks to the main queue, but the imported
+        // Objective-C blocks are `@Sendable` from Swift's view —
+        // hop back onto the MainActor explicitly so mutating @State
+        // and reading `c` (a non-Sendable class) is well-formed.
+        nonisolated(unsafe) let catalogRef = c
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            c.load(progress: { pct, label in
-                loadPercent = Int(pct)
-                loadLabel = label
-            }, completion: { errorMessage in
-                if let err = errorMessage {
-                    loadError = err
-                } else {
-                    vendors = XLVendor.parseAll(c.vendors)
+            catalogRef.load(progress: { pct, label in
+                MainActor.assumeIsolated {
+                    loadPercent = Int(pct)
+                    loadLabel = label
                 }
-                isLoading = false
-                continuation.resume()
+            }, completion: { errorMessage in
+                MainActor.assumeIsolated {
+                    if let err = errorMessage {
+                        loadError = err
+                    } else {
+                        vendors = XLVendor.parseAll(catalogRef.vendors)
+                    }
+                    isLoading = false
+                    continuation.resume()
+                }
             })
         }
     }
@@ -343,6 +353,12 @@ private struct ModelDetailView: View {
         }
         guard downloadingWiringId == nil else { return }
         downloadingWiringId = wiring.id
+        // Bridge dispatches completion to the main queue; hop back
+        // onto the MainActor so mutating the binding and invoking
+        // the parent's @MainActor-isolated callbacks is well-formed
+        // under Swift 6 strict concurrency.
+        nonisolated(unsafe) let onDownloaded = self.onDownloaded
+        nonisolated(unsafe) let onError = self.onError
         catalog?.downloadWiringXmodel(
             fromURL: wiring.xmodelLink,
             pixelDescription: model.pixelDescription,
@@ -351,11 +367,13 @@ private struct ModelDetailView: View {
             widthMM: wiring.modelWidthMM,
             heightMM: wiring.modelHeightMM,
             depthMM: wiring.modelDepthMM) { localPath, errorMessage in
-                downloadingWiringId = nil
-                if let path = localPath {
-                    onDownloaded(path)
-                } else if let err = errorMessage {
-                    onError(err)
+                MainActor.assumeIsolated {
+                    downloadingWiringId = nil
+                    if let path = localPath {
+                        onDownloaded(path)
+                    } else if let err = errorMessage {
+                        onError(err)
+                    }
                 }
             }
     }

@@ -929,6 +929,160 @@ NS_ASSUME_NONNULL_BEGIN
 // model isn't present.
 - (BOOL)deleteModel:(NSString*)modelName;
 
+// Phase J-5 (sidebar tabs) — ModelGroups visible in the active
+// layout group. Names only, in the same order as
+// `modelsInActiveLayoutGroup` (alphabetical by ModelManager map
+// iteration). Excludes regular Models; only entries whose
+// DisplayAs == ModelGroup land here.
+- (NSArray<NSString*>*)modelGroupsInActiveLayoutGroup;
+
+// Per-ModelGroup summary. Keys mirror `modelLayoutSummary` where
+// the underlying BaseObject exposes the same field, plus group-
+// specific entries. All keys NSString unless noted:
+//   "name"           — NSString (display name)
+//   "displayAs"      — NSString ("ModelGroup")
+//   "layoutGroup"    — NSString
+//   "modelCount"     — NSNumber (int, immediate child count)
+//   "models"         — NSArray<NSString*> (immediate child names,
+//                      in declared order)
+//   "defaultCamera"  — NSString
+//   "layout"         — NSString (group preview layout style)
+//   "gridSize"       — NSNumber (int)
+//   "centerX"/"centerY" — NSNumber (double, 2D group centre)
+//   "centerDefined"  — NSNumber (BOOL)
+//   "locked"         — NSNumber (BOOL)
+- (nullable NSDictionary<NSString*, id>*)modelGroupLayoutSummary:(NSString*)name;
+
+// Set a property on a ModelGroup. Supported keys (J-5 + J-9):
+// "layoutGroup", "locked", "defaultCamera", "layout", "gridSize"
+// (NSNumber int), "centerX"/"centerY" (NSNumber double),
+// "tagColor" (NSString hex), "members" (NSArray<NSString*> —
+// replaces the full member list, used for drag-to-reorder).
+// Returns NO for unknown groups, unknown keys, or no-op writes.
+// Mutations are staged + saved through the same path as models.
+- (BOOL)setLayoutModelGroupProperty:(NSString*)name
+                                key:(NSString*)key
+                              value:(id)value;
+
+// J-9 (group CRUD) — full submodel name list for `modelName`, in
+// declared order. Returns names in the canonical "Parent/Sub"
+// form (matches `ModelGroup::AddModel` membership conventions).
+// Empty array for unknown / non-Model targets, or models with
+// no submodels. Used by the Add Member sheet to surface
+// submodels for selection alongside top-level models.
+- (NSArray<NSString*>*)submodelsForModel:(NSString*)modelName;
+
+// Phase J-5 (sidebar tabs) — ViewObjects visible in the active
+// layout group. Names of every view object whose layout_group
+// matches the active group (or "All Previews"), in
+// ViewObjectManager iteration order.
+- (NSArray<NSString*>*)viewObjectsInActiveLayoutGroup;
+
+// Per-ViewObject summary. Keys mirror `modelLayoutSummary` where
+// the underlying BaseObject exposes the same field. All keys
+// NSString unless noted:
+//   "name"           — NSString
+//   "displayAs"      — NSString (object type, e.g. "Mesh", "Image")
+//   "layoutGroup"    — NSString
+//   "centerX"/"Y"/"Z" — NSNumber (double)
+//   "width"/"height"/"depth" — NSNumber (double)
+//   "rotateX"/"Y"/"Z" — NSNumber (double, degrees)
+//   "locked"         — NSNumber (BOOL)
+// Editable in J-6 (view-object save patcher landed). Supported
+// keys via `setLayoutViewObjectProperty:`:
+//   "centerX"/"Y"/"Z", "rotateX"/"Y"/"Z", "locked", "layoutGroup",
+//   "width"/"height"/"depth".
+- (nullable NSDictionary<NSString*, id>*)viewObjectLayoutSummary:(NSString*)name;
+
+// J-6 — mutate a single property on a view object. Returns YES
+// iff the value changed. Marks the object dirty for save (the
+// patcher rewrites WorldPos/Scale/Rotate/Locked/LayoutGroup
+// attributes on the `<view_object>` XML element).
+- (BOOL)setLayoutViewObjectProperty:(NSString*)name
+                                key:(NSString*)key
+                              value:(id)value;
+
+// J-12 — view object lifecycle. Type strings accepted by
+// `ViewObjectManager::CreateAndAddObject`: "Gridlines",
+// "Image", "Mesh", "Terrain", "Ruler". Names are auto-generated
+// by the manager (e.g. "Gridlines-1"). Returns the generated
+// name on success, nil on failure (invalid type / Ruler when
+// one already exists).
+- (nullable NSString*)createViewObjectWithType:(NSString*)type;
+
+// Delete a view object. Returns NO if the name doesn't resolve.
+// Background pseudo-object is never deletable.
+- (BOOL)deleteViewObject:(NSString*)name;
+
+// J-12 — types accepted by `createViewObjectWithType:`. Ruler
+// is filtered out when one already exists in the show (it's a
+// singleton). Order matches desktop's Objects → Add menu.
+- (NSArray<NSString*>*)availableViewObjectTypes;
+
+// J-7 (group CRUD) — model group lifecycle. Each method returns
+// YES on success, NO on validation failures (unknown names,
+// duplicate names, attempts to add a model to its own ancestor
+// group, …) and marks the group dirty / created / deleted as
+// appropriate for the next `saveLayoutChanges`.
+
+// Append `modelName` to `groupName`'s member list. No-op if the
+// model is already a direct member. Does NOT recurse — adding a
+// group to a group adds the group as a member, not its
+// children. Returns NO for unknown group/model.
+- (BOOL)addModel:(NSString*)modelName
+         toGroup:(NSString*)groupName;
+
+// Remove `modelName` from `groupName`'s member list. No-op if
+// not a member.
+- (BOOL)removeModel:(NSString*)modelName
+          fromGroup:(NSString*)groupName;
+
+// Create a new ModelGroup in the active layout group with the
+// curated defaults (layout="minimalGrid", gridSize=400,
+// DefaultCamera="2D"). Initial member list is `initialMembers`
+// (may be empty). Returns NO if `groupName` collides with an
+// existing model / group.
+- (BOOL)createModelGroup:(NSString*)groupName
+                  members:(nullable NSArray<NSString*>*)initialMembers;
+
+// Delete a ModelGroup. Returns NO if `groupName` doesn't resolve
+// to a ModelGroup. Any reference to the group elsewhere (other
+// groups containing this one) is NOT cleaned up — Reset on the
+// next layout reload handles it (matches desktop behaviour).
+- (BOOL)deleteModelGroup:(NSString*)groupName;
+
+// Phase J-6 (per-type properties) — descriptors for a model's
+// type-specific surface (Tree branches, Matrix strings, Star
+// points, etc.). Empty array if the model's type is unsupported
+// in this build.
+//
+// Each entry is an NSDictionary with these keys:
+//   "key"     — NSString stable id (matches desktop wxprop names
+//                so the iPad and desktop XML stay in sync).
+//   "label"   — NSString display name.
+//   "kind"    — NSString one of "int" | "double" | "bool" |
+//                "enum" | "string".
+//   "value"   — NSNumber for int/double/bool/enum (enum carries
+//                its option index); NSString for "string".
+//   "min"/"max" — NSNumber (optional, for int/double).
+//   "step"    — NSNumber (optional, for double).
+//   "precision" — NSNumber (optional, decimal places for double).
+//   "options" — NSArray<NSString*> (for enum).
+//   "enabled" — NSNumber (BOOL, optional, defaults YES).
+//   "help"    — NSString (optional one-liner).
+//   "group"   — NSString (optional section header for grouping).
+- (NSArray<NSDictionary*>*)perTypePropertiesForModel:(NSString*)modelName;
+
+// Set a per-type property by `key` (one of the keys returned by
+// `perTypePropertiesForModel:`). `value` is NSNumber for
+// int/double/bool/enum (enum carries the index), NSString for
+// "string". Returns YES iff the value changed. Triggers
+// `Reinitialize()` on the model so geometry / node count updates
+// reflect immediately, and marks the model dirty for save.
+- (BOOL)setPerTypeProperty:(NSString*)key
+                   onModel:(NSString*)modelName
+                     value:(id)value;
+
 // YES iff at least one layout-property edit is staged in memory
 // and not yet persisted. The Layout Editor uses this to gate a
 // "Save" button + warn-on-close.

@@ -1,6 +1,29 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// J-5 (sidebar tabs) — Layout Editor left-pane roster picker.
+/// Controllers tab is intentionally omitted in J-5; iPad doesn't
+/// yet have a controller editor and surfacing the tab with no UI
+/// behind it would be a regression in clarity.
+enum LayoutSidebarTab: String, CaseIterable, Identifiable {
+    case models, groups, objects
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .models: return "Models"
+        case .groups: return "Groups"
+        case .objects: return "Objects"
+        }
+    }
+    var systemImage: String {
+        switch self {
+        case .models: return "cube"
+        case .groups: return "square.stack.3d.up"
+        case .objects: return "scribble.variable"
+        }
+    }
+}
+
 /// Phase J-0 / J-1 — Layout Editor screen. Opens via Tools → Edit
 /// Layout… in its own `WindowGroup("layout-editor")` scene. The
 /// user picks a layout group, sees its models in a Metal canvas,
@@ -77,6 +100,54 @@ struct LayoutEditorView: View {
     /// J-4 (download) — drives the vendor catalog browser sheet.
     @State private var downloadBrowserVisible: Bool = false
 
+    /// J-5 (sidebar tabs) — which roster the top half of the sidebar
+    /// shows. Each tab keeps its own selection so flipping tabs to
+    /// inspect a group or object doesn't lose the model selection
+    /// driving the canvas.
+    @State private var sidebarTab: LayoutSidebarTab = .models
+    /// J-5 — fraction of the sidebar's height occupied by the top
+    /// roster (list). The bottom (property pane) takes the rest.
+    /// Persists per-session via @State; clamped to [0.2, 0.8] by the
+    /// divider's drag handler so neither pane vanishes.
+    @State private var sidebarTopFraction: CGFloat = 0.45
+    /// J-5 — Groups roster. The selection itself lives on the
+    /// view model (`layoutEditorSelectedGroup`) so PreviewPaneView
+    /// can sync it to the canvas tint.
+    @State private var groupNames: [String] = []
+    /// J-5 — ViewObjects roster. Selection on the view model so
+    /// the canvas picks up handles.
+    @State private var objectNames: [String] = []
+    /// J-5 — search text per tab. Reset on editor close.
+    @State private var modelFilter: String = ""
+    @State private var groupFilter: String = ""
+    @State private var objectFilter: String = ""
+
+    /// J-7 (group CRUD) — sheet visibility flags + targets.
+    @State private var newGroupSheetVisible: Bool = false
+    @State private var addMemberSheetVisible: Bool = false
+    @State private var pendingDeleteGroupName: String? = nil
+
+    /// J-7 (multi-select) — when true, the next NewGroupSheet
+    /// "Create" passes the current selection as the initial member
+    /// list instead of creating an empty group. Cleared after use.
+    @State private var pendingGroupFromSelection: [String]? = nil
+
+    /// J-8 — file picker for the 2D Background image.
+    @State private var backgroundImagePickerVisible: Bool = false
+
+    /// J-12 — generic view-object file picker (Mesh `.obj`,
+    /// Image bitmap, Terrain image). `pendingObjectFilePickKey`
+    /// tracks which property key to write on completion;
+    /// `objectFilePickerTypes` controls the allowed UTTypes.
+    @State private var objectFilePickerVisible: Bool = false
+    @State private var objectFilePickerTypes: [UTType] = []
+    @State private var pendingObjectFilePickKey: String? = nil
+
+    /// J-12 — Add View Object sheet visibility.
+    @State private var addViewObjectSheetVisible: Bool = false
+    /// J-12 — pending delete confirmation for a view object.
+    @State private var pendingDeleteObjectName: String? = nil
+
     /// J-4 (import) — UTTypes the .fileImporter accepts. Declared
     /// as a static so the SwiftUI type-checker can resolve the
     /// `[UTType]` literal in reasonable time (the `?? .data` chain
@@ -86,6 +157,76 @@ struct LayoutEditorView: View {
             UTType(filenameExtension: $0)
         }
     }()
+
+    /// J-12 — Add-View-Object sheet → bridge create. Auto-
+    /// selects the new object so the property pane opens on
+    /// the right summary.
+    private func handleCreateViewObject(_ type: String) {
+        addViewObjectSheetVisible = false
+        guard let name = viewModel.document.createViewObject(withType: type) else { return }
+        viewModel.layoutEditorSelectedObject = name
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        refreshModelList()
+        NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                         object: "LayoutEditor",
+                                         userInfo: ["model": name])
+    }
+
+    /// J-12 — Delete-confirmation alert → bridge delete.
+    private func handleDeleteViewObject(_ name: String) {
+        guard viewModel.document.deleteViewObject(name) else { return }
+        if viewModel.layoutEditorSelectedObject == name {
+            viewModel.layoutEditorSelectedObject = nil
+        }
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        refreshModelList()
+        NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                         object: "LayoutEditor",
+                                         userInfo: ["model": name])
+    }
+
+    /// J-12 — Per-type file picker completion. Routes the picked
+    /// path back through commitObjectProperty under whatever key
+    /// the property pane stashed in `pendingObjectFilePickKey`.
+    private func handleObjectFilePick(_ result: Result<[URL], Error>) {
+        let key = pendingObjectFilePickKey ?? ""
+        pendingObjectFilePickKey = nil
+        guard !key.isEmpty,
+              let name = viewModel.layoutEditorSelectedObject else { return }
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let granted = url.startAccessingSecurityScopedResource()
+            let path = url.path
+            _ = XLSequenceDocument.obtainAccess(toPath: path, enforceWritable: false)
+            if granted { url.stopAccessingSecurityScopedResource() }
+            commitObjectProperty(objectName: name, key: key, value: path as NSString)
+        case .failure(let err):
+            saveErrorMessage = err.localizedDescription
+        }
+    }
+
+    /// J-8 — `.fileImporter` completion for the 2D Background
+    /// image. Same security-scoped access dance as the model
+    /// importer: start access, persist the bookmark via
+    /// ObtainAccessToURL, stop access, then push the path
+    /// through the regular object-property commit so the
+    /// summaryToken bumps and the canvas repaints.
+    private func handleBackgroundImagePick(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let granted = url.startAccessingSecurityScopedResource()
+            let path = url.path
+            _ = XLSequenceDocument.obtainAccess(toPath: path, enforceWritable: false)
+            if granted { url.stopAccessingSecurityScopedResource() }
+            commitObjectProperty(objectName: "2D Background",
+                                 key: "backgroundImage",
+                                 value: path as NSString)
+        case .failure(let err):
+            saveErrorMessage = err.localizedDescription
+        }
+    }
 
     /// J-4 (import) — `.fileImporter` completion. Stashes the
     /// picked path for the next canvas-tap to consume.
@@ -134,6 +275,14 @@ struct LayoutEditorView: View {
             } else {
                 viewModel.layoutEditorSelection.removeAll()
             }
+            // J-6 — clear group / object picks so a re-open starts
+            // clean (matches model-selection lifecycle).
+            viewModel.layoutEditorSelectedGroup = nil
+            viewModel.layoutEditorSelectedObject = nil
+            // J-13 — exit any active terrain edit session so the
+            // next open doesn't paint heightmap data on the first
+            // tap.
+            viewModel.terrainEditTarget = nil
         }
         .onChange(of: viewModel.isShowFolderLoaded) { _, _ in refresh() }
         .onChange(of: activeLayoutGroup) { _, newValue in
@@ -151,6 +300,7 @@ struct LayoutEditorView: View {
                 }
             }
         }
+        .modifier(SidebarSelectionMutex(sidebarTab: $sidebarTab))
         .focusable()
         // J-2 — keyboard nudge for the selected model. Arrow keys
         // move 1 unit, shift+arrow moves 10. Pushed undo per nudge
@@ -240,6 +390,21 @@ struct LayoutEditorView: View {
                 downloadBrowserVisible = false
             })
         }
+        .modifier(GroupCrudModifiers(
+            newGroupSheetVisible: $newGroupSheetVisible,
+            addMemberSheetVisible: $addMemberSheetVisible,
+            pendingDeleteGroupName: $pendingDeleteGroupName,
+            groupNames: groupNames,
+            modelNames: modelNames,
+            onCreateGroup: handleCreateGroup,
+            onAddMembers: handleAddMembers,
+            onDeleteGroup: handleDeleteGroup,
+            selectedGroupName: viewModel.layoutEditorSelectedGroup,
+            currentMembers: selectedGroupMembers,
+            submodelsFor: { parent in
+                viewModel.document.submodels(forModel: parent)
+            }
+        ))
         // J-4 (import) — .xmodel file picker. iPadOS's
         // `.fileImporter` is the SwiftUI-native wrapping of
         // UIDocumentPickerViewController; the resulting URL has
@@ -250,6 +415,23 @@ struct LayoutEditorView: View {
                       allowedContentTypes: Self.importableModelTypes,
                       allowsMultipleSelection: false,
                       onCompletion: handleImportPick)
+        // J-8 — 2D Background image picker. Accepts common image
+        // formats; the bridge calls `ObtainAccessToURL` so the
+        // sandbox bookmark persists across launches.
+        .fileImporter(isPresented: $backgroundImagePickerVisible,
+                      allowedContentTypes: [.png, .jpeg, .tiff, .bmp, .gif, .image],
+                      allowsMultipleSelection: false,
+                      onCompletion: handleBackgroundImagePick)
+        .modifier(ViewObjectCrudModifiers(
+            objectFilePickerVisible: $objectFilePickerVisible,
+            objectFilePickerTypes: objectFilePickerTypes,
+            addViewObjectSheetVisible: $addViewObjectSheetVisible,
+            pendingDeleteObjectName: $pendingDeleteObjectName,
+            availableTypes: viewModel.document.availableViewObjectTypes(),
+            onCreateObject: handleCreateViewObject,
+            onDeleteObject: handleDeleteViewObject,
+            onFilePicked: handleObjectFilePick
+        ))
         .alert("Import failed",
                isPresented: Binding(get: { importErrorMessage != nil },
                                     set: { if !$0 { importErrorMessage = nil } })) {
@@ -299,54 +481,486 @@ struct LayoutEditorView: View {
         }
     }
 
-    // MARK: - Sidebar
+    // MARK: - Sidebar (J-5: vertical split, tabbed roster + property pane)
 
     @ViewBuilder
     private var sidebar: some View {
-        List(selection: bindingSelection) {
-            Section("Models in \(activeLayoutGroup) (\(modelNames.count))") {
-                ForEach(modelNames, id: \.self) { name in
-                    Text(name)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .tag(name)
+        GeometryReader { geo in
+            let total = geo.size.height
+            let topHeight = max(120, min(total - 160, total * sidebarTopFraction))
+            VStack(spacing: 0) {
+                rosterPane
+                    .frame(height: topHeight)
+                sidebarDivider(totalHeight: total)
+                propertyPane
+                    .frame(maxHeight: .infinity)
+            }
+        }
+    }
+
+    /// Top half: tab picker + search + filtered list. The list's
+    /// selection is routed back to the right `@State` via
+    /// `rosterSelectionBinding` so each tab keeps its own.
+    @ViewBuilder
+    private var rosterPane: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $sidebarTab) {
+                ForEach(LayoutSidebarTab.allCases) { tab in
+                    Label(tab.label, systemImage: tab.systemImage).tag(tab)
                 }
             }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 8)
+            .padding(.top, 6)
+            .padding(.bottom, 4)
 
-            if let selectedName = viewModel.layoutEditorSelectedModel,
-               let summary = viewModel.document.modelLayoutSummary(selectedName) {
-                Section("Selected Model") {
-                    LayoutEditorPropertiesView(
-                        modelName: selectedName,
+            // Per-tab search field. Trimming + case-insensitive
+            // contains is enough for the largest realistic show
+            // (~500 models); switch to substring index if it ever
+            // turns into a bottleneck.
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+                TextField("Filter", text: currentFilterBinding)
+                    .textFieldStyle(.plain)
+                    .font(.caption)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                if !currentFilterBinding.wrappedValue.isEmpty {
+                    Button {
+                        currentFilterBinding.wrappedValue = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
+
+            rosterList
+        }
+    }
+
+    @ViewBuilder
+    private var rosterList: some View {
+        switch sidebarTab {
+        case .models:
+            List(selection: modelListBinding) {
+                Section("\(activeLayoutGroup) (\(filteredModelNames.count)\(modelNames.count != filteredModelNames.count ? " of \(modelNames.count)" : ""))") {
+                    ForEach(filteredModelNames, id: \.self) { name in
+                        Text(name)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .tag(name)
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .overlay {
+                if modelNames.isEmpty {
+                    ContentUnavailableView("No models",
+                                            systemImage: "cube",
+                                            description: Text("This layout group has no models. Tap + on the canvas to add one."))
+                } else if filteredModelNames.isEmpty {
+                    ContentUnavailableView.search(text: modelFilter)
+                }
+            }
+        case .groups:
+            List(selection: groupListBinding) {
+                Section {
+                    ForEach(filteredGroupNames, id: \.self) { name in
+                        Text(name)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .tag(name)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) {
+                                    pendingDeleteGroupName = name
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
+                    }
+                } header: {
+                    HStack(spacing: 6) {
+                        Text("Groups (\(filteredGroupNames.count)\(groupNames.count != filteredGroupNames.count ? " of \(groupNames.count)" : ""))")
+                        Spacer()
+                        Button {
+                            newGroupSheetVisible = true
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("New group")
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .overlay {
+                if groupNames.isEmpty {
+                    ContentUnavailableView {
+                        Label("No groups", systemImage: "square.stack.3d.up")
+                    } description: {
+                        Text("Model groups assigned to \(activeLayoutGroup) or All Previews will appear here.")
+                    } actions: {
+                        Button("Create a Group") {
+                            newGroupSheetVisible = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                } else if filteredGroupNames.isEmpty {
+                    ContentUnavailableView.search(text: groupFilter)
+                }
+            }
+        case .objects:
+            List(selection: objectListBinding) {
+                Section {
+                    ForEach(filteredObjectNames, id: \.self) { name in
+                        // 2D Background is a synthetic pseudo-object;
+                        // skip the delete swipe so the user can't try
+                        // to remove it.
+                        if name == "2D Background" {
+                            Text(name)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .tag(name)
+                        } else {
+                            Text(name)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .tag(name)
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button(role: .destructive) {
+                                        pendingDeleteObjectName = name
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
+                        }
+                    }
+                } header: {
+                    HStack(spacing: 6) {
+                        Text("Objects (\(filteredObjectNames.count)\(objectNames.count != filteredObjectNames.count ? " of \(objectNames.count)" : ""))")
+                        Spacer()
+                        Button {
+                            addViewObjectSheetVisible = true
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("New view object")
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .overlay {
+                // Note: 2D Background pseudo-object always returns
+                // a non-empty array, so the empty-state path here
+                // would only fire if the list were truly empty —
+                // which shouldn't happen unless the show isn't
+                // loaded.
+                if filteredObjectNames.isEmpty && objectNames.isEmpty {
+                    ContentUnavailableView {
+                        Label("No view objects", systemImage: "scribble.variable")
+                    } description: {
+                        Text("Meshes, images, gridlines, terrain, and rulers in this preview will appear here.")
+                    } actions: {
+                        Button("Add a View Object") {
+                            addViewObjectSheetVisible = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                } else if filteredObjectNames.isEmpty {
+                    ContentUnavailableView.search(text: objectFilter)
+                }
+            }
+        }
+    }
+
+    /// Bottom half: scrollable property editor bound to the
+    /// current tab's selection. Empty-state hint when nothing is
+    /// picked. Each tab's selection is independent — switching tabs
+    /// shows the *other* tab's selection's properties.
+    @ViewBuilder
+    private var propertyPane: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            propertyPaneHeader
+            Divider()
+            ScrollView {
+                propertyPaneBody
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+            }
+        }
+        .background(Color(uiColor: .secondarySystemBackground))
+    }
+
+    @ViewBuilder
+    private var propertyPaneHeader: some View {
+        HStack(spacing: 6) {
+            Image(systemName: sidebarTab.systemImage)
+                .foregroundStyle(.secondary)
+                .font(.caption)
+            Text(propertyPaneHeaderText)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+
+    private var propertyPaneHeaderText: String {
+        switch sidebarTab {
+        case .models:
+            return viewModel.layoutEditorSelectedModel.map { "Model: \($0)" } ?? "No model selected"
+        case .groups:
+            return viewModel.layoutEditorSelectedGroup.map { "Group: \($0)" } ?? "No group selected"
+        case .objects:
+            return viewModel.layoutEditorSelectedObject.map { "Object: \($0)" } ?? "No object selected"
+        }
+    }
+
+    @ViewBuilder
+    private var propertyPaneBody: some View {
+        switch sidebarTab {
+        case .models:
+            if let name = viewModel.layoutEditorSelectedModel,
+               let summary = viewModel.document.modelLayoutSummary(name) {
+                // ObjC bridges NSArray<NSDictionary*> as
+                // `[[AnyHashable: Any]]` — coerce keys to String so
+                // the descriptor view's `[[String: Any]]` matches.
+                let rawDescriptors = viewModel.document.perTypeProperties(forModel: name)
+                let descriptors: [[String: Any]] = rawDescriptors.compactMap { entry in
+                    var out: [String: Any] = [:]
+                    for (k, v) in entry {
+                        if let key = k as? String { out[key] = v }
+                    }
+                    return out.isEmpty ? nil : out
+                }
+                LayoutEditorPropertiesView(
+                    modelName: name,
+                    summary: summary,
+                    typeDescriptors: descriptors,
+                    layoutGroups: layoutGroups,
+                    token: summaryToken,
+                    commit: { key, value in
+                        commitProperty(modelName: name, key: key, value: value)
+                    },
+                    typeCommit: { key, value in
+                        commitPerTypeProperty(modelName: name, key: key, value: value)
+                    }
+                )
+                Divider().padding(.vertical, 8)
+                displaySection
+            } else {
+                emptyPropertyHint(
+                    title: "Pick a model",
+                    body: "Tap a model in the list above to edit its position, size, rotation, layout group, and controller mapping."
+                )
+                Divider().padding(.vertical, 8)
+                displaySection
+            }
+        case .groups:
+            if let name = viewModel.layoutEditorSelectedGroup,
+               let summary = viewModel.document.modelGroupLayoutSummary(name) {
+                LayoutEditorGroupPropertiesView(
+                    groupName: name,
+                    summary: summary,
+                    layoutGroups: layoutGroups,
+                    token: summaryToken,
+                    commit: { key, value in
+                        commitGroupProperty(groupName: name, key: key, value: value)
+                    },
+                    onRemoveMember: { memberName in
+                        if viewModel.document.removeModel(memberName, fromGroup: name) {
+                            summaryToken &+= 1
+                            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+                        }
+                    },
+                    onAddMember: { addMemberSheetVisible = true },
+                    onReorderMembers: { newOrder in
+                        commitGroupProperty(groupName: name,
+                                            key: "members",
+                                            value: newOrder as NSArray)
+                    }
+                )
+            } else {
+                emptyPropertyHint(
+                    title: "Pick a group",
+                    body: "Model groups bundle related models together. Tap a group above to inspect its members and edit its layout settings."
+                )
+            }
+        case .objects:
+            if let name = viewModel.layoutEditorSelectedObject,
+               let summary = viewModel.document.viewObjectLayoutSummary(name) {
+                if (summary["isBackground"] as? Bool) ?? false {
+                    LayoutEditorBackgroundPropertiesView(
+                        summary: summary,
+                        token: summaryToken,
+                        commit: { key, value in
+                            commitObjectProperty(objectName: name, key: key, value: value)
+                        },
+                        onPickImage: { backgroundImagePickerVisible = true }
+                    )
+                } else {
+                    LayoutEditorObjectPropertiesView(
+                        objectName: name,
                         summary: summary,
                         layoutGroups: layoutGroups,
                         token: summaryToken,
                         commit: { key, value in
-                            commitProperty(modelName: selectedName,
-                                           key: key, value: value)
+                            commitObjectProperty(objectName: name, key: key, value: value)
+                        },
+                        onPickFile: { key, types in
+                            pendingObjectFilePickKey = key
+                            objectFilePickerTypes = types
+                            objectFilePickerVisible = true
                         }
                     )
                 }
-            }
-
-            Section("Display") {
-                let bg = (displayState["backgroundImage"] as? String) ?? ""
-                LabeledContent("Background", value: bg.isEmpty
-                               ? "—"
-                               : (bg as NSString).lastPathComponent)
-                LabeledContent("Canvas",
-                               value: "\(displayState["previewWidth"] as? Int ?? 0) × \(displayState["previewHeight"] as? Int ?? 0)")
-                LabeledContent("2D centre = 0",
-                               value: (displayState["display2DCenter0"] as? Bool ?? false) ? "Yes" : "No")
-                LabeledContent("Default mode",
-                               value: (displayState["layoutMode3D"] as? Bool ?? true) ? "3D" : "2D")
-                LabeledContent("Grid",
-                               value: gridLabel)
-                LabeledContent("Bounding box",
-                               value: (displayState["display2DBoundingBox"] as? Bool ?? false) ? "On" : "Off")
+            } else {
+                emptyPropertyHint(
+                    title: "Pick a view object",
+                    body: "View objects (meshes, images, gridlines, terrain, rulers) are decorative elements that don't take channels. Tap one to inspect its position and size."
+                )
             }
         }
-        .listStyle(.sidebar)
+    }
+
+    @ViewBuilder
+    private func emptyPropertyHint(title: String, body: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(body)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Display info — moved out of the roster list into the property
+    /// pane's footer so it's always visible without scrolling.
+    @ViewBuilder
+    private var displaySection: some View {
+        // J-8 — Background row moved to the Objects tab's
+        // synthetic "2D Background" entry; rest of the display
+        // properties (canvas size, default mode, grid, bbox) stay
+        // here as a read-only roll-up.
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Display")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            displayRow("Canvas",
+                       value: "\(displayState["previewWidth"] as? Int ?? 0) × \(displayState["previewHeight"] as? Int ?? 0)")
+            displayRow("2D centre = 0",
+                       value: (displayState["display2DCenter0"] as? Bool ?? false) ? "Yes" : "No")
+            displayRow("Default mode",
+                       value: (displayState["layoutMode3D"] as? Bool ?? true) ? "3D" : "2D")
+            displayRow("Grid", value: gridLabel)
+            displayRow("Bounding box",
+                       value: (displayState["display2DBoundingBox"] as? Bool ?? false) ? "On" : "Off")
+        }
+        .font(.caption.monospacedDigit())
+    }
+
+    @ViewBuilder
+    private func displayRow(_ label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Text(value).lineLimit(1).truncationMode(.middle)
+        }
+    }
+
+    /// Draggable divider between the roster pane and the property
+    /// pane. Vertical drag adjusts `sidebarTopFraction`. Clamps so
+    /// neither pane shrinks below a usable threshold.
+    @ViewBuilder
+    private func sidebarDivider(totalHeight: CGFloat) -> some View {
+        ZStack {
+            Rectangle()
+                .fill(Color(uiColor: .separator))
+                .frame(height: 0.5)
+            // Wider hit-target so the drag feels touchable even with
+            // a hair-thin line. The capsule grip is purely cosmetic.
+            Capsule()
+                .fill(.secondary.opacity(0.4))
+                .frame(width: 36, height: 4)
+        }
+        .frame(height: 16)
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    let proposed = sidebarTopFraction + value.translation.height / totalHeight
+                    sidebarTopFraction = max(0.2, min(0.8, proposed))
+                }
+        )
+    }
+
+    // MARK: - Roster filtering
+
+    private var filteredModelNames: [String] {
+        let q = modelFilter.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return modelNames }
+        return modelNames.filter { $0.localizedCaseInsensitiveContains(q) }
+    }
+
+    private var filteredGroupNames: [String] {
+        let q = groupFilter.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return groupNames }
+        return groupNames.filter { $0.localizedCaseInsensitiveContains(q) }
+    }
+
+    private var filteredObjectNames: [String] {
+        let q = objectFilter.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return objectNames }
+        return objectNames.filter { $0.localizedCaseInsensitiveContains(q) }
+    }
+
+    private var currentFilterBinding: Binding<String> {
+        switch sidebarTab {
+        case .models:  return $modelFilter
+        case .groups:  return $groupFilter
+        case .objects: return $objectFilter
+        }
+    }
+
+    /// Models list uses the same SequencerViewModel selection slot
+    /// the canvas reads from — so picking a model in the sidebar
+    /// drives the canvas handles, action bar, and keyboard nudge.
+    private var modelListBinding: Binding<String?> {
+        Binding(
+            get: { viewModel.layoutEditorSelectedModel },
+            set: { viewModel.layoutSelectSingle($0) }
+        )
+    }
+
+    /// J-6 — Group list binding writes to the view model so
+    /// PreviewPaneView can sync the cyan-member tint to the canvas.
+    private var groupListBinding: Binding<String?> {
+        Binding(
+            get: { viewModel.layoutEditorSelectedGroup },
+            set: { viewModel.layoutEditorSelectedGroup = $0 }
+        )
+    }
+    private var objectListBinding: Binding<String?> {
+        Binding(
+            get: { viewModel.layoutEditorSelectedObject },
+            set: { viewModel.layoutEditorSelectedObject = $0 }
+        )
     }
 
     private var gridLabel: String {
@@ -354,15 +968,6 @@ struct LayoutEditorView: View {
         let spacing = (displayState["display2DGridSpacing"] as? Int)
             ?? Int((displayState["display2DGridSpacing"] as? NSNumber)?.intValue ?? 100)
         return on ? "On (\(spacing))" : "Off"
-    }
-
-    /// Sidebar List uses Set<String?> via @Bindable, but we want
-    /// single-select semantics. Wrap it manually.
-    private var bindingSelection: Binding<String?> {
-        Binding(
-            get: { viewModel.layoutEditorSelectedModel },
-            set: { viewModel.layoutSelectSingle($0) }
-        )
     }
 
     // MARK: - Canvas
@@ -648,6 +1253,9 @@ struct LayoutEditorView: View {
                                       },
                                       onRequestDelete: {
                                           pendingDeleteModelName = selected
+                                      },
+                                      onRequestDuplicate: {
+                                          performDuplicate(of: [selected])
                                       })
                     .allowsHitTesting(true)
             }
@@ -665,6 +1273,9 @@ struct LayoutEditorView: View {
                         onAlign: { edge in performAlign(by: edge) },
                         onDistribute: { axis in performDistribute(axis: axis) },
                         onMatchSize: { dim in performMatchSize(dimension: dim) },
+                        onFlip: { axis in performFlip(axis: axis) },
+                        onDuplicate: { performDuplicate(of: Array(viewModel.layoutEditorSelection)) },
+                        onGroup: { newGroupFromSelectionPrompt() },
                         onClear: {
                             viewModel.layoutEditorSelection.removeAll()
                             viewModel.layoutEditorSelectedModel = nil
@@ -795,11 +1406,150 @@ struct LayoutEditorView: View {
 
     private func refreshModelList() {
         modelNames = viewModel.document.modelsInActiveLayoutGroup()
+        groupNames = viewModel.document.modelGroupsInActiveLayoutGroup()
+        objectNames = viewModel.document.viewObjectsInActiveLayoutGroup()
         // If the previously-selected model isn't in the new list,
         // clear selection so the side panel doesn't show stale data.
         if let sel = viewModel.layoutEditorSelectedModel,
            !modelNames.contains(sel) {
             viewModel.layoutSelectSingle(nil)
+        }
+        if let g = viewModel.layoutEditorSelectedGroup, !groupNames.contains(g) {
+            viewModel.layoutEditorSelectedGroup = nil
+        }
+        if let o = viewModel.layoutEditorSelectedObject, !objectNames.contains(o) {
+            viewModel.layoutEditorSelectedObject = nil
+        }
+    }
+
+    /// J-6 (objects) — commit a view-object property edit. View
+    /// objects don't participate in the model undo stack yet (the
+    /// stack snapshots Models specifically); on undo the user can
+    /// still Discard Changes for a full rollback through the dirty
+    /// set. Bumps the summary token + repaints the canvas like the
+    /// model path.
+    private func commitObjectProperty(objectName: String, key: String, value: Any) {
+        let changed = viewModel.document.setLayoutViewObjectProperty(objectName,
+                                                                     key: key,
+                                                                     value: value)
+        if changed {
+            summaryToken &+= 1
+            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+            // canUndo is intentionally NOT bumped — view-object
+            // edits aren't on the undo stack today.
+            if key == "layoutGroup" {
+                refreshModelList()
+            }
+            NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                            object: "LayoutEditor",
+                                            userInfo: ["model": objectName])
+        }
+    }
+
+    /// J-7 (group CRUD) — current group's member set, used by the
+    /// add-member sheet to filter the candidate list. Returns an
+    /// empty set when no group is selected.
+    private var selectedGroupMembers: Set<String> {
+        guard let name = viewModel.layoutEditorSelectedGroup,
+              let summary = viewModel.document.modelGroupLayoutSummary(name) else {
+            return []
+        }
+        return Set(summary["models"] as? [String] ?? [])
+    }
+
+    /// J-7 — new-group sheet "Create" callback. Bridge does the
+    /// validation (name collision); on success we select the new
+    /// group so the user can immediately add members.
+    /// `pendingGroupFromSelection`, when non-nil, supplies the
+    /// initial member list (multi-select "Group" action populates
+    /// it before opening the sheet).
+    private func handleCreateGroup(_ name: String) {
+        let members = pendingGroupFromSelection
+        pendingGroupFromSelection = nil
+        if viewModel.document.createModelGroup(name, members: members) {
+            viewModel.layoutEditorSelectedGroup = name
+            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+            refreshModelList()
+            // If the user grouped from a model selection, flip to
+            // the Groups tab so the new group + its members appear.
+            if members != nil {
+                sidebarTab = .groups
+                viewModel.layoutEditorSelection.removeAll()
+                viewModel.layoutEditorSelectedModel = nil
+            }
+        }
+        newGroupSheetVisible = false
+    }
+
+    /// J-7 — add-member sheet "Add" callback. Each member fires
+    /// its own bridge call (each one marks the group dirty
+    /// independently, but the UX presents it as a single batch).
+    private func handleAddMembers(_ picked: [String]) {
+        guard let groupName = viewModel.layoutEditorSelectedGroup else {
+            addMemberSheetVisible = false
+            return
+        }
+        for name in picked {
+            _ = viewModel.document.addModel(name, toGroup: groupName)
+        }
+        if !picked.isEmpty {
+            summaryToken &+= 1
+            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        }
+        addMemberSheetVisible = false
+    }
+
+    /// J-7 — delete-group confirmation "Delete" callback.
+    private func handleDeleteGroup(_ name: String) {
+        if viewModel.document.deleteModelGroup(name) {
+            if viewModel.layoutEditorSelectedGroup == name {
+                viewModel.layoutEditorSelectedGroup = nil
+            }
+            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+            refreshModelList()
+        }
+    }
+
+    /// J-5 (groups) — commit a group property edit. Mirrors
+    /// `commitProperty` for models: pushes an undo snapshot first
+    /// (so the user can revert), invokes the bridge setter, and
+    /// updates the dirty / undo flags on success. Group transforms
+    /// flow through the same `_dirtyLayoutModels` set; save handler
+    /// rewrites the `<modelGroup>` element in place.
+    private func commitGroupProperty(groupName: String, key: String, value: Any) {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: groupName)
+        let changed = viewModel.document.setLayoutModelGroupProperty(groupName,
+                                                                     key: key,
+                                                                     value: value)
+        if changed {
+            summaryToken &+= 1
+            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+            canUndo = viewModel.document.canUndoLayoutChange()
+            if key == "layoutGroup" {
+                refreshModelList()
+            }
+        }
+    }
+
+    /// J-6 (per-type properties) — commit a Tree/Arch/Matrix/etc.
+    /// type-specific edit. Pushes undo, invokes the bridge, then
+    /// bumps the summary token so both panes (common + per-type)
+    /// re-read from the bridge. Mirrors `commitProperty` for common
+    /// props; structural changes (string count etc.) refresh the
+    /// model list too because channel ranges can shift.
+    private func commitPerTypeProperty(modelName: String, key: String, value: Any) {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
+        let changed = viewModel.document.setPerTypeProperty(key,
+                                                            onModel: modelName,
+                                                            value: value)
+        if changed {
+            summaryToken &+= 1
+            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+            canUndo = viewModel.document.canUndoLayoutChange()
+            refreshModelList()
+            NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                            object: "LayoutEditor",
+                                            userInfo: ["model": modelName])
         }
     }
 
@@ -999,6 +1749,59 @@ struct LayoutEditorView: View {
         }
     }
 
+    /// J-7 — Flip the multi-selection 180° about the given axis.
+    /// Uses the bridge implementation (matches desktop flip math).
+    /// Each model flips in place; pushing undo per model so each
+    /// flip is independently revertible.
+    private func performFlip(axis: String) {
+        guard !viewModel.layoutEditorSelection.isEmpty else { return }
+        let names = Array(viewModel.layoutEditorSelection)
+        for n in names {
+            viewModel.document.pushLayoutUndoSnapshot(forModel: n)
+        }
+        guard let bridge = XLightsBridgeBox.bridgeForLayoutEditor() else { return }
+        let flipped = bridge.flipModels(names, axis: axis, for: viewModel.document)
+        if flipped {
+            summaryToken &+= 1
+            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+            canUndo = viewModel.document.canUndoLayoutChange()
+            NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                             object: "LayoutEditor",
+                                             userInfo: [:])
+        }
+    }
+
+    /// J-7 — Duplicate each model in `names`. The bridge clones
+    /// them with a small (+50, +50) offset so they don't overlap
+    /// the originals; the new selection becomes the duplicates so
+    /// the user can immediately drag them to position.
+    private func performDuplicate(of names: [String]) {
+        guard !names.isEmpty else { return }
+        guard let bridge = XLightsBridgeBox.bridgeForLayoutEditor() else { return }
+        let dups = bridge.duplicateModels(names, for: viewModel.document)
+        guard !dups.isEmpty else { return }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        refreshModelList()
+        // Shift selection to the new duplicates so the user can
+        // drag / nudge them right away.
+        viewModel.layoutEditorSelection = Set(dups)
+        viewModel.layoutEditorSelectedModel = dups.first
+        NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                         object: "LayoutEditor",
+                                         userInfo: [:])
+    }
+
+    /// J-7 — Group-from-selection. Reuses NewGroupSheet for the
+    /// name prompt; the create handler reads
+    /// `pendingGroupFromSelection` to decide whether to pass
+    /// members through to the bridge.
+    private func newGroupFromSelectionPrompt() {
+        guard !viewModel.layoutEditorSelection.isEmpty else { return }
+        pendingGroupFromSelection = Array(viewModel.layoutEditorSelection)
+        newGroupSheetVisible = true
+    }
+
     private func saveLayoutChanges() {
         let ok = viewModel.document.saveLayoutChanges()
         if ok {
@@ -1038,94 +1841,183 @@ struct LayoutEditorView: View {
     }
 }
 
-/// Editable properties panel for the selected model. Common-
-/// properties surface only (J-1) — per-type properties (number of
-/// arches, tree branches, custom-model matrix, DMX channel mapping)
-/// land in J-3.
+/// J-8 — Editable properties panel for the selected model.
 ///
-/// Each editable cell pushes its value through `commit(key, value)`
-/// the moment it loses focus / commits, which routes through
-/// `setLayoutModelProperty` and bumps the parent's `summaryToken`
-/// so this view re-binds against the fresh summary. The on-disk
-/// rgbeffects.xml is *not* updated until the parent calls
-/// `saveLayoutChanges` (Save button in toolbar).
+/// Ordered to match desktop's wxPropertyGrid:
+/// 1. Header (Name / Type / always visible)
+/// 2. Model Properties (per-type descriptors — expanded by default)
+/// 3. Controller Connection
+/// 4. String Properties
+/// 5. Appearance
+/// 6. Dimensions
+/// 7. Size/Location
+///
+/// Each section after #1 is a `DisclosureGroup` so the user can
+/// collapse what they don't need. Default-expanded: per-type only —
+/// matching desktop's "the bits that vary per model first" intent.
 private struct LayoutEditorPropertiesView: View {
     let modelName: String
     let summary: [String: Any]
+    let typeDescriptors: [[String: Any]]
     let layoutGroups: [String]
     let token: Int
     let commit: (_ key: String, _ value: Any) -> Void
+    let typeCommit: (_ key: String, _ value: Any) -> Void
+
+    @State private var expandedTypeProps: Bool = true
+    @State private var expandedController: Bool = false
+    @State private var expandedStringProps: Bool = false
+    @State private var expandedAppearance: Bool = false
+    @State private var expandedDimensions: Bool = false
+    @State private var expandedSizeLocation: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // 1. Header — non-collapsible identity block.
             row("Name") { Text(modelName).truncationMode(.middle) }
             row("Type") { Text(summary["displayAs"] as? String ?? "—") }
-            row("Layout group") { layoutGroupPicker }
-            row("Locked") {
-                Toggle("", isOn: lockedBinding)
-                    .labelsHidden()
-                    .controlSize(.mini)
+
+            // 2. Model Properties (per-type). Title carries the
+            // model's `displayAs` for parity with desktop's
+            // category-header convention.
+            if !typeDescriptors.isEmpty {
+                section($expandedTypeProps,
+                        title: typeSectionTitle) {
+                    ForEach(Array(typeDescriptors.enumerated()), id: \.offset) { _, d in
+                        typeDescriptorRow(d)
+                    }
+                }
             }
 
-            Divider().padding(.vertical, 2)
-
-            row("Centre X") { numberField(key: "centerX") }
-            row("Centre Y") { numberField(key: "centerY") }
-            row("Centre Z") { numberField(key: "centerZ") }
-
-            Divider().padding(.vertical, 2)
-
-            row("Width")  { numberField(key: "width",  min: 0) }
-            row("Height") { numberField(key: "height", min: 0) }
-            row("Depth")  { numberField(key: "depth",  min: 0) }
-
-            Divider().padding(.vertical, 2)
-
-            row("Rotate X") { numberField(key: "rotateX") }
-            row("Rotate Y") { numberField(key: "rotateY") }
-            row("Rotate Z") { numberField(key: "rotateZ") }
-
-            Divider().padding(.vertical, 2)
-
-            row("Controller") { controllerField }
-            row("Channel range") {
-                Text("\(uintVal("startChannel"))..\(uintVal("endChannel"))")
-                    .foregroundStyle(.secondary)
+            // 3. Controller Connection.
+            section($expandedController, title: "Controller Connection") {
+                row("Preview") { layoutGroupPicker }
+                row("Controller") { controllerField }
+                row("Channel range") {
+                    Text("\(uintVal("startChannel"))..\(uintVal("endChannel"))")
+                        .foregroundStyle(.secondary)
+                }
             }
-            row("Strings") {
-                Text("\(intVal("stringCount"))").foregroundStyle(.secondary)
+
+            // 4. String Properties.
+            section($expandedStringProps, title: "String Properties") {
+                row("String Type") { stringTypePicker }
+                row("Strings") {
+                    Text("\(intVal("stringCount"))").foregroundStyle(.secondary)
+                }
+                row("Nodes") {
+                    Text("\(uintVal("nodeCount"))").foregroundStyle(.secondary)
+                }
             }
-            row("Nodes") {
-                Text("\(uintVal("nodeCount"))").foregroundStyle(.secondary)
+
+            // 5. Appearance.
+            section($expandedAppearance, title: "Appearance") {
+                row("Active") {
+                    Toggle("", isOn: boolBinding(key: "active"))
+                        .labelsHidden()
+                        .controlSize(.mini)
+                }
+                row("Pixel Size") { intField(key: "pixelSize", min: 1, max: 100) }
+                row("Pixel Style") { pixelStylePicker }
+                row("Transparency") { intField(key: "transparency", min: 0, max: 100) }
+                row("Black Transparency") {
+                    intField(key: "blackTransparency", min: 0, max: 100)
+                }
+                row("Tag Color") { tagColorPicker }
+                row("Description") { descriptionField }
+            }
+
+            // 6. Dimensions.
+            section($expandedDimensions, title: "Dimensions") {
+                row("Width")  { numberField(key: "width",  min: 0) }
+                row("Height") { numberField(key: "height", min: 0) }
+                row("Depth")  { numberField(key: "depth",  min: 0) }
+            }
+
+            // 7. Size/Location.
+            section($expandedSizeLocation, title: "Size/Location") {
+                row("Centre X") { numberField(key: "centerX") }
+                row("Centre Y") { numberField(key: "centerY") }
+                row("Centre Z") { numberField(key: "centerZ") }
+                row("Rotate X") { numberField(key: "rotateX") }
+                row("Rotate Y") { numberField(key: "rotateY") }
+                row("Rotate Z") { numberField(key: "rotateZ") }
+                row("Locked") {
+                    Toggle("", isOn: lockedBinding)
+                        .labelsHidden()
+                        .controlSize(.mini)
+                }
             }
         }
         .font(.caption.monospacedDigit())
     }
 
-    // MARK: - Cells
+    // MARK: - Section header
+
+    private var typeSectionTitle: String {
+        // Desktop uses the type string verbatim as the category
+        // label. Falls back to "Model Properties" if missing.
+        let t = summary["displayAs"] as? String ?? ""
+        return t.isEmpty ? "Model Properties" : t
+    }
+
+    @ViewBuilder
+    private func section<Content: View>(_ expanded: Binding<Bool>,
+                                         title: String,
+                                         @ViewBuilder _ content: () -> Content) -> some View {
+        // DisclosureGroup's content closure is escaping, so we
+        // materialize `content` once here and let DisclosureGroup
+        // capture the resulting View. Otherwise SwiftUI complains
+        // that the non-escaping `content` is captured by an
+        // escaping closure.
+        let body = VStack(alignment: .leading, spacing: 4) { content() }
+            .padding(.vertical, 4)
+        DisclosureGroup(isExpanded: expanded) {
+            body
+        } label: {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.primary)
+        }
+        .accentColor(.secondary)
+    }
+
+    // MARK: - Rows
 
     @ViewBuilder
     private func row(_ label: String, @ViewBuilder _ content: () -> some View) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
                 .foregroundStyle(.secondary)
-                .frame(minWidth: 90, alignment: .leading)
+                .frame(minWidth: 110, alignment: .leading)
             Spacer(minLength: 8)
             content()
                 .lineLimit(1)
         }
     }
 
+    // MARK: - Editors
+
     private func numberField(key: String, min: Double? = nil) -> some View {
         LayoutEditorDoubleField(
-            // Reset edits when token bumps (after a commit elsewhere)
-            // so the field re-reads the bridge value.
             id: "\(modelName).\(key).\(token)",
             initial: doubleVal(key),
             min: min,
             commit: { newValue in commit(key, NSNumber(value: newValue)) }
         )
         .frame(maxWidth: 110, alignment: .trailing)
+    }
+
+    private func intField(key: String, min: Double?, max: Double?) -> some View {
+        LayoutEditorDoubleField(
+            id: "\(modelName).\(key).\(token)",
+            initial: Double(intVal(key)),
+            min: min,
+            max: max,
+            precision: 0,
+            commit: { newValue in commit(key, NSNumber(value: Int(newValue))) }
+        )
+        .frame(maxWidth: 90, alignment: .trailing)
     }
 
     private var layoutGroupPicker: some View {
@@ -1151,10 +2043,102 @@ private struct LayoutEditorPropertiesView: View {
         .controlSize(.mini)
     }
 
+    private var stringTypePicker: some View {
+        let options = (summary["stringTypeOptions"] as? [String]) ?? []
+        let current = summary["stringType"] as? String ?? ""
+        return Menu {
+            ForEach(options, id: \.self) { name in
+                Button {
+                    commit("stringType", name as NSString)
+                } label: {
+                    HStack {
+                        Text(name)
+                        if name == current {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(current.isEmpty ? "—" : current)
+                .truncationMode(.middle)
+                .frame(maxWidth: 160, alignment: .trailing)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+    }
+
+    private var pixelStylePicker: some View {
+        let options = (summary["pixelStyleOptions"] as? [String]) ?? []
+        let idx = intVal("pixelStyle")
+        let current = (idx >= 0 && idx < options.count) ? options[idx] : "—"
+        return Menu {
+            ForEach(Array(options.enumerated()), id: \.offset) { i, name in
+                Button {
+                    commit("pixelStyle", NSNumber(value: i))
+                } label: {
+                    HStack {
+                        Text(name)
+                        if i == idx {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(current)
+                .truncationMode(.middle)
+                .frame(maxWidth: 130, alignment: .trailing)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+    }
+
+    /// Tag color is stored on Model as a string (typically
+    /// `#RRGGBB`). SwiftUI's ColorPicker gives us a Color; we
+    /// convert to hex on commit. Showing the swatch + label
+    /// matches desktop's "block + text" presentation.
+    private var tagColorPicker: some View {
+        let hex = summary["tagColor"] as? String ?? ""
+        let parsed = Color(hexString: hex) ?? .black
+        return HStack(spacing: 6) {
+            ColorPicker("", selection: Binding(
+                get: { parsed },
+                set: { newColor in
+                    let s = newColor.toHexString()
+                    commit("tagColor", s as NSString)
+                }
+            ), supportsOpacity: false)
+                .labelsHidden()
+            Text(hex.isEmpty ? "—" : hex)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 80, alignment: .leading)
+        }
+    }
+
+    private var descriptionField: some View {
+        LayoutEditorStringField(
+            id: "\(modelName).description.\(token)",
+            initial: summary["description"] as? String ?? "",
+            commit: { commit("description", $0 as NSString) }
+        )
+        .frame(maxWidth: 160, alignment: .trailing)
+    }
+
     private var lockedBinding: Binding<Bool> {
         Binding(
             get: { summary["locked"] as? Bool ?? false },
             set: { commit("locked", NSNumber(value: $0)) }
+        )
+    }
+
+    private func boolBinding(key: String) -> Binding<Bool> {
+        Binding(
+            get: { summary[key] as? Bool ?? false },
+            set: { commit(key, NSNumber(value: $0)) }
         )
     }
 
@@ -1165,6 +2149,95 @@ private struct LayoutEditorPropertiesView: View {
             commit: { commit("controllerName", $0 as NSString) }
         )
         .frame(maxWidth: 140, alignment: .trailing)
+    }
+
+    // MARK: - Per-type row dispatcher
+
+    @ViewBuilder
+    private func typeDescriptorRow(_ d: [String: Any]) -> some View {
+        let key = d["key"] as? String ?? ""
+        let label = d["label"] as? String ?? key
+        let kind = d["kind"] as? String ?? ""
+        let enabled = (d["enabled"] as? Bool) ?? true
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 110, alignment: .leading)
+            Spacer(minLength: 8)
+            typeDescriptorControl(kind: kind, key: key, d: d)
+                .disabled(!enabled)
+                .opacity(enabled ? 1.0 : 0.5)
+                .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
+    private func typeDescriptorControl(kind: String, key: String, d: [String: Any]) -> some View {
+        switch kind {
+        case "int":
+            let v = (d["value"] as? NSNumber)?.doubleValue ?? 0
+            let minV = (d["min"] as? NSNumber)?.doubleValue
+            let maxV = (d["max"] as? NSNumber)?.doubleValue
+            LayoutEditorDoubleField(
+                id: "\(modelName).\(key).\(token)",
+                initial: v, min: minV, max: maxV, precision: 0,
+                commit: { newValue in typeCommit(key, NSNumber(value: Int(newValue))) }
+            )
+            .frame(maxWidth: 110, alignment: .trailing)
+        case "double":
+            let v = (d["value"] as? NSNumber)?.doubleValue ?? 0
+            let minV = (d["min"] as? NSNumber)?.doubleValue
+            let maxV = (d["max"] as? NSNumber)?.doubleValue
+            let precision = (d["precision"] as? NSNumber)?.intValue ?? 2
+            LayoutEditorDoubleField(
+                id: "\(modelName).\(key).\(token)",
+                initial: v, min: minV, max: maxV, precision: precision,
+                commit: { newValue in typeCommit(key, NSNumber(value: newValue)) }
+            )
+            .frame(maxWidth: 110, alignment: .trailing)
+        case "bool":
+            let v = (d["value"] as? Bool) ?? false
+            Toggle("", isOn: Binding(
+                get: { v },
+                set: { typeCommit(key, NSNumber(value: $0)) }
+            ))
+            .labelsHidden()
+            .controlSize(.mini)
+        case "enum":
+            let idx = (d["value"] as? NSNumber)?.intValue ?? 0
+            let opts = (d["options"] as? [String]) ?? []
+            Menu {
+                ForEach(Array(opts.enumerated()), id: \.offset) { i, label in
+                    Button {
+                        typeCommit(key, NSNumber(value: i))
+                    } label: {
+                        HStack {
+                            Text(label)
+                            if i == idx {
+                                Spacer()
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Text(idx >= 0 && idx < opts.count ? opts[idx] : "—")
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 160, alignment: .trailing)
+            }
+            .menuStyle(.button)
+            .controlSize(.mini)
+        case "string":
+            let v = d["value"] as? String ?? ""
+            LayoutEditorStringField(
+                id: "\(modelName).\(key).\(token)",
+                initial: v,
+                commit: { typeCommit(key, $0 as NSString) }
+            )
+            .frame(maxWidth: 160, alignment: .trailing)
+        default:
+            Text("?").foregroundStyle(.tertiary)
+        }
     }
 
     // MARK: - Lookups
@@ -1182,6 +2255,1287 @@ private struct LayoutEditorPropertiesView: View {
     }
 }
 
+/// J-12 — Add-View-Object sheet + delete-confirmation alert +
+/// per-type file picker. Factored out so the modifier chain on
+/// LayoutEditorView's body stays inside the Swift type-checker's
+/// complexity budget.
+private struct ViewObjectCrudModifiers: ViewModifier {
+    @Binding var objectFilePickerVisible: Bool
+    let objectFilePickerTypes: [UTType]
+    @Binding var addViewObjectSheetVisible: Bool
+    @Binding var pendingDeleteObjectName: String?
+    let availableTypes: [String]
+    let onCreateObject: (String) -> Void
+    let onDeleteObject: (String) -> Void
+    let onFilePicked: (Result<[URL], Error>) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .fileImporter(isPresented: $objectFilePickerVisible,
+                          allowedContentTypes: objectFilePickerTypes.isEmpty
+                                                  ? [.data]
+                                                  : objectFilePickerTypes,
+                          allowsMultipleSelection: false,
+                          onCompletion: onFilePicked)
+            .sheet(isPresented: $addViewObjectSheetVisible) {
+                AddViewObjectSheet(
+                    types: availableTypes,
+                    onSelect: { type in
+                        onCreateObject(type)
+                    },
+                    onCancel: { addViewObjectSheetVisible = false }
+                )
+            }
+            .alert(deleteTitle,
+                   isPresented: Binding(
+                        get: { pendingDeleteObjectName != nil },
+                        set: { if !$0 { pendingDeleteObjectName = nil } })) {
+                Button("Delete", role: .destructive) {
+                    if let name = pendingDeleteObjectName { onDeleteObject(name) }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("Removes this view object from the show. Save the layout to make the change permanent.")
+            }
+    }
+
+    private var deleteTitle: String {
+        "Delete \(pendingDeleteObjectName ?? "")?"
+    }
+}
+
+/// J-12 — view-object type picker shown by the Objects tab's
+/// "+" button.
+private struct AddViewObjectSheet: View {
+    let types: [String]
+    let onSelect: (String) -> Void
+    let onCancel: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List(types, id: \.self) { type in
+                Button {
+                    onSelect(type)
+                } label: {
+                    HStack {
+                        Image(systemName: iconFor(type))
+                            .foregroundStyle(.secondary)
+                        Text(type)
+                            .foregroundStyle(.primary)
+                        Spacer()
+                    }
+                }
+            }
+            .navigationTitle("Add View Object")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onCancel() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    private func iconFor(_ type: String) -> String {
+        switch type {
+        case "Image":     return "photo"
+        case "Mesh":      return "cube.transparent"
+        case "Gridlines": return "grid"
+        case "Terrain":   return "mountain.2"
+        case "Ruler":     return "ruler"
+        default:          return "square.on.square"
+        }
+    }
+}
+
+/// J-11 — enforce exactly-one-active-selection across the three
+/// sidebar tabs (Models / Groups / Objects). Setting any one
+/// clears the other two; explicit tab switch drops the previous
+/// tab's selection; a canvas tap that lands on a model flips
+/// the sidebar to the Models tab so the property pane shows the
+/// right surface.
+///
+/// Factored out as a ViewModifier so LayoutEditorView's body
+/// chain stays under the Swift type-checker's complexity budget.
+private struct SidebarSelectionMutex: ViewModifier {
+    @Environment(SequencerViewModel.self) var viewModel
+    @Binding var sidebarTab: LayoutSidebarTab
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: viewModel.layoutEditorSelectedModel) { _, newSel in
+                guard let name = newSel, !name.isEmpty else { return }
+                if viewModel.layoutEditorSelectedGroup != nil {
+                    viewModel.layoutEditorSelectedGroup = nil
+                }
+                if viewModel.layoutEditorSelectedObject != nil {
+                    viewModel.layoutEditorSelectedObject = nil
+                }
+                if sidebarTab != .models {
+                    sidebarTab = .models
+                }
+            }
+            .onChange(of: viewModel.layoutEditorSelectedGroup) { _, newSel in
+                guard newSel != nil else { return }
+                if viewModel.layoutEditorSelectedModel != nil ||
+                   !viewModel.layoutEditorSelection.isEmpty {
+                    viewModel.layoutSelectSingle(nil)
+                }
+                if viewModel.layoutEditorSelectedObject != nil {
+                    viewModel.layoutEditorSelectedObject = nil
+                }
+            }
+            .onChange(of: viewModel.layoutEditorSelectedObject) { oldSel, newSel in
+                guard newSel != nil else {
+                    // Selection cleared — drop any terrain edit
+                    // session so the next tap doesn't paint.
+                    if viewModel.terrainEditTarget != nil {
+                        viewModel.terrainEditTarget = nil
+                    }
+                    return
+                }
+                if viewModel.layoutEditorSelectedModel != nil ||
+                   !viewModel.layoutEditorSelection.isEmpty {
+                    viewModel.layoutSelectSingle(nil)
+                }
+                if viewModel.layoutEditorSelectedGroup != nil {
+                    viewModel.layoutEditorSelectedGroup = nil
+                }
+                // J-13 — if the user picks a different VO than the
+                // terrain currently being edited, exit edit mode.
+                if let editing = viewModel.terrainEditTarget,
+                   newSel != editing {
+                    viewModel.terrainEditTarget = nil
+                }
+            }
+            .onChange(of: sidebarTab) { _, newTab in
+                // Explicit tab switch drops the leaving tab's
+                // selection so the canvas tint reflects where the
+                // user is now looking.
+                switch newTab {
+                case .models:
+                    viewModel.layoutEditorSelectedGroup = nil
+                    viewModel.layoutEditorSelectedObject = nil
+                case .groups:
+                    if viewModel.layoutEditorSelectedModel != nil ||
+                       !viewModel.layoutEditorSelection.isEmpty {
+                        viewModel.layoutSelectSingle(nil)
+                    }
+                    viewModel.layoutEditorSelectedObject = nil
+                case .objects:
+                    if viewModel.layoutEditorSelectedModel != nil ||
+                       !viewModel.layoutEditorSelection.isEmpty {
+                        viewModel.layoutSelectSingle(nil)
+                    }
+                    viewModel.layoutEditorSelectedGroup = nil
+                }
+            }
+    }
+}
+
+/// J-7 (group CRUD) — extracted modifier hosting the new-group
+/// sheet, add-member sheet, and delete-confirmation alert.
+/// LayoutEditorView's body was over the type-checker's complexity
+/// budget once these landed inline; factoring keeps the call site
+/// to a single `.modifier(...)`.
+private struct GroupCrudModifiers: ViewModifier {
+    @Binding var newGroupSheetVisible: Bool
+    @Binding var addMemberSheetVisible: Bool
+    @Binding var pendingDeleteGroupName: String?
+    let groupNames: [String]
+    let modelNames: [String]
+    let onCreateGroup: (String) -> Void
+    let onAddMembers: ([String]) -> Void
+    let onDeleteGroup: (String) -> Void
+    let selectedGroupName: String?
+    let currentMembers: Set<String>
+    /// J-9 — bridge lookup so the AddMemberSheet's tree can lazily
+    /// fetch submodels for a parent. Captured at the call site so
+    /// the sheet itself doesn't need a view-model handle.
+    let submodelsFor: (String) -> [String]
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $newGroupSheetVisible) {
+                NewGroupSheet(
+                    existingNames: Set(groupNames + modelNames),
+                    onCreate: onCreateGroup,
+                    onCancel: { newGroupSheetVisible = false }
+                )
+            }
+            .sheet(isPresented: $addMemberSheetVisible) {
+                if let groupName = selectedGroupName {
+                    // Candidates = every visible model whose top-
+                    // level name isn't already a direct group
+                    // member. Submodels live inside the tree and
+                    // are filtered separately (an "already a
+                    // member" hint is shown but they still appear).
+                    let candidates = modelNames.filter { !currentMembers.contains($0) }
+                    AddMemberSheet(
+                        groupName: groupName,
+                        candidates: candidates,
+                        existingMembers: currentMembers,
+                        submodelsFor: submodelsFor,
+                        onAdd: onAddMembers,
+                        onCancel: { addMemberSheetVisible = false }
+                    )
+                }
+            }
+            .alert(deleteAlertTitle,
+                   isPresented: Binding(
+                        get: { pendingDeleteGroupName != nil },
+                        set: { if !$0 { pendingDeleteGroupName = nil } })) {
+                Button("Delete", role: .destructive) {
+                    if let name = pendingDeleteGroupName { onDeleteGroup(name) }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("Removes this group from the active layout. Save the layout to make the change permanent.")
+            }
+    }
+
+    private var deleteAlertTitle: String {
+        "Delete \(pendingDeleteGroupName ?? "")?"
+    }
+}
+
+/// J-6 (per-type properties) — renders the descriptor list
+/// returned by `perTypePropertiesForModel:`. Generic over kind so
+/// new model types can be wired by adding a bridge case without
+/// touching SwiftUI.
+private struct LayoutEditorTypePropertiesView: View {
+    let modelName: String
+    let descriptors: [[String: Any]]
+    let token: Int
+    let commit: (_ key: String, _ value: Any) -> Void
+
+    var body: some View {
+        if descriptors.isEmpty {
+            EmptyView()
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Type Properties")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(Array(descriptors.enumerated()), id: \.offset) { _, d in
+                    descriptorRow(d)
+                }
+            }
+            .font(.caption.monospacedDigit())
+        }
+    }
+
+    @ViewBuilder
+    private func descriptorRow(_ d: [String: Any]) -> some View {
+        let key = d["key"] as? String ?? ""
+        let label = d["label"] as? String ?? key
+        let kind = d["kind"] as? String ?? ""
+        let enabled = (d["enabled"] as? Bool) ?? true
+
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 110, alignment: .leading)
+            Spacer(minLength: 8)
+            controlFor(kind: kind, key: key, d: d)
+                .disabled(!enabled)
+                .opacity(enabled ? 1.0 : 0.5)
+                .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
+    private func controlFor(kind: String, key: String, d: [String: Any]) -> some View {
+        switch kind {
+        case "int":
+            let v = (d["value"] as? NSNumber)?.doubleValue ?? 0
+            let minV = (d["min"] as? NSNumber)?.doubleValue
+            let maxV = (d["max"] as? NSNumber)?.doubleValue
+            LayoutEditorDoubleField(
+                id: "\(modelName).\(key).\(token)",
+                initial: v,
+                min: minV,
+                max: maxV,
+                precision: 0,
+                commit: { newValue in commit(key, NSNumber(value: Int(newValue))) }
+            )
+            .frame(maxWidth: 110, alignment: .trailing)
+        case "double":
+            let v = (d["value"] as? NSNumber)?.doubleValue ?? 0
+            let minV = (d["min"] as? NSNumber)?.doubleValue
+            let maxV = (d["max"] as? NSNumber)?.doubleValue
+            let precision = (d["precision"] as? NSNumber)?.intValue ?? 2
+            LayoutEditorDoubleField(
+                id: "\(modelName).\(key).\(token)",
+                initial: v,
+                min: minV,
+                max: maxV,
+                precision: precision,
+                commit: { newValue in commit(key, NSNumber(value: newValue)) }
+            )
+            .frame(maxWidth: 110, alignment: .trailing)
+        case "bool":
+            let v = (d["value"] as? Bool) ?? false
+            Toggle("", isOn: Binding(
+                get: { v },
+                set: { commit(key, NSNumber(value: $0)) }
+            ))
+            .labelsHidden()
+            .controlSize(.mini)
+        case "enum":
+            let idx = (d["value"] as? NSNumber)?.intValue ?? 0
+            let opts = (d["options"] as? [String]) ?? []
+            Menu {
+                ForEach(Array(opts.enumerated()), id: \.offset) { i, label in
+                    Button {
+                        commit(key, NSNumber(value: i))
+                    } label: {
+                        HStack {
+                            Text(label)
+                            if i == idx {
+                                Spacer()
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Text(idx >= 0 && idx < opts.count ? opts[idx] : "—")
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 160, alignment: .trailing)
+            }
+            .menuStyle(.button)
+            .controlSize(.mini)
+        case "string":
+            let v = d["value"] as? String ?? ""
+            LayoutEditorStringField(
+                id: "\(modelName).\(key).\(token)",
+                initial: v,
+                commit: { commit(key, $0 as NSString) }
+            )
+            .frame(maxWidth: 160, alignment: .trailing)
+        default:
+            Text("?").foregroundStyle(.tertiary)
+        }
+    }
+}
+
+/// J-5 → J-7 — property editor for a ModelGroup. Settings
+/// surface (layout group / camera / layout style / grid size /
+/// centre) plus an editable member list (swipe to delete, "+ Add
+/// Member" to open the picker sheet).
+private struct LayoutEditorGroupPropertiesView: View {
+    let groupName: String
+    let summary: [String: Any]
+    let layoutGroups: [String]
+    let token: Int
+    let commit: (_ key: String, _ value: Any) -> Void
+    let onRemoveMember: (_ memberName: String) -> Void
+    let onAddMember: () -> Void
+    let onReorderMembers: (_ newOrder: [String]) -> Void
+
+    /// J-10 — drag-target tracking for the manual VStack member
+    /// list. Storing the dragged name + hovered index here lets us
+    /// commit reorders without an internal-scroll List (which was
+    /// shrinking the visible window to 2 rows inside the outer
+    /// property pane's ScrollView).
+    @State private var draggingMember: String? = nil
+    @State private var dropTargetIndex: Int? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            row("Name") { Text(groupName).truncationMode(.middle) }
+            row("Type") { Text(summary["displayAs"] as? String ?? "ModelGroup") }
+            row("Layout group") { layoutGroupPicker }
+            row("Locked") {
+                Toggle("", isOn: lockedBinding)
+                    .labelsHidden()
+                    .controlSize(.mini)
+            }
+
+            Divider().padding(.vertical, 2)
+
+            row("Default camera") { defaultCameraPicker }
+            row("Layout style")   { layoutStylePicker }
+            row("Grid size")      { gridSizeField }
+            row("Tag color")      { tagColorPicker }
+
+            Divider().padding(.vertical, 2)
+
+            row("2D centre") {
+                Text((summary["centerDefined"] as? Bool ?? false) ? "Custom" : "Auto")
+                    .foregroundStyle(.secondary)
+            }
+            row("Centre X") { numberField(key: "centerX") }
+            row("Centre Y") { numberField(key: "centerY") }
+
+            Divider().padding(.vertical, 2)
+
+            membersHeader
+
+            if let members = summary["models"] as? [String], !members.isEmpty {
+                // J-10 — manual VStack of rows + per-row drag.
+                // Avoids embedding a SwiftUI List inside the
+                // property pane's outer ScrollView (the inner List
+                // collapses to ~2 rows). The outer ScrollView is
+                // already in charge of vertical scrolling, so this
+                // grows-to-fit naturally.
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(members.enumerated()), id: \.element) { idx, m in
+                        memberRow(name: m,
+                                  index: idx,
+                                  members: members,
+                                  isDropTarget: dropTargetIndex == idx)
+                    }
+                }
+                .padding(.leading, 8)
+                .padding(.top, 2)
+                .dropDestination(for: String.self) { items, _ in
+                    // Drop landing OUTSIDE any specific row → move
+                    // to end. Per-row dropDestination already
+                    // committed any "drop on row" case before we
+                    // get here.
+                    guard let dragged = items.first ?? draggingMember,
+                          let from = members.firstIndex(of: dragged) else {
+                        draggingMember = nil
+                        dropTargetIndex = nil
+                        return false
+                    }
+                    var reordered = members
+                    reordered.remove(at: from)
+                    reordered.append(dragged)
+                    onReorderMembers(reordered)
+                    draggingMember = nil
+                    dropTargetIndex = nil
+                    return true
+                }
+            }
+        }
+        .font(.caption.monospacedDigit())
+    }
+
+    @ViewBuilder
+    private var membersHeader: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("Members")
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 100, alignment: .leading)
+            Spacer(minLength: 8)
+            Text("\(summary["modelCount"] as? Int ?? 0)")
+                .foregroundStyle(.secondary)
+            Button {
+                onAddMember()
+            } label: {
+                Image(systemName: "plus.circle.fill")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Add member")
+        }
+    }
+
+    /// J-10 — single member row inside the manual VStack list.
+    /// Drag handle on the left, delete on the right. Long-press
+    /// or grab-the-handle to drag; drop-on-target inserts before
+    /// that row. SwiftUI's `.draggable` + per-row
+    /// `.dropDestination` handle the data transport.
+    @ViewBuilder
+    private func memberRow(name: String,
+                            index: Int,
+                            members: [String],
+                            isDropTarget: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "line.3.horizontal")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .frame(width: 12)
+            memberIcon(for: name)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            Text(name)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button {
+                onRemoveMember(name)
+            } label: {
+                Image(systemName: "minus.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Remove \(name)")
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 4)
+        .background(rowBackground(name: name, isDropTarget: isDropTarget))
+        .draggable(name) {
+            // Drag preview — small, opaque pill that mirrors the
+            // row visually so the user sees what they're moving.
+            HStack(spacing: 4) {
+                memberIcon(for: name)
+                Text(name).font(.caption2)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.thinMaterial, in: Capsule())
+        }
+        .dropDestination(for: String.self) { items, _ in
+            guard let dragged = items.first,
+                  let from = members.firstIndex(of: dragged) else {
+                draggingMember = nil
+                dropTargetIndex = nil
+                return false
+            }
+            var to = index
+            // Inserting after the source position needs the index
+            // shifted back by one because we remove first.
+            if from < to { to -= 0 }
+            if from == to {
+                draggingMember = nil
+                dropTargetIndex = nil
+                return false
+            }
+            var reordered = members
+            reordered.remove(at: from)
+            // Clamp in case `to` ended up past the new end.
+            let insertAt = min(to, reordered.count)
+            reordered.insert(dragged, at: insertAt)
+            onReorderMembers(reordered)
+            draggingMember = nil
+            dropTargetIndex = nil
+            return true
+        } isTargeted: { targeted in
+            if targeted {
+                dropTargetIndex = index
+            } else if dropTargetIndex == index {
+                dropTargetIndex = nil
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func rowBackground(name: String, isDropTarget: Bool) -> some View {
+        if isDropTarget {
+            // Light tint to show where the dragged row will land.
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.accentColor.opacity(0.18))
+        } else {
+            Color.clear
+        }
+    }
+
+    @ViewBuilder
+    private func memberIcon(for name: String) -> some View {
+        // Members can be top-level models, ModelGroups, or
+        // submodels (Parent/Sub form). Use the cube icon for
+        // simple models and a layered icon for everything else
+        // so the eye can scan the list.
+        if name.contains("/") {
+            Image(systemName: "square.on.square")
+        } else {
+            Image(systemName: "cube")
+        }
+    }
+
+    // MARK: - Cells
+
+    @ViewBuilder
+    private func row(_ label: String, @ViewBuilder _ content: () -> some View) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 100, alignment: .leading)
+            Spacer(minLength: 8)
+            content()
+                .lineLimit(1)
+        }
+    }
+
+    private func numberField(key: String) -> some View {
+        LayoutEditorDoubleField(
+            id: "\(groupName).\(key).\(token)",
+            initial: doubleVal(key),
+            min: nil,
+            commit: { v in commit(key, NSNumber(value: v)) }
+        )
+        .frame(maxWidth: 110, alignment: .trailing)
+    }
+
+    private var lockedBinding: Binding<Bool> {
+        Binding(
+            get: { summary["locked"] as? Bool ?? false },
+            set: { commit("locked", NSNumber(value: $0)) }
+        )
+    }
+
+    private var layoutGroupPicker: some View {
+        Menu {
+            ForEach(layoutGroups, id: \.self) { name in
+                Button {
+                    commit("layoutGroup", name as NSString)
+                } label: {
+                    HStack {
+                        Text(name)
+                        if name == (summary["layoutGroup"] as? String) {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(summary["layoutGroup"] as? String ?? "Default")
+                .truncationMode(.middle)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+    }
+
+    /// J-9 — Default Camera picker. Source list comes from the
+    /// bridge so any user-defined 3D camera (saved viewpoint) is
+    /// included alongside the always-present "2D".
+    private var defaultCameraPicker: some View {
+        let current = summary["defaultCamera"] as? String ?? "2D"
+        let opts = (summary["defaultCameraOptions"] as? [String]) ?? ["2D"]
+        return Menu {
+            ForEach(opts, id: \.self) { name in
+                Button {
+                    commit("defaultCamera", name as NSString)
+                } label: {
+                    HStack {
+                        Text(name)
+                        if name == current {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(current)
+                .truncationMode(.middle)
+                .frame(maxWidth: 140, alignment: .trailing)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+    }
+
+    /// J-9 — Layout Style picker. Options come from the bridge as
+    /// {value, label} pairs (xml wire form vs user-facing). If the
+    /// stored value isn't in the list (legacy XML), we still show
+    /// it but mark it as "Custom: …".
+    private var layoutStylePicker: some View {
+        let current = summary["layout"] as? String ?? "minimalGrid"
+        let rawOpts = (summary["layoutStyleOptions"] as? [[String: String]]) ?? []
+        let opts: [(value: String, label: String)] = rawOpts.compactMap {
+            guard let v = $0["value"], let l = $0["label"] else { return nil }
+            return (v, l)
+        }
+        let knownLabel = opts.first(where: { $0.value == current })?.label
+        return Menu {
+            ForEach(opts, id: \.value) { entry in
+                Button {
+                    commit("layout", entry.value as NSString)
+                } label: {
+                    HStack {
+                        Text(entry.label)
+                        if entry.value == current {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+            if knownLabel == nil && !current.isEmpty {
+                Divider()
+                Text("Currently: \(current)")
+            }
+        } label: {
+            Text(knownLabel ?? (current.isEmpty ? "—" : "Custom: \(current)"))
+                .truncationMode(.middle)
+                .frame(maxWidth: 160, alignment: .trailing)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+    }
+
+    private var gridSizeField: some View {
+        LayoutEditorDoubleField(
+            id: "\(groupName).gridSize.\(token)",
+            initial: Double(summary["gridSize"] as? Int ?? 400),
+            min: 1,
+            max: nil,
+            precision: 0,
+            commit: { v in commit("gridSize", NSNumber(value: Int(v))) }
+        )
+        .frame(maxWidth: 90, alignment: .trailing)
+    }
+
+    /// J-9 — Tag color picker. Same `#RRGGBB` bridge as the Models
+    /// tab. Empty string → black fallback.
+    private var tagColorPicker: some View {
+        let hex = summary["tagColor"] as? String ?? ""
+        let parsed = Color(hexString: hex) ?? .black
+        return HStack(spacing: 6) {
+            ColorPicker("", selection: Binding(
+                get: { parsed },
+                set: { newColor in
+                    commit("tagColor", newColor.toHexString() as NSString)
+                }
+            ), supportsOpacity: false)
+                .labelsHidden()
+            Text(hex.isEmpty ? "—" : hex)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 80, alignment: .leading)
+        }
+    }
+
+    private func doubleVal(_ key: String) -> Double {
+        (summary[key] as? NSNumber)?.doubleValue ?? 0.0
+    }
+}
+
+/// J-8 — Editor for the synthetic "2D Background" pseudo-object.
+/// The active layout group owns its own background settings; this
+/// view edits whichever group the user has picked in the layout-
+/// group switcher (top-of-canvas overlay). No transform surface —
+/// the desktop's background isn't an object you move around, it's
+/// an attribute of the preview.
+private struct LayoutEditorBackgroundPropertiesView: View {
+    let summary: [String: Any]
+    let token: Int
+    let commit: (_ key: String, _ value: Any) -> Void
+    let onPickImage: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            row("Name") {
+                Text(summary["name"] as? String ?? "2D Background")
+                    .truncationMode(.middle)
+            }
+            row("Type") {
+                Text(summary["displayAs"] as? String ?? "2D Background")
+                    .foregroundStyle(.secondary)
+            }
+            row("Layout group") {
+                Text(summary["layoutGroup"] as? String ?? "Default")
+                    .foregroundStyle(.secondary)
+            }
+            Divider().padding(.vertical, 2)
+            row("Image") {
+                HStack(spacing: 6) {
+                    Text(imageLabel)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 110, alignment: .trailing)
+                    Button {
+                        onPickImage()
+                    } label: {
+                        Image(systemName: "folder")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    if !imagePath.isEmpty {
+                        Button(role: .destructive) {
+                            commit("backgroundImage", "" as NSString)
+                        } label: {
+                            Image(systemName: "xmark.circle")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            Divider().padding(.vertical, 2)
+            row("Brightness") {
+                intField(key: "backgroundBrightness", min: 0, max: 100)
+            }
+            row("Alpha") {
+                intField(key: "backgroundAlpha", min: 0, max: 100)
+            }
+            row("Scale to fit") {
+                Toggle("", isOn: Binding(
+                    get: { summary["scaleBackgroundImage"] as? Bool ?? false },
+                    set: { commit("scaleBackgroundImage", NSNumber(value: $0)) }
+                ))
+                    .labelsHidden()
+                    .controlSize(.mini)
+            }
+
+            Divider().padding(.vertical, 4)
+            Text("The 2D background is a per-layout-group attribute, not a real view object. It draws behind your models in the 2D preview at the configured brightness / alpha.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(.caption.monospacedDigit())
+    }
+
+    private var imagePath: String {
+        summary["backgroundImage"] as? String ?? ""
+    }
+
+    private var imageLabel: String {
+        if imagePath.isEmpty { return "—" }
+        return (imagePath as NSString).lastPathComponent
+    }
+
+    @ViewBuilder
+    private func row(_ label: String, @ViewBuilder _ content: () -> some View) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 100, alignment: .leading)
+            Spacer(minLength: 8)
+            content()
+                .lineLimit(1)
+        }
+    }
+
+    private func intField(key: String, min: Double, max: Double) -> some View {
+        LayoutEditorDoubleField(
+            id: "background.\(key).\(token)",
+            initial: Double((summary[key] as? NSNumber)?.intValue ?? 0),
+            min: min,
+            max: max,
+            precision: 0,
+            commit: { newValue in commit(key, NSNumber(value: Int(newValue))) }
+        )
+        .frame(maxWidth: 90, alignment: .trailing)
+    }
+}
+
+/// J-12 — Editable properties for a ViewObject. Mirrors the
+/// Models tab's collapsible-section layout: Header (always
+/// visible) → per-type → Appearance → Dimensions → Size/Location.
+/// Per-type section opens by default since that's the unique
+/// surface for this object.
+private struct LayoutEditorObjectPropertiesView: View {
+    @Environment(SequencerViewModel.self) var viewModel
+    let objectName: String
+    let summary: [String: Any]
+    let layoutGroups: [String]
+    let token: Int
+    let commit: (_ key: String, _ value: Any) -> Void
+    let onPickFile: (_ key: String, _ accepting: [UTType]) -> Void
+
+    @State private var expandedTypeProps: Bool = true
+    @State private var expandedAppearance: Bool = false
+    @State private var expandedDimensions: Bool = false
+    @State private var expandedSizeLocation: Bool = false
+
+    var typeKind: String { summary["typeKind"] as? String ?? "other" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            row("Name") { Text(objectName).truncationMode(.middle) }
+            row("Type") { Text(summary["displayAs"] as? String ?? "—") }
+
+            if typeKind != "other" {
+                section($expandedTypeProps, title: typeSectionTitle) {
+                    perTypeBody
+                }
+            }
+
+            section($expandedAppearance, title: "Appearance") {
+                row("Active") {
+                    Toggle("", isOn: boolBinding("active"))
+                        .labelsHidden()
+                        .controlSize(.mini)
+                }
+                row("Layout group") { layoutGroupPicker }
+            }
+
+            if !((summary["twoPoint"] as? Bool) ?? false) {
+                // Two-point screen locations (e.g. Ruler) don't
+                // have a meaningful bounding-box width/height/depth
+                // — the line's extent comes from its endpoints.
+                section($expandedDimensions, title: "Dimensions") {
+                    row("Width")  { numberField(key: "width",  min: 0) }
+                    row("Height") { numberField(key: "height", min: 0) }
+                    row("Depth")  { numberField(key: "depth",  min: 0) }
+                }
+            }
+
+            section($expandedSizeLocation, title: "Size/Location") {
+                if (summary["twoPoint"] as? Bool) ?? false {
+                    // J-14 — two-point screen location (Ruler).
+                    // Point 1 is the world origin; point 2 is the
+                    // absolute coord of the second endpoint.
+                    row("Point 1 X") { numberField(key: "p1X") }
+                    row("Point 1 Y") { numberField(key: "p1Y") }
+                    row("Point 1 Z") { numberField(key: "p1Z") }
+                    row("Point 2 X") { numberField(key: "p2X") }
+                    row("Point 2 Y") { numberField(key: "p2Y") }
+                    row("Point 2 Z") { numberField(key: "p2Z") }
+                } else {
+                    row("Centre X") { numberField(key: "centerX") }
+                    row("Centre Y") { numberField(key: "centerY") }
+                    row("Centre Z") { numberField(key: "centerZ") }
+                    row("Rotate X") { numberField(key: "rotateX") }
+                    row("Rotate Y") { numberField(key: "rotateY") }
+                    row("Rotate Z") { numberField(key: "rotateZ") }
+                }
+                row("Locked") {
+                    Toggle("", isOn: boolBinding("locked"))
+                        .labelsHidden()
+                        .controlSize(.mini)
+                }
+            }
+        }
+        .font(.caption.monospacedDigit())
+    }
+
+    private var typeSectionTitle: String {
+        let t = summary["displayAs"] as? String ?? ""
+        return t.isEmpty ? "Object Properties" : t
+    }
+
+    // MARK: - Per-type editor bodies
+
+    @ViewBuilder
+    private var perTypeBody: some View {
+        switch typeKind {
+        case "mesh":
+            row("Object file") { fileRow(key: "objFile", types: meshTypes) }
+            row("Mesh only") {
+                Toggle("", isOn: boolBinding("meshOnly"))
+                    .labelsHidden()
+                    .controlSize(.mini)
+            }
+            row("Brightness") { intField(key: "brightness", min: 0, max: 100) }
+            row("Scale X") { scaleField(key: "scaleX") }
+            row("Scale Y") { scaleField(key: "scaleY") }
+            row("Scale Z") { scaleField(key: "scaleZ") }
+        case "image":
+            row("Image") { fileRow(key: "imageFile", types: imageTypes) }
+            row("Brightness")   { intField(key: "brightness",   min: 0, max: 100) }
+            row("Transparency") { intField(key: "transparency", min: 0, max: 100) }
+            row("Scale X") { scaleField(key: "scaleX") }
+            row("Scale Y") { scaleField(key: "scaleY") }
+            row("Scale Z") { scaleField(key: "scaleZ") }
+        case "gridlines":
+            row("Spacing")  { intField(key: "gridSpacing", min: 1, max: 10000) }
+            row("Width")    { intField(key: "gridWidth",   min: 1, max: 100000) }
+            row("Height")   { intField(key: "gridHeight",  min: 1, max: 100000) }
+            row("Color")    { gridColorPicker }
+            row("Axis")     {
+                Toggle("", isOn: boolBinding("hasAxis"))
+                    .labelsHidden()
+                    .controlSize(.mini)
+            }
+            row("Point to front") {
+                Toggle("", isOn: boolBinding("pointToFront"))
+                    .labelsHidden()
+                    .controlSize(.mini)
+            }
+        case "terrain":
+            row("Image")     { fileRow(key: "imageFile", types: imageTypes) }
+            row("Spacing")   { intField(key: "gridSpacing", min: 1, max: 10000) }
+            row("Width")     { intField(key: "gridWidth",   min: 1, max: 100000) }
+            row("Depth")     { intField(key: "gridDepth",   min: 1, max: 100000) }
+            row("Grid color") { gridColorPicker }
+            row("Brightness")   { intField(key: "brightness",   min: 0, max: 100) }
+            row("Transparency") { intField(key: "transparency", min: 0, max: 100) }
+            row("Hide grid")  {
+                Toggle("", isOn: boolBinding("hideGrid"))
+                    .labelsHidden()
+                    .controlSize(.mini)
+            }
+            row("Hide image") {
+                Toggle("", isOn: boolBinding("hideImage"))
+                    .labelsHidden()
+                    .controlSize(.mini)
+            }
+            Divider().padding(.vertical, 2)
+            terrainEditControls
+        case "ruler":
+            row("Units") { unitsPicker }
+            row("Length") { doubleField(key: "length", min: 0.0001) }
+            Divider().padding(.vertical, 2)
+            Text("The Ruler defines real-world scale for the layout — set its length to match a known dimension in your show.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        default:
+            EmptyView()
+        }
+    }
+
+    // MARK: - Terrain edit controls (J-13)
+
+    @ViewBuilder
+    private var terrainEditControls: some View {
+        let editing = viewModel.terrainEditTarget == objectName
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Edit Heightmap")
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 110, alignment: .leading)
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { editing },
+                    set: { isOn in
+                        viewModel.terrainEditTarget = isOn ? objectName : nil
+                    }
+                ))
+                .labelsHidden()
+                .controlSize(.mini)
+            }
+            if editing {
+                row("Direction") {
+                    Picker("", selection: Binding(
+                        get: { viewModel.terrainEditRaise },
+                        set: { viewModel.terrainEditRaise = $0 }
+                    )) {
+                        Text("Raise").tag(true)
+                        Text("Lower").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 160, alignment: .trailing)
+                }
+                row("Step") {
+                    Slider(value: Binding(
+                        get: { Double(viewModel.terrainEditDelta) },
+                        set: { viewModel.terrainEditDelta = Float($0) }
+                    ), in: 0.1...10.0, step: 0.1)
+                    .frame(maxWidth: 140)
+                    Text(String(format: "%.1f", viewModel.terrainEditDelta))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32, alignment: .trailing)
+                }
+                row("Brush") {
+                    Slider(value: Binding(
+                        get: { Double(viewModel.terrainEditBrushPoints) },
+                        set: { viewModel.terrainEditBrushPoints = CGFloat($0) }
+                    ), in: 0...80, step: 1)
+                    .frame(maxWidth: 140)
+                    Text(viewModel.terrainEditBrushPoints == 0
+                          ? "point"
+                          : "\(Int(viewModel.terrainEditBrushPoints))pt")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 36, alignment: .trailing)
+                }
+                Text("Tap the terrain on the canvas to \(viewModel.terrainEditRaise ? "raise" : "lower") the nearest grid point. The brush radius applies a cosine falloff to neighbours; 0 edits a single point.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    // MARK: - Section helper
+
+    @ViewBuilder
+    private func section<Content: View>(_ expanded: Binding<Bool>,
+                                         title: String,
+                                         @ViewBuilder _ content: () -> Content) -> some View {
+        let body = VStack(alignment: .leading, spacing: 4) { content() }
+            .padding(.vertical, 4)
+        DisclosureGroup(isExpanded: expanded) {
+            body
+        } label: {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.primary)
+        }
+        .accentColor(.secondary)
+    }
+
+    // MARK: - Cells
+
+    @ViewBuilder
+    private func row(_ label: String, @ViewBuilder _ content: () -> some View) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 110, alignment: .leading)
+            Spacer(minLength: 8)
+            content()
+                .lineLimit(1)
+        }
+    }
+
+    private func numberField(key: String, min: Double? = nil) -> some View {
+        LayoutEditorDoubleField(
+            id: "\(objectName).\(key).\(token)",
+            initial: doubleVal(key),
+            min: min,
+            commit: { newValue in commit(key, NSNumber(value: newValue)) }
+        )
+        .frame(maxWidth: 110, alignment: .trailing)
+    }
+
+    private func doubleField(key: String, min: Double?) -> some View {
+        LayoutEditorDoubleField(
+            id: "\(objectName).\(key).\(token)",
+            initial: doubleVal(key),
+            min: min,
+            commit: { newValue in commit(key, NSNumber(value: newValue)) }
+        )
+        .frame(maxWidth: 110, alignment: .trailing)
+    }
+
+    /// J-14 — scale field with higher precision than the default
+    /// numberField (scales are typically 0.5, 1.25, etc., not
+    /// whole numbers). Allows negative values (flips).
+    private func scaleField(key: String) -> some View {
+        LayoutEditorDoubleField(
+            id: "\(objectName).\(key).\(token)",
+            initial: doubleVal(key),
+            min: nil,
+            max: nil,
+            precision: 3,
+            commit: { newValue in commit(key, NSNumber(value: newValue)) }
+        )
+        .frame(maxWidth: 110, alignment: .trailing)
+    }
+
+    private func intField(key: String, min: Double, max: Double) -> some View {
+        LayoutEditorDoubleField(
+            id: "\(objectName).\(key).\(token)",
+            initial: Double(intVal(key)),
+            min: min,
+            max: max,
+            precision: 0,
+            commit: { newValue in commit(key, NSNumber(value: Int(newValue))) }
+        )
+        .frame(maxWidth: 90, alignment: .trailing)
+    }
+
+    @ViewBuilder
+    private func fileRow(key: String, types: [UTType]) -> some View {
+        let path = summary[key] as? String ?? ""
+        let label = path.isEmpty ? "—" : (path as NSString).lastPathComponent
+        HStack(spacing: 6) {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 110, alignment: .trailing)
+            Button {
+                onPickFile(key, types)
+            } label: {
+                Image(systemName: "folder")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            if !path.isEmpty {
+                Button(role: .destructive) {
+                    commit(key, "" as NSString)
+                } label: {
+                    Image(systemName: "xmark.circle")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var gridColorPicker: some View {
+        let hex = summary["gridColor"] as? String ?? ""
+        let parsed = Color(hexString: hex) ?? .green
+        return HStack(spacing: 6) {
+            ColorPicker("", selection: Binding(
+                get: { parsed },
+                set: { newColor in
+                    commit("gridColor", newColor.toHexString() as NSString)
+                }
+            ), supportsOpacity: false)
+                .labelsHidden()
+            Text(hex.isEmpty ? "—" : hex)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 80, alignment: .leading)
+        }
+    }
+
+    private var unitsPicker: some View {
+        // Index → label mapping from RulerObject.h:
+        //   0=m, 1=cm, 2=mm, 3=yd, 4=ft, 5=in
+        let opts = (summary["unitOptions"] as? [String]) ?? ["m", "cm", "mm", "yd", "ft", "in"]
+        let idx = intVal("units")
+        return Menu {
+            ForEach(Array(opts.enumerated()), id: \.offset) { i, label in
+                Button {
+                    commit("units", NSNumber(value: i))
+                } label: {
+                    HStack {
+                        Text(label)
+                        if i == idx {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(idx >= 0 && idx < opts.count ? opts[idx] : "—")
+                .truncationMode(.middle)
+                .frame(maxWidth: 80, alignment: .trailing)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+    }
+
+    private func boolBinding(_ key: String) -> Binding<Bool> {
+        Binding(
+            get: { summary[key] as? Bool ?? false },
+            set: { commit(key, NSNumber(value: $0)) }
+        )
+    }
+
+    private var layoutGroupPicker: some View {
+        Menu {
+            ForEach(layoutGroups, id: \.self) { name in
+                Button {
+                    commit("layoutGroup", name as NSString)
+                } label: {
+                    HStack {
+                        Text(name)
+                        if name == (summary["layoutGroup"] as? String) {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(summary["layoutGroup"] as? String ?? "Default")
+                .truncationMode(.middle)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+    }
+
+    private func doubleVal(_ key: String) -> Double {
+        (summary[key] as? NSNumber)?.doubleValue ?? 0.0
+    }
+    private func intVal(_ key: String) -> Int {
+        (summary[key] as? NSNumber)?.intValue ?? 0
+    }
+
+    // J-12 — UTType lists for the file pickers. `.image` covers
+    // most user-friendly bitmap formats; mesh is intentionally
+    // narrow (xLights only loads `.obj`).
+    private var imageTypes: [UTType] {
+        [.png, .jpeg, .tiff, .bmp, .gif, .image]
+    }
+    private var meshTypes: [UTType] {
+        // No native UTType for OBJ — use a filename-extension type.
+        [UTType(filenameExtension: "obj") ?? .data]
+    }
+}
+
 /// Inline double-typed text field. Re-creates state from the
 /// `initial` value whenever `id` changes (so a token bump elsewhere
 /// repaints us) but otherwise lets the user keep typing without
@@ -1190,6 +3544,10 @@ private struct LayoutEditorDoubleField: View {
     let id: String
     let initial: Double
     let min: Double?
+    /// J-6 — optional clamps + precision; backwards compatible
+    /// with call sites that only set `min`.
+    var max: Double? = nil
+    var precision: Int = 2
     let commit: (Double) -> Void
 
     @State private var draft: String = ""
@@ -1220,13 +3578,15 @@ private struct LayoutEditorDoubleField: View {
         }
         var v = parsed
         if let lo = min, v < lo { v = lo }
+        if let hi = max, v > hi { v = hi }
         commit(v)
     }
 
     private func format(_ v: Double) -> String {
-        // 2 decimals matches desktop's wxPropertyGrid display
-        // precision for layout properties.
-        String(format: "%.2f", v)
+        // 2 decimals matches desktop's wxPropertyGrid default;
+        // overridden via `precision` for int fields (0) or higher-
+        // precision floats.
+        String(format: "%.\(Swift.max(0, precision))f", v)
     }
 }
 
@@ -1305,6 +3665,284 @@ private struct AddModelSheet: View {
     }
 }
 
+/// J-7 (group CRUD) — name-only sheet for creating a fresh
+/// ModelGroup in the active layout group. Member list is populated
+/// from the property pane after creation (one-step-at-a-time UX is
+/// less error-prone than a sheet with two distinct sections).
+private struct NewGroupSheet: View {
+    let existingNames: Set<String>
+    let onCreate: (String) -> Void
+    let onCancel: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String = ""
+    @FocusState private var nameFocused: Bool
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private var collision: Bool {
+        !trimmedName.isEmpty && existingNames.contains(trimmedName)
+    }
+    private var canCreate: Bool {
+        !trimmedName.isEmpty && !collision
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Name") {
+                    TextField("Group name", text: $name)
+                        .focused($nameFocused)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.words)
+                }
+                if collision {
+                    Section {
+                        Label("\"\(trimmedName)\" is already in use",
+                               systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Section {
+                    Text("The new group lands in the active layout group with empty members. Add models from the property pane after it's created.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("New Group")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onCancel() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create") {
+                        onCreate(trimmedName)
+                    }
+                    .disabled(!canCreate)
+                }
+            }
+            .onAppear { nameFocused = true }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+/// J-7 → J-9 (group CRUD) — multi-select member picker with
+/// submodel tree. Top-level rows are models / groups; tapping the
+/// chevron expands a row to surface that model's submodels
+/// (full "Parent/Sub" names). Tap-to-toggle works at any level
+/// so the user can pick "Arch1" or specifically "Arch1/Inner".
+/// Existing members of the target group are pre-filtered out at
+/// the call site.
+private struct AddMemberSheet: View {
+    let groupName: String
+    /// Top-level model / group names (no submodels yet).
+    let candidates: [String]
+    /// Names of submodels already-in-the-group. The sheet
+    /// dims / hides these inside the tree so the user can't
+    /// re-add them.
+    let existingMembers: Set<String>
+    /// Async submodel lookup: returns the "Parent/Sub" full
+    /// names for one parent. Called lazily when the user
+    /// expands a row.
+    let submodelsFor: (String) -> [String]
+    let onAdd: ([String]) -> Void
+    let onCancel: () -> Void
+
+    @State private var picked: Set<String> = []
+    @State private var expanded: Set<String> = []
+    @State private var filter: String = ""
+
+    /// Filtered top-level candidates. Match is OR across model
+    /// name and any submodel name (so searching "Inner" surfaces
+    /// the parent even if its submodel matches, like the vendor
+    /// search does).
+    private var filteredCandidates: [String] {
+        let q = filter.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return candidates }
+        return candidates.filter { name in
+            if name.localizedCaseInsensitiveContains(q) { return true }
+            return submodelsFor(name).contains(where: {
+                $0.localizedCaseInsensitiveContains(q)
+            })
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            if candidates.isEmpty {
+                ContentUnavailableView {
+                    Label("Nothing left to add", systemImage: "checkmark.circle")
+                } description: {
+                    Text("This group already contains every available model.")
+                }
+                .navigationTitle("Add to \(groupName)")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { onCancel() }
+                    }
+                }
+            } else {
+                List {
+                    ForEach(filteredCandidates, id: \.self) { name in
+                        AddMemberRow(
+                            name: name,
+                            picked: $picked,
+                            expanded: $expanded,
+                            existingMembers: existingMembers,
+                            submodelsFor: submodelsFor
+                        )
+                    }
+                }
+                .listStyle(.plain)
+                .searchable(text: $filter,
+                            placement: .navigationBarDrawer(displayMode: .always),
+                            prompt: "Filter models or submodels")
+                .navigationTitle("Add to \(groupName)")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { onCancel() }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Add\(picked.isEmpty ? "" : " \(picked.count)")") {
+                            onAdd(Array(picked))
+                        }
+                        .disabled(picked.isEmpty)
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+/// J-9 — single row in AddMemberSheet. Handles the chevron-toggle
+/// for expanding submodels and the tap-to-pick gesture for the
+/// row itself (model or submodel).
+private struct AddMemberRow: View {
+    let name: String
+    @Binding var picked: Set<String>
+    @Binding var expanded: Set<String>
+    let existingMembers: Set<String>
+    let submodelsFor: (String) -> [String]
+
+    private var submodels: [String] { submodelsFor(name) }
+    private var hasSubmodels: Bool { !submodels.isEmpty }
+    private var isExpanded: Bool { expanded.contains(name) }
+    private var isPicked: Bool { picked.contains(name) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            row(name: name,
+                indent: 0,
+                showChevron: hasSubmodels,
+                isExpanded: isExpanded,
+                isPicked: isPicked,
+                already: false,
+                onChevron: {
+                    if isExpanded {
+                        expanded.remove(name)
+                    } else {
+                        expanded.insert(name)
+                    }
+                },
+                onPick: { toggle(name) })
+
+            if isExpanded {
+                ForEach(submodels, id: \.self) { sub in
+                    let already = existingMembers.contains(sub)
+                    row(name: sub,
+                        indent: 1,
+                        showChevron: false,
+                        isExpanded: false,
+                        isPicked: picked.contains(sub),
+                        already: already,
+                        onChevron: {},
+                        onPick: { if !already { toggle(sub) } })
+                }
+            }
+        }
+    }
+
+    private func toggle(_ n: String) {
+        if picked.contains(n) {
+            picked.remove(n)
+        } else {
+            picked.insert(n)
+        }
+    }
+
+    @ViewBuilder
+    private func row(name: String,
+                      indent: Int,
+                      showChevron: Bool,
+                      isExpanded: Bool,
+                      isPicked: Bool,
+                      already: Bool,
+                      onChevron: @escaping () -> Void,
+                      onPick: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            if indent > 0 {
+                Spacer().frame(width: CGFloat(indent) * 18)
+            }
+            if showChevron {
+                Button {
+                    onChevron()
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Spacer().frame(width: 16)
+            }
+            Button {
+                onPick()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: isPicked
+                           ? "checkmark.circle.fill"
+                           : (already ? "checkmark.circle" : "circle"))
+                        .foregroundStyle(already
+                                          ? AnyShapeStyle(.secondary)
+                                          : (isPicked
+                                              ? AnyShapeStyle(Color.accentColor)
+                                              : AnyShapeStyle(.secondary)))
+                    Image(systemName: name.contains("/") ? "square.on.square" : "cube")
+                        .foregroundStyle(.tertiary)
+                    Text(displayName(name))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(already ? .secondary : .primary)
+                    if already {
+                        Text("(already a member)")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(already)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func displayName(_ n: String) -> String {
+        // Submodel rows are indented under their parent — show
+        // just the trailing portion to keep visual hierarchy clean.
+        if let slash = n.firstIndex(of: "/") {
+            return String(n[n.index(after: slash)...])
+        }
+        return n
+    }
+}
+
 /// Phase J-4 (multi-select) — operations bar shown when 2+ models
 /// are selected. Hosts Align ▾, Distribute ▾, Match Size ▾, and
 /// Clear. Top-centered like the creation banner.
@@ -1314,6 +3952,9 @@ private struct MultiSelectActionBar: View {
     let onAlign: (String) -> Void
     let onDistribute: (String) -> Void
     let onMatchSize: (String) -> Void
+    let onFlip: (String) -> Void
+    let onDuplicate: () -> Void
+    let onGroup: () -> Void
     let onClear: () -> Void
 
     private var canDistribute: Bool { selection.count >= 3 }
@@ -1381,6 +4022,38 @@ private struct MultiSelectActionBar: View {
             .menuStyle(.borderlessButton)
             .foregroundStyle(.white)
 
+            Menu {
+                Button("Flip Horizontal") { onFlip("horizontal") }
+                Button("Flip Vertical")   { onFlip("vertical") }
+            } label: {
+                Label("Flip", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right")
+                    .font(.caption.weight(.medium))
+            }
+            .menuStyle(.borderlessButton)
+            .foregroundStyle(.white)
+
+            Divider()
+                .frame(height: 24)
+                .background(.white.opacity(0.3))
+
+            Button {
+                onDuplicate()
+            } label: {
+                Label("Duplicate", systemImage: "plus.square.on.square")
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+
+            Button {
+                onGroup()
+            } label: {
+                Label("Group", systemImage: "square.stack.3d.up")
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+
             Divider()
                 .frame(height: 24)
                 .background(.white.opacity(0.3))
@@ -1407,6 +4080,7 @@ private struct InlineModelActionBar: View {
     let summaryToken: Int
     let onPropertyChange: () -> Void
     let onRequestDelete: () -> Void
+    let onRequestDuplicate: () -> Void
 
     var body: some View {
         // `TimelineView(.animation)` refreshes its content every
@@ -1471,6 +4145,15 @@ private struct InlineModelActionBar: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
+
+                Button {
+                    onRequestDuplicate()
+                } label: {
+                    Image(systemName: "plus.square.on.square")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.blue)
 
                 Button(role: .destructive) {
                     onRequestDelete()
@@ -1823,6 +4506,45 @@ private struct LayoutEditorCanvasControls: View {
 /// iPadOS auto-restoring this scene on launch (we want the user to
 /// reopen it explicitly via the Tools menu, not have it pop up
 /// behind the main sequencer window).
+/// J-8 — Hex string ↔ SwiftUI Color helpers for the Tag Color
+/// picker. Desktop stores tag colours as `#RRGGBB`; the picker
+/// round-trips through these to keep the on-disk representation
+/// unchanged. Returns nil for unparseable strings so the call
+/// site can fall back to a sensible default (.black).
+fileprivate extension Color {
+    init?(hexString: String) {
+        var s = hexString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6 || s.count == 8,
+              let v = UInt32(s, radix: 16) else { return nil }
+        let r, g, b, a: Double
+        if s.count == 8 {
+            r = Double((v >> 24) & 0xff) / 255.0
+            g = Double((v >> 16) & 0xff) / 255.0
+            b = Double((v >>  8) & 0xff) / 255.0
+            a = Double( v        & 0xff) / 255.0
+        } else {
+            r = Double((v >> 16) & 0xff) / 255.0
+            g = Double((v >>  8) & 0xff) / 255.0
+            b = Double( v        & 0xff) / 255.0
+            a = 1.0
+        }
+        self.init(.sRGB, red: r, green: g, blue: b, opacity: a)
+    }
+
+    /// Emits `#RRGGBB`; alpha is dropped (desktop tag colours don't
+    /// carry alpha and we don't want a round-trip to introduce one).
+    func toHexString() -> String {
+        let ui = UIColor(self)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        ui.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let ir = Int((r * 255).rounded())
+        let ig = Int((g * 255).rounded())
+        let ib = Int((b * 255).rounded())
+        return String(format: "#%02X%02X%02X", ir, ig, ib)
+    }
+}
+
 struct LayoutEditorWindowRoot: View {
     @Environment(SequencerViewModel.self) var viewModel
     @Environment(\.dismissWindow) private var dismissWindow

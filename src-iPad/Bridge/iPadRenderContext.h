@@ -186,6 +186,13 @@ public:
     OutputManager& GetOutputManager() { return _outputManager; }
     ModelManager& GetModelManager() { return *_modelManager; }
     ViewObjectManager& GetAllObjects() { return *_viewObjectManager; }
+    // J-7 — null-safe checks. `GetModelManager()` / `GetAllObjects()`
+    // dereference the unique_ptr without guarding, so callers that
+    // can run before `LoadShowFolder` must check via these first.
+    // `GetModelsForActivePreview()` does this internally; methods
+    // that call `GetModels()` direct do not.
+    bool HasModelManager() const { return _modelManager != nullptr; }
+    bool HasViewObjectManager() const { return _viewObjectManager != nullptr; }
     SequenceFile* GetSequenceFile() { return _sequenceFile.get(); }
     // B49: expose the render engine so the export-model bridge can
     // call `RenderEngine::ExportModelData` without creating a
@@ -274,6 +281,17 @@ public:
     int GetActiveBackgroundAlpha() const;
     bool GetActiveScaleBackgroundImage() const;
 
+    // J-8 (2D Background pseudo-object) — write through to the
+    // correct storage (default <settings> or named group) and
+    // record the group name in `_dirtyBackgroundGroups`. The save
+    // patcher rewrites the matching XML attributes in place. Each
+    // setter returns YES iff the value actually changed (matching
+    // the layout-property setter convention).
+    bool SetActiveBackgroundImage(const std::string& path);
+    bool SetActiveBackgroundBrightness(int brightness);
+    bool SetActiveBackgroundAlpha(int alpha);
+    bool SetActiveScaleBackgroundImage(bool scale);
+
     // Expanded list of models to render for the active layout group.
     // Filters by layout_group and expands ModelGroup children exactly
     // like desktop UpdateModelsList (TabSequence.cpp:1209), minus
@@ -330,14 +348,75 @@ public:
     void MarkLayoutModelDirty(const std::string& modelName) {
         if (!modelName.empty()) _dirtyLayoutModels.insert(modelName);
     }
-    bool HasDirtyLayoutModels() const { return !_dirtyLayoutModels.empty(); }
+    // J-6 (view object editing) — view objects live in their own
+    // XML section (`<view_objects>`); SaveLayoutChanges() walks
+    // this set separately so a dirty model + dirty object can both
+    // land in a single save.
+    void MarkLayoutViewObjectDirty(const std::string& objectName) {
+        if (!objectName.empty()) _dirtyLayoutViewObjects.insert(objectName);
+    }
+    // J-12 (view object CRUD) — structural lifecycle. Mirrors
+    // the J-7 group create/delete plumbing.
+    void MarkViewObjectCreated(const std::string& objectName) {
+        if (objectName.empty()) return;
+        _createdViewObjects.insert(objectName);
+        _deletedViewObjects.erase(objectName);
+    }
+    void MarkViewObjectDeleted(const std::string& objectName) {
+        if (objectName.empty()) return;
+        if (_createdViewObjects.erase(objectName) > 0) {
+            _dirtyLayoutViewObjects.erase(objectName);
+            return;
+        }
+        _deletedViewObjects.insert(objectName);
+        _dirtyLayoutViewObjects.erase(objectName);
+    }
+    // J-7 (group CRUD) — structural group lifecycle. A newly-
+    // created group needs a fresh `<modelGroup>` element appended;
+    // a deleted group needs its element removed. Plain edits go
+    // through the normal dirty set.
+    void MarkGroupCreated(const std::string& groupName) {
+        if (groupName.empty()) return;
+        _createdGroups.insert(groupName);
+        // If the user deletes then re-creates with the same name,
+        // cancel the pending delete.
+        _deletedGroups.erase(groupName);
+    }
+    void MarkGroupDeleted(const std::string& groupName) {
+        if (groupName.empty()) return;
+        // If the group was created in-memory and never saved, the
+        // delete cancels out — nothing on disk to remove.
+        if (_createdGroups.erase(groupName) > 0) {
+            _dirtyLayoutModels.erase(groupName);
+            return;
+        }
+        _deletedGroups.insert(groupName);
+        _dirtyLayoutModels.erase(groupName);
+    }
+    bool HasDirtyLayoutModels() const {
+        return !_dirtyLayoutModels.empty() ||
+               !_dirtyLayoutViewObjects.empty() ||
+               !_createdGroups.empty() ||
+               !_deletedGroups.empty() ||
+               !_dirtyBackgroundGroups.empty() ||
+               !_createdViewObjects.empty() ||
+               !_deletedViewObjects.empty();
+    }
     bool SaveLayoutChanges();
     // Clear the dirty set without writing to disk — used after a
     // Discard Changes that has rolled back every in-memory edit
     // through the undo stack. The undo restores re-marked every
     // model dirty; without this clear, hasUnsavedLayoutChanges()
     // reports true and the Save button stays enabled.
-    void ClearDirtyLayoutModels() { _dirtyLayoutModels.clear(); }
+    void ClearDirtyLayoutModels() {
+        _dirtyLayoutModels.clear();
+        _dirtyLayoutViewObjects.clear();
+        _createdGroups.clear();
+        _deletedGroups.clear();
+        _dirtyBackgroundGroups.clear();
+        _createdViewObjects.clear();
+        _deletedViewObjects.clear();
+    }
 
     // Phase J-2 — layout undo. Snapshot the common-properties
     // surface (centre, dimensions, rotation, locked, layoutGroup,
@@ -439,6 +518,28 @@ private:
     // has diverged from the on-disk file. SaveLayoutChanges() reads +
     // drains this set.
     std::set<std::string> _dirtyLayoutModels;
+    // J-6 — view objects with pending edits in the
+    // `<view_objects>` section. SaveLayoutChanges() patches each
+    // matching `<view_object>` element in place; the on-disk form
+    // is a flat attribute list so we don't need full serialization.
+    std::set<std::string> _dirtyLayoutViewObjects;
+    // J-7 — model groups that exist in-memory but not yet on
+    // disk. SaveLayoutChanges() appends fresh `<modelGroup>`
+    // elements for these. Cleared on save.
+    std::set<std::string> _createdGroups;
+    // J-7 — model groups that should be removed from disk on
+    // next save (already gone from in-memory ModelManager).
+    std::set<std::string> _deletedGroups;
+    // J-12 — view objects created in-memory that need full
+    // serialization on next save (append to <view_objects>).
+    std::set<std::string> _createdViewObjects;
+    // J-12 — view objects to drop from disk on next save.
+    std::set<std::string> _deletedViewObjects;
+    // J-8 (2D Background pseudo-object) — set of layout-group
+    // names whose background settings have unsaved edits.
+    // "Default" means the top-level `<settings>` element;
+    // anything else maps into `<layoutGroups>`.
+    std::set<std::string> _dirtyBackgroundGroups;
 
     // J-2 — undo stack for layout edits. Bounded to 100 entries.
     std::deque<LayoutUndoEntry> _layoutUndoStack;
