@@ -11,6 +11,11 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.09  May ??, 2026
+    -bug (dkulp)                Layout preview: guard Model::DisplayModelOnWindow / DisplayEffectOnWindow
+                                against null Nodes and empty Coords in the non-depth-sort node-order
+                                builder. Top Mac crash bucket (24 reports): rendering a freshly-created
+                                Tree/Sphere/Cube _newModel during 3D drag-to-place hit UB before geometry
+                                was populated.
     -enh (dkulp)                macOS crash report: capture every thread's backtrace at the moment of
                                 the crash into a new `all-threads.txt` file.
     -bug (dkulp)                Stem Separator crash: guard the CoreML inference call with @try/@catch and reject
