@@ -1403,6 +1403,17 @@ void LayoutPanel::SetDisplay2DCenter0(bool bb) {
 void LayoutPanel::OnPropertyGridChanging(wxPropertyGridEvent& event) {
     std::string name = event.GetPropertyName().ToStdString();
     xlights->AddTraceMessage("LayoutPanel::OnPropertyGridChanging  Property: " + name);
+    // event.GetProperty() can be null when wxPropertyGrid fires CHANGING
+    // during a grid rebuild (the prior selected property has already been
+    // detached). GetPropertyName above survives that case because it falls
+    // back to a cached name string, but the dereferences below would
+    // segfault. Top of bucket for "BkgSizeWidth" changes during layout-
+    // group switch: 5 reports / 2 reporters as of 2026.07.
+    wxPGProperty* prop = event.GetProperty();
+    if (prop == nullptr) {
+        spdlog::warn("LayoutPanel::OnPropertyGridChanging: event has no property (rebuild in flight?); ignoring '{}'.", name);
+        return;
+    }
     // Same dangling-pointer guard as OnPropertyGridChange - see IsSelectedBaseObjectValid.
     if (selectedBaseObject != nullptr && !IsSelectedBaseObjectValid()) {
         spdlog::warn("LayoutPanel::OnPropertyGridChanging: selectedBaseObject was stale; clearing cached selection.");
@@ -1431,7 +1442,7 @@ void LayoutPanel::OnPropertyGridChanging(wxPropertyGridEvent& event) {
                 // ignore the submodel changes for now.
             //    int a = 0;
             } else {
-                CreateUndoPoint("ModelProperty", selectedModel->name, name, event.GetProperty()->GetValue().GetString().ToStdString());
+                CreateUndoPoint("ModelProperty", selectedModel->name, name, prop->GetValue().GetString().ToStdString());
                 _propertyAdapter->OnPropertyGridChanging(propertyEditor, event);
             }
         } else {
@@ -1444,12 +1455,12 @@ void LayoutPanel::OnPropertyGridChanging(wxPropertyGridEvent& event) {
                     event.Veto();
                 }
             } else {
-                CreateUndoPoint("ObjectProperty", selectedObject->name, name, event.GetProperty()->GetValue().GetString().ToStdString());
+                CreateUndoPoint("ObjectProperty", selectedObject->name, name, prop->GetValue().GetString().ToStdString());
                 //objects_panel->GetSelectedObject()->OnPropertyGridChanging(propertyEditor, event);
             }
         }
     } else {
-        CreateUndoPoint("Background", "", name, event.GetProperty()->GetValue().GetString().ToStdString());
+        CreateUndoPoint("Background", "", name, prop->GetValue().GetString().ToStdString());
     }
 }
 

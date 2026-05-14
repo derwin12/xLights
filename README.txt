@@ -11,6 +11,12 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.09  May ??, 2026
+    -bug (dkulp)                LayoutPanel: null-check event.GetProperty() in OnPropertyGridChanging.
+                                wxPropertyGrid can fire CHANGING with a null property during a grid rebuild
+                                (the prior selection was already detached); the three CreateUndoPoint call
+                                sites that dereferenced it crashed under that race. 5 reports / 2 reporters
+                                on 2026.07, triggered by editing the BkgSizeWidth/Height background-size
+                                spinners while the layout group was being switched.
     -bug (dkulp)                Layout preview: guard Model::DisplayModelOnWindow / DisplayEffectOnWindow
                                 against null Nodes and empty Coords in the non-depth-sort node-order
                                 builder. Top Mac crash bucket (24 reports): rendering a freshly-created
