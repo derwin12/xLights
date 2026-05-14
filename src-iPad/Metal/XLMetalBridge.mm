@@ -15,6 +15,9 @@
 #include "../Bridge/iPadRenderContext.h"
 #include "models/Model.h"
 #include "models/ModelManager.h"
+#include "models/Node.h"
+#include "models/RulerObject.h"
+#include <pugixml.hpp>
 #include "models/ViewObject.h"
 #include "models/ViewObjectManager.h"
 #include "render/ViewpointMgr.h"
@@ -33,12 +36,14 @@
 #import <ImageIO/ImageIO.h>
 #import <UIKit/UIKit.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <set>
 #include <string>
+#include <vector>
 #include <spdlog/spdlog.h>
 
 #define PIXEL_SIZE_ON_DIALOGS 2.0
@@ -57,7 +62,8 @@
     BOOL _isLayoutEditor;        // YES = LayoutEditor pane (selection / handles enabled)
     BOOL _showFirstPixel;        // J-2 — `highlightFirst` arg to DisplayModelOnWindow
     BOOL _showViewObjects;       // House Preview view-object visibility toggle
-    std::string _selectedModelName;  // J-2 — Layout Editor selection ring
+    std::string _selectedModelName;  // J-2 — Layout Editor selection ring (primary)
+    std::set<std::string> _extraSelectedModels;  // J-4 — multi-select secondary set
     BOOL _showLayoutGrid;            // J-2 — Layout Editor 2D grid overlay
     BOOL _showLayoutBoundingBox;     // J-2 — Layout Editor canvas bbox
     BOOL _layoutOverlaysSeeded;      // first draw seeds from rgbeffects state
@@ -251,6 +257,16 @@ static std::unique_ptr<xlImage> LoadImageFile(const std::string& path, int& outW
         _selectedModelName.clear();
     } else {
         _selectedModelName = std::string([name UTF8String]);
+    }
+}
+
+- (void)setExtraSelectedModels:(NSArray<NSString*>*)names {
+    _extraSelectedModels.clear();
+    if (names == nil) return;
+    for (NSString* n in names) {
+        if (n.length > 0) {
+            _extraSelectedModels.insert(std::string([n UTF8String]));
+        }
     }
 }
 
@@ -1020,6 +1036,174 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     return YES;
 }
 
+#pragma mark - J-4 multi-select align / distribute / match
+
+namespace {
+// Translate `model` so the named edge / centre matches `target`.
+// Returns true if the move actually shifted anything (so the
+// caller can avoid marking pristine models dirty).
+bool ApplyAlign(Model* model, const std::string& edge, float target) {
+    auto& loc = model->GetModelScreenLocation();
+    if (loc.IsLocked()) return false;
+    if (model->IsFromBase()) return false;
+    float current = 0.0f;
+    bool isH = false, isV = false, isD = false;
+    if (edge == "left")        { current = loc.GetLeft();        isH = true; }
+    else if (edge == "right")  { current = loc.GetRight();       isH = true; }
+    else if (edge == "centerH"){ current = loc.GetHcenterPos();  isH = true; }
+    else if (edge == "top")    { current = loc.GetTop();         isV = true; }
+    else if (edge == "bottom") { current = loc.GetBottom();      isV = true; }
+    else if (edge == "centerV"){ current = loc.GetVcenterPos();  isV = true; }
+    else if (edge == "front")  { current = loc.GetFront();       isD = true; }
+    else if (edge == "back")   { current = loc.GetBack();        isD = true; }
+    else if (edge == "centerD"){ current = loc.GetDcenterPos();  isD = true; }
+    else return false;
+    const float delta = target - current;
+    if (std::fabs(delta) < 1e-4f) return false;
+    if (isH) loc.SetHcenterPos(loc.GetHcenterPos() + delta);
+    if (isV) loc.SetVcenterPos(loc.GetVcenterPos() + delta);
+    if (isD) loc.SetDcenterPos(loc.GetDcenterPos() + delta);
+    return true;
+}
+
+float ReadAlignReference(Model* model, const std::string& edge) {
+    auto& loc = model->GetModelScreenLocation();
+    if (edge == "left")        return loc.GetLeft();
+    if (edge == "right")       return loc.GetRight();
+    if (edge == "centerH")     return loc.GetHcenterPos();
+    if (edge == "top")         return loc.GetTop();
+    if (edge == "bottom")      return loc.GetBottom();
+    if (edge == "centerV")     return loc.GetVcenterPos();
+    if (edge == "front")       return loc.GetFront();
+    if (edge == "back")        return loc.GetBack();
+    if (edge == "centerD")     return loc.GetDcenterPos();
+    return 0.0f;
+}
+} // namespace
+
+- (BOOL)alignModels:(NSArray<NSString*>*)names
+            toLeader:(NSString*)leader
+                  by:(NSString*)edge
+         forDocument:(XLSequenceDocument*)doc {
+    if (!doc || names.count == 0 || leader.length == 0 || edge.length == 0) return NO;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return NO;
+    Model* leaderModel = rctx->GetModelManager()[leader.UTF8String];
+    if (!leaderModel) return NO;
+    const std::string edgeStr = edge.UTF8String;
+    const float target = ReadAlignReference(leaderModel, edgeStr);
+    BOOL anyMoved = NO;
+    const std::string leaderStd = leader.UTF8String;
+    for (NSString* n in names) {
+        if (n.length == 0) continue;
+        const std::string nm = n.UTF8String;
+        if (nm == leaderStd) continue;
+        Model* m = rctx->GetModelManager()[nm];
+        if (!m) continue;
+        if (ApplyAlign(m, edgeStr, target)) {
+            rctx->MarkLayoutModelDirty(nm);
+            anyMoved = YES;
+        }
+    }
+    return anyMoved;
+}
+
+- (BOOL)distributeModels:(NSArray<NSString*>*)names
+                     axis:(NSString*)axis
+              forDocument:(XLSequenceDocument*)doc {
+    if (!doc || names.count < 3 || axis.length == 0) return NO;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return NO;
+    const std::string axisStr = axis.UTF8String;
+    enum class A { H, V, D } which;
+    if      (axisStr == "horizontal") which = A::H;
+    else if (axisStr == "vertical")   which = A::V;
+    else if (axisStr == "depth")      which = A::D;
+    else return NO;
+
+    // Collect editable models with their centre on the chosen axis.
+    struct Entry { Model* m; std::string name; float pos; };
+    std::vector<Entry> entries;
+    entries.reserve(names.count);
+    for (NSString* n in names) {
+        if (n.length == 0) continue;
+        const std::string nm = n.UTF8String;
+        Model* m = rctx->GetModelManager()[nm];
+        if (!m) continue;
+        auto& loc = m->GetModelScreenLocation();
+        if (loc.IsLocked() || m->IsFromBase()) continue;
+        float pos = 0.0f;
+        switch (which) {
+            case A::H: pos = loc.GetHcenterPos(); break;
+            case A::V: pos = loc.GetVcenterPos(); break;
+            case A::D: pos = loc.GetDcenterPos(); break;
+        }
+        entries.push_back({m, nm, pos});
+    }
+    if (entries.size() < 3) return NO;
+    std::sort(entries.begin(), entries.end(),
+              [](const Entry& a, const Entry& b) { return a.pos < b.pos; });
+
+    const float lo = entries.front().pos;
+    const float hi = entries.back().pos;
+    const float step = (hi - lo) / static_cast<float>(entries.size() - 1);
+    BOOL anyMoved = NO;
+    for (size_t i = 1; i + 1 < entries.size(); ++i) {
+        const float target = lo + step * static_cast<float>(i);
+        const float delta  = target - entries[i].pos;
+        if (std::fabs(delta) < 1e-4f) continue;
+        auto& loc = entries[i].m->GetModelScreenLocation();
+        switch (which) {
+            case A::H: loc.SetHcenterPos(loc.GetHcenterPos() + delta); break;
+            case A::V: loc.SetVcenterPos(loc.GetVcenterPos() + delta); break;
+            case A::D: loc.SetDcenterPos(loc.GetDcenterPos() + delta); break;
+        }
+        rctx->MarkLayoutModelDirty(entries[i].name);
+        anyMoved = YES;
+    }
+    return anyMoved;
+}
+
+- (BOOL)matchSizeOfModels:(NSArray<NSString*>*)names
+                  toLeader:(NSString*)leader
+                 dimension:(NSString*)dim
+               forDocument:(XLSequenceDocument*)doc {
+    if (!doc || names.count == 0 || leader.length == 0 || dim.length == 0) return NO;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return NO;
+    Model* leaderModel = rctx->GetModelManager()[leader.UTF8String];
+    if (!leaderModel) return NO;
+    auto& leaderLoc = leaderModel->GetModelScreenLocation();
+    const float tw = leaderLoc.GetMWidth();
+    const float th = leaderLoc.GetMHeight();
+    const float td = leaderLoc.GetMDepth();
+    const std::string dimStr = dim.UTF8String;
+    const bool wantW = (dimStr == "width"  || dimStr == "all");
+    const bool wantH = (dimStr == "height" || dimStr == "all");
+    const bool wantD = (dimStr == "depth"  || dimStr == "all");
+    if (!wantW && !wantH && !wantD) return NO;
+    BOOL anyResized = NO;
+    const std::string leaderStd = leader.UTF8String;
+    for (NSString* n in names) {
+        if (n.length == 0) continue;
+        const std::string nm = n.UTF8String;
+        if (nm == leaderStd) continue;
+        Model* m = rctx->GetModelManager()[nm];
+        if (!m) continue;
+        auto& loc = m->GetModelScreenLocation();
+        if (loc.IsLocked() || m->IsFromBase()) continue;
+        bool changed = false;
+        if (wantW && std::fabs(loc.GetMWidth() - tw)  > 1e-4f) { loc.SetMWidth(tw);  changed = true; }
+        if (wantH && std::fabs(loc.GetMHeight() - th) > 1e-4f) { loc.SetMHeight(th); changed = true; }
+        if (wantD && std::fabs(loc.GetMDepth() - td)  > 1e-4f) { loc.SetMDepth(td);  changed = true; }
+        if (changed) {
+            rctx->MarkLayoutModelDirty(nm);
+            anyResized = YES;
+        }
+    }
+    return anyResized;
+}
+
 - (void)endHandleDragForDocument:(XLSequenceDocument*)doc {
     _handleDragNeedsLatch = NO;
 
@@ -1498,6 +1682,95 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     return [NSString stringWithUTF8String:m->GetName().c_str()];
 }
 
+- (nullable NSString*)importXmodelFromPath:(NSString*)path
+                              atScreenPoint:(CGPoint)point
+                                   viewSize:(CGSize)viewSize
+                                forDocument:(XLSequenceDocument*)doc {
+    if (!_preview || !doc || !path || path.length == 0) return nil;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return nil;
+
+    // Parse the .xmodel XML before creating anything — failing
+    // late would leak a stub model into the show.
+    pugi::xml_document xdoc;
+    pugi::xml_parse_result parseRes = xdoc.load_file(path.UTF8String);
+    if (!parseRes) return nil;
+    pugi::xml_node root = xdoc.document_element();
+    if (!root) return nil;
+
+    // CreateDefaultModelFromSavedModelNode wants a baseline Model*
+    // to mutate / replace. Use "Custom" — the import path swaps it
+    // out for the deserialized type anyway, so the placeholder
+    // choice only matters in the very narrow paths where the
+    // function preserves baseline state (start channel, layout
+    // group, hcenter/vcenter — we override those below).
+    Model* baseline = rctx->GetModelManager().CreateDefaultModel("Custom", "1");
+    if (!baseline) return nil;
+    bool cancelled = false;
+    Model* imported = baseline->CreateDefaultModelFromSavedModelNode(
+        baseline, root, rctx->GetModelManager(), cancelled);
+    if (cancelled || !imported) {
+        delete baseline;
+        return nil;
+    }
+
+    // J-4 (import) — match the show's ruler when the imported
+    // xmodel carries real-world dimensions but the deserializer
+    // didn't already apply them. Two file shapes to handle:
+    //   - New format (recent desktop saves): `<dimensions
+    //     units="mm" width=N height=N depth=N>` child element.
+    //     `XmlDeserializingModelFactory::DeserializeModel(...,
+    //     importing=true)` already calls ApplyDimensions for this
+    //     path, which sets `modelMgr.SetUsedRuler()`.
+    //   - Legacy format (most catalog-downloaded files +
+    //     hand-authored exports): `widthmm` / `heightmm` /
+    //     `depthmm` attributes on the root element. The
+    //     deserializer doesn't see these. Apply them here so the
+    //     imported model lands at its real-world size in the
+    //     current show's units instead of whatever world-unit
+    //     scale the original author saved.
+    if (!rctx->GetModelManager().UsedRuler() && RulerObject::GetRuler() != nullptr) {
+        const float widthmm  = static_cast<float>(std::strtod(
+            root.attribute("widthmm").as_string("0"), nullptr));
+        const float heightmm = static_cast<float>(std::strtod(
+            root.attribute("heightmm").as_string("0"), nullptr));
+        const float depthmm  = static_cast<float>(std::strtod(
+            root.attribute("depthmm").as_string("0"), nullptr));
+        if (widthmm > 0 && heightmm > 0) {
+            imported->ApplyDimensions("mm", widthmm, heightmm, depthmm);
+        }
+    }
+
+    // Position via InitializeLocation so the imported model lands
+    // under the touch point rather than at whatever world coords
+    // the .xmodel saved (which is typically the original author's
+    // show coordinate, often off-screen for us).
+    auto& loc = imported->GetModelScreenLocation();
+    double scaleFactor = _canvas->getScaleFactor();
+    if (scaleFactor <= 0) scaleFactor = 1.0;
+    const int px = static_cast<int>(point.x * scaleFactor);
+    const int py = static_cast<int>(point.y * scaleFactor);
+    int initHandle = 0;
+    std::vector<NodeBaseClassPtr> emptyNodes;
+    loc.InitializeLocation(initHandle, px, py, emptyNodes, _preview.get());
+
+    std::string layoutGroup = rctx->GetActiveLayoutGroup();
+    if (layoutGroup.empty() || layoutGroup == "All Models") {
+        layoutGroup = "Default";
+    }
+    imported->SetLayoutGroup(layoutGroup);
+    // NO_CONTROLLER triggers ReworkStartChannel auto-assign so the
+    // imported model doesn't collide with an existing one's
+    // start-channel range. Matches desktop's GetXlightsModel
+    // (LayoutPanel.cpp ~4629).
+    imported->SetControllerName(NO_CONTROLLER, true);
+
+    rctx->GetModelManager().AddModel(imported);
+    rctx->MarkLayoutModelDirty(imported->GetName());
+
+    return [NSString stringWithUTF8String:imported->GetName().c_str()];
+}
+
 - (BOOL)modelUsesPolyPointLocation:(NSString*)name
                        forDocument:(XLSequenceDocument*)doc {
     if (!doc || !name || name.length == 0) return NO;
@@ -1953,15 +2226,19 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
         for (const auto& [model, z] : keyed) {
             const xlColor* useColor = nullptr;
             if (_isLayoutEditor) {
-                bool isSel = (!_selectedModelName.empty() &&
-                              model->GetName() == _selectedModelName);
+                const bool isPrimary = (!_selectedModelName.empty() &&
+                                          model->GetName() == _selectedModelName);
+                const bool isExtra = (!isPrimary &&
+                                       _extraSelectedModels.count(model->GetName()) > 0);
+                const bool isSel = isPrimary || isExtra;
                 model->Selected(isSel);
                 // 3D gizmo: subclass `DrawHandles` only paints the
                 // centre sphere + axis gizmo when `active_handle`
-                // has a value. Latch CentreCycle on select so the
-                // user sees a gizmo, and clear on deselect.
+                // has a value. Latch CentreCycle on the PRIMARY
+                // only (so multi-select doesn't draw N gizmos),
+                // and clear on deselect.
                 auto& sloc = model->GetModelScreenLocation();
-                if (isSel) {
+                if (isPrimary) {
                     if (!sloc.GetActiveHandleId().has_value()) {
                         sloc.SetActiveHandleToCentre();
                     }

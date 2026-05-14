@@ -84,6 +84,13 @@ NS_ASSUME_NONNULL_BEGIN
 // the selection so the ring appears on the next frame.
 - (void)setSelectedModel:(nullable NSString*)name;
 
+// Phase J-4 (multi-select) — secondary selection set. The
+// "primary" model is still driven by `setSelectedModel:` (it owns
+// the gizmo, the action bar anchor, drag origin); these are the
+// rest of the selection, drawn with the selection ring but
+// without handles. Pass an empty array (or nil) to clear.
+- (void)setExtraSelectedModels:(nullable NSArray<NSString*>*)names;
+
 // Phase J-2 — Layout Editor in-canvas overlays. Per-bridge state
 // (not persisted to rgbeffects.xml in J-2). Initial values for
 // the LayoutEditor pane are seeded from iPadRenderContext's
@@ -247,6 +254,18 @@ NS_ASSUME_NONNULL_BEGIN
                                 viewSize:(CGSize)viewSize
                              forDocument:(XLSequenceDocument*)doc;
 
+// Phase J-4 — import an .xmodel file at the touch point. Loads
+// the XML, runs it through `Model::CreateDefaultModelFromSavedModelNode`
+// so DMX / matrix / star / arch / etc. all deserialize through
+// the same path desktop uses, then positions the model at the
+// projected touch point via `InitializeLocation`. Returns the
+// final model name on success (the importer may uniquify it if
+// the show already has a model by that name), nil on failure.
+- (nullable NSString*)importXmodelFromPath:(NSString*)path
+                              atScreenPoint:(CGPoint)point
+                                   viewSize:(CGSize)viewSize
+                                forDocument:(XLSequenceDocument*)doc;
+
 // Phase J-3 (touch UX) — multi-vertex polyline create. Returns
 // YES if `name` is a PolyPoint-style model (Poly Line / MultiPoint).
 // Used by the SwiftUI gesture layer to decide whether the next tap
@@ -340,6 +359,39 @@ NS_ASSUME_NONNULL_BEGIN
 // (caller should repaint); NO if no model is selected / model is
 // locked / 2D.
 - (BOOL)cycleAxisToolForSelectedModelForDocument:(XLSequenceDocument*)doc;
+
+// Phase J-4 (multi-select) — bulk alignment. For each entry in
+// `names`, shift its centre so the named edge / centre matches
+// the leader's. Edges: @"left", @"right", @"top", @"bottom",
+// @"centerH" (X-centre), @"centerV" (Y-centre), @"front",
+// @"back", @"centerD" (Z-centre). Models in `names` that aren't
+// editable (locked / fromBase) are skipped; the leader is never
+// modified. Returns YES if at least one model moved. Caller
+// should mark layout dirty + repaint.
+- (BOOL)alignModels:(NSArray<NSString*>*)names
+            toLeader:(NSString*)leader
+                  by:(NSString*)edge
+         forDocument:(XLSequenceDocument*)doc;
+
+// Phase J-4 (multi-select) — equal-spacing distribution along an
+// axis. Sorts the selection by centre along the chosen axis,
+// keeps the two extreme models in place, and re-spaces the
+// middle ones evenly between them. Needs at least 3 entries.
+// `axis`: @"horizontal" (X), @"vertical" (Y), @"depth" (Z).
+// Returns YES if anything moved.
+- (BOOL)distributeModels:(NSArray<NSString*>*)names
+                     axis:(NSString*)axis
+              forDocument:(XLSequenceDocument*)doc;
+
+// Phase J-4 (multi-select) — match the leader's dimensions.
+// `dim`: @"width", @"height", @"depth", or @"all". Editable
+// non-leader entries are resized; TwoPoint / PolyPoint subclasses
+// honour the setter natively (rescales their points). Returns
+// YES if at least one model resized.
+- (BOOL)matchSizeOfModels:(NSArray<NSString*>*)names
+                  toLeader:(NSString*)leader
+                 dimension:(NSString*)dim
+               forDocument:(XLSequenceDocument*)doc;
 
 // Diagnostic surface for the SwiftUI preview pane. `errorReason`
 // returns the most recent silent-fail reason (no Metal layer, 0×0

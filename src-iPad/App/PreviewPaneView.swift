@@ -213,6 +213,15 @@ struct PreviewPaneView: UIViewRepresentable {
             // the push so the ring appears immediately.
             if previewName == "LayoutEditor" {
                 let newSel = viewModel.layoutEditorSelectedModel ?? ""
+                // J-4 (multi-select) — the extras set is the secondary
+                // selection: every model in the selection except the
+                // primary. Tracked separately so a sidebar pick / tap
+                // doesn't redraw N rings on each update unless the set
+                // changed. Encoded as a stable string for cheap diff.
+                let primary = viewModel.layoutEditorSelectedModel
+                let extras = viewModel.layoutEditorSelection
+                    .filter { $0 != primary }
+                let extrasKey = extras.sorted().joined(separator: "\n")
                 if context.coordinator.lastPushedSelection != newSel {
                     // Clear any lingering hover highlight on the
                     // previously-selected model — without this, the
@@ -223,6 +232,11 @@ struct PreviewPaneView: UIViewRepresentable {
                     _ = bridge.clearHoveredHandle(for: viewModel.document)
                     bridge.setSelectedModel(viewModel.layoutEditorSelectedModel)
                     context.coordinator.lastPushedSelection = newSel
+                    uiView.setNeedsDisplay()
+                }
+                if context.coordinator.lastPushedExtras != extrasKey {
+                    bridge.setExtraSelectedModels(Array(extras))
+                    context.coordinator.lastPushedExtras = extrasKey
                     uiView.setNeedsDisplay()
                 }
                 // Grid + canvas-bbox overlays. Bridge holds the last-
@@ -278,6 +292,9 @@ struct PreviewPaneView: UIViewRepresentable {
         /// so updateUIView can detect Δ vs. the live view-model
         /// state and repaint exactly when the selection changes.
         var lastPushedSelection: String = ""
+        // J-4 (multi-select) — sorted-newline-joined extras keys.
+        // Empty when the secondary selection is empty.
+        var lastPushedExtras: String = ""
         /// J-2 — true while a one-finger pan started on the
         /// LayoutEditor's selected model and is dragging the model
         /// rather than the camera. Set in .began, cleared in .ended.
@@ -662,7 +679,7 @@ struct PreviewPaneView: UIViewRepresentable {
                         viewSize: view.bounds.size,
                         for: viewModel.document) {
                         viewModel.layoutPendingNewModelType = nil
-                        viewModel.layoutEditorSelectedModel = newName
+                        viewModel.layoutSelectSingle(newName)
                         // Polyline-style models enter mid-create
                         // mode after this drag; the .ended branch
                         // keeps the in-progress flag set so the
@@ -1058,6 +1075,26 @@ struct PreviewPaneView: UIViewRepresentable {
                 }
                 return
             }
+            // J-4 (import) — pending .xmodel import. The user
+            // already picked a file via the importer sheet; this
+            // tap drops it at the touch point. Run before the
+            // creation-mode branch so a stray creation flag
+            // doesn't intercept.
+            if let importPath = viewModel.layoutPendingImportPath {
+                if let newName = bridge.importXmodel(fromPath: importPath,
+                                                      atScreenPoint: point,
+                                                      viewSize: size,
+                                                      for: viewModel.document) {
+                    viewModel.layoutPendingImportPath = nil
+                    viewModel.layoutSelectSingle(newName)
+                    NotificationCenter.default.post(
+                        name: .layoutEditorModelMoved,
+                        object: previewNameForNotifications,
+                        userInfo: ["model": newName])
+                    view.setNeedsDisplay()
+                }
+                return
+            }
             // J-3 (touch UX) — Add Model. Tap-without-drag: the
             // user picked a type but didn't drag, so commit the
             // model at its `CreateDefaultModel` geometry. The
@@ -1070,7 +1107,7 @@ struct PreviewPaneView: UIViewRepresentable {
                                                      viewSize: size,
                                                      for: viewModel.document) {
                     viewModel.layoutPendingNewModelType = nil
-                    viewModel.layoutEditorSelectedModel = newName
+                    viewModel.layoutSelectSingle(newName)
                     // Polyline-style models stay in "append vertex"
                     // mode until the user taps Done. Single-vertex
                     // models commit the BeginCreate session here.
@@ -1113,7 +1150,41 @@ struct PreviewPaneView: UIViewRepresentable {
             let hit = bridge.pickModel(atScreenPoint: point,
                                        viewSize: size,
                                        for: viewModel.document)
-            viewModel.layoutEditorSelectedModel = hit
+            if viewModel.layoutEditMode {
+                // J-4 (multi-select) — toggle membership. Tap on
+                // empty space is treated as a no-op so the user
+                // doesn't accidentally wipe a selection by missing
+                // a model with a finger. They use the toolbar's
+                // Clear / Done to leave edit mode entirely.
+                if let name = hit, !name.isEmpty {
+                    if viewModel.layoutEditorSelection.contains(name) {
+                        viewModel.layoutEditorSelection.remove(name)
+                        // If the primary just got dropped, promote
+                        // whatever's still in the set to the
+                        // primary slot so the gizmo / action bar
+                        // re-anchor cleanly.
+                        if viewModel.layoutEditorSelectedModel == name {
+                            viewModel.layoutEditorSelectedModel =
+                                viewModel.layoutEditorSelection.first
+                        }
+                    } else {
+                        viewModel.layoutEditorSelection.insert(name)
+                        // Most-recently-tapped becomes the primary
+                        // — matches Adobe / Figma "last-clicked is
+                        // the key model" convention. Align/match
+                        // ops use this as the leader.
+                        viewModel.layoutEditorSelectedModel = name
+                    }
+                }
+            } else {
+                // Single-select: replace selection wholesale.
+                viewModel.layoutEditorSelectedModel = hit
+                if let name = hit, !name.isEmpty {
+                    viewModel.layoutEditorSelection = [name]
+                } else {
+                    viewModel.layoutEditorSelection.removeAll()
+                }
+            }
         }
 
         // MARK: - Display link

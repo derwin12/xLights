@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Phase J-0 / J-1 — Layout Editor screen. Opens via Tools → Edit
 /// Layout… in its own `WindowGroup("layout-editor")` scene. The
@@ -68,6 +69,39 @@ struct LayoutEditorView: View {
     /// user taps the trash icon in the inline action bar; cleared
     /// after the alert resolves either way.
     @State private var pendingDeleteModelName: String? = nil
+    /// J-4 (import) — drives the .xmodel file picker.
+    @State private var importerVisible: Bool = false
+    /// J-4 (import) — set when a fresh import fails (file unreadable,
+    /// XML parse failure, unknown model type). Surfaced as an alert.
+    @State private var importErrorMessage: String? = nil
+    /// J-4 (download) — drives the vendor catalog browser sheet.
+    @State private var downloadBrowserVisible: Bool = false
+
+    /// J-4 (import) — UTTypes the .fileImporter accepts. Declared
+    /// as a static so the SwiftUI type-checker can resolve the
+    /// `[UTType]` literal in reasonable time (the `?? .data` chain
+    /// inline tripped its budget).
+    private static let importableModelTypes: [UTType] = {
+        ["xmodel", "gdtf", "lff", "lpf"].compactMap {
+            UTType(filenameExtension: $0)
+        }
+    }()
+
+    /// J-4 (import) — `.fileImporter` completion. Stashes the
+    /// picked path for the next canvas-tap to consume.
+    private func handleImportPick(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let granted = url.startAccessingSecurityScopedResource()
+            let path = url.path
+            _ = XLSequenceDocument.obtainAccess(toPath: path, enforceWritable: false)
+            if granted { url.stopAccessingSecurityScopedResource() }
+            viewModel.layoutPendingImportPath = path
+        case .failure(let err):
+            importErrorMessage = err.localizedDescription
+        }
+    }
 
     var body: some View {
         @Bindable var vm = viewModel
@@ -78,64 +112,11 @@ struct LayoutEditorView: View {
             canvas
         }
         .navigationTitle("Edit Layout")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    ForEach(layoutGroups, id: \.self) { name in
-                        Button {
-                            activeLayoutGroup = name
-                        } label: {
-                            HStack {
-                                Text(name)
-                                if name == activeLayoutGroup {
-                                    Spacer()
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "square.stack.3d.up")
-                        Text(activeLayoutGroup).lineLimit(1)
-                    }
-                }
-                .disabled(layoutGroups.count <= 1)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    performUndo()
-                } label: {
-                    Label("Undo", systemImage: "arrow.uturn.backward")
-                }
-                .disabled(!canUndo)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingSaveConfirm = true
-                } label: {
-                    Label("Save", systemImage: "square.and.arrow.down")
-                }
-                .disabled(!hasUnsavedChanges)
-            }
-            // J-3 (touch UX) — Add Model. Tap → sheet with model
-            // types; pick one → enter creation mode (the next tap
-            // on the canvas places the model). Already-selected
-            // models don't conflict; pendingNewModelType is the
-            // single source of truth for "we're placing".
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    ForEach(availableModelTypes, id: \.self) { type in
-                        Button(modelTypeLabel(type)) {
-                            viewModel.layoutPendingNewModelType = type
-                        }
-                    }
-                } label: {
-                    Label("Add Model", systemImage: "plus")
-                }
-                .disabled(!viewModel.isShowFolderLoaded)
-            }
-        }
+        // NavigationSplitView in this scene hides its column chrome,
+        // so `.toolbar`'s `.primaryAction` slots never render.
+        // Layout-group switcher / Undo / Save / Add Model / Select
+        // all live in the canvas overlay (top-left + top-right) so
+        // they're actually reachable.
         .onAppear { refresh() }
         .onDisappear {
             // Drop any half-started Add-Model so the editor opens
@@ -143,6 +124,16 @@ struct LayoutEditorView: View {
             // on a stale type.
             viewModel.layoutPendingNewModelType = nil
             viewModel.layoutPolylineInProgress = nil
+            viewModel.layoutPendingImportPath = nil
+            // J-4 (multi-select) — exit edit mode and collapse to
+            // the primary so the next open starts in a known
+            // single-select state.
+            viewModel.layoutEditMode = false
+            if let primary = viewModel.layoutEditorSelectedModel {
+                viewModel.layoutEditorSelection = [primary]
+            } else {
+                viewModel.layoutEditorSelection.removeAll()
+            }
         }
         .onChange(of: viewModel.isShowFolderLoaded) { _, _ in refresh() }
         .onChange(of: activeLayoutGroup) { _, newValue in
@@ -238,6 +229,33 @@ struct LayoutEditorView: View {
                 viewModel.layoutPendingNewModelType = type
                 addModelSheetVisible = false
             }
+        }
+        // J-4 (download) — vendor catalog browser. On download
+        // we reuse the same `layoutPendingImportPath` path Import
+        // uses, so the user gets the familiar "tap canvas to
+        // place" banner regardless of where the file came from.
+        .sheet(isPresented: $downloadBrowserVisible) {
+            VendorBrowserSheet(onDownloaded: { path in
+                viewModel.layoutPendingImportPath = path
+                downloadBrowserVisible = false
+            })
+        }
+        // J-4 (import) — .xmodel file picker. iPadOS's
+        // `.fileImporter` is the SwiftUI-native wrapping of
+        // UIDocumentPickerViewController; the resulting URL has
+        // security-scoped access already, so we call
+        // `ObtainAccessToURL` to persist the bookmark and stash
+        // the path for the next canvas-tap placement.
+        .fileImporter(isPresented: $importerVisible,
+                      allowedContentTypes: Self.importableModelTypes,
+                      allowsMultipleSelection: false,
+                      onCompletion: handleImportPick)
+        .alert("Import failed",
+               isPresented: Binding(get: { importErrorMessage != nil },
+                                    set: { if !$0 { importErrorMessage = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(importErrorMessage ?? "")
         }
         .alert("Save failed",
                isPresented: Binding(get: { saveErrorMessage != nil },
@@ -343,7 +361,7 @@ struct LayoutEditorView: View {
     private var bindingSelection: Binding<String?> {
         Binding(
             get: { viewModel.layoutEditorSelectedModel },
-            set: { viewModel.layoutEditorSelectedModel = $0 }
+            set: { viewModel.layoutSelectSingle($0) }
         )
     }
 
@@ -367,12 +385,81 @@ struct LayoutEditorView: View {
                             status: PreviewStatus())
                 .background(Color.black)
 
+            // J-4 — top-left overlay: document-state actions.
+            // NavigationSplitView's primary-action toolbar items
+            // never paint in this scene (the column chrome is
+            // hidden), so the layout-group switcher / Undo / Save
+            // would otherwise be unreachable. Same story for the
+            // top-right "+", which has always been canvas-overlay.
+            VStack {
+                HStack(spacing: 6) {
+                    if layoutGroups.count > 1 {
+                        Menu {
+                            ForEach(layoutGroups, id: \.self) { name in
+                                Button {
+                                    activeLayoutGroup = name
+                                } label: {
+                                    HStack {
+                                        Text(name)
+                                        if name == activeLayoutGroup {
+                                            Spacer()
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "square.stack.3d.up")
+                                Text(activeLayoutGroup)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: 140)
+                                Image(systemName: "chevron.down")
+                                    .font(.caption2)
+                            }
+                            .font(.caption)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.regularMaterial, in: Capsule())
+                    }
+
+                    Button {
+                        performUndo()
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!canUndo)
+
+                    Button {
+                        showingSaveConfirm = true
+                    } label: {
+                        ZStack(alignment: .topTrailing) {
+                            Image(systemName: "square.and.arrow.down")
+                            if hasUnsavedChanges {
+                                // Unsaved-changes dot.
+                                Circle()
+                                    .fill(.orange)
+                                    .frame(width: 8, height: 8)
+                                    .offset(x: 3, y: -3)
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!hasUnsavedChanges)
+
+                    Spacer()
+                }
+                .padding(8)
+                Spacer()
+            }
+
             VStack(alignment: .trailing, spacing: 4) {
-                // J-3 (touch UX) — Add Model. Reachable when the
-                // NavigationSplitView's nav bar is hidden (which
-                // is most of the time on iPad in this scene). Tap
-                // → set `addModelSheetVisible`; the sheet on the
-                // root view presents the type picker.
+                // J-3 (touch UX) — Add Model.
                 Button {
                     addModelSheetVisible = true
                 } label: {
@@ -382,6 +469,58 @@ struct LayoutEditorView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(!viewModel.isShowFolderLoaded || availableModelTypes.isEmpty)
+
+                // J-4 (import) — Import .xmodel. Opens the iPadOS
+                // file picker (iCloud Drive, Files, AirDrop receive
+                // folder, etc.). Picked file flips the editor into
+                // placement mode; the next canvas tap drops the
+                // imported model at the touch point.
+                Button {
+                    importerVisible = true
+                } label: {
+                    Image(systemName: "square.and.arrow.down.on.square")
+                        .font(.title3)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!viewModel.isShowFolderLoaded)
+
+                // J-4 (download) — Download from vendor catalog.
+                // Sheet fetches xlights.org's vendor list +
+                // inventories through the shared core catalog
+                // code, then lets the user pick a wiring. On
+                // download, the local xmodel path flips us into
+                // the same placement flow as Import.
+                Button {
+                    downloadBrowserVisible = true
+                } label: {
+                    Image(systemName: "icloud.and.arrow.down")
+                        .font(.title3)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!viewModel.isShowFolderLoaded)
+
+                // J-4 (multi-select) — Photos-style Select toggle.
+                Button {
+                    let entering = !viewModel.layoutEditMode
+                    viewModel.layoutEditMode = entering
+                    if !entering, let primary = viewModel.layoutEditorSelectedModel {
+                        viewModel.layoutEditorSelection = [primary]
+                    } else if entering, viewModel.layoutEditorSelection.isEmpty,
+                              let seed = viewModel.layoutEditorSelectedModel {
+                        viewModel.layoutEditorSelection = [seed]
+                    }
+                } label: {
+                    Image(systemName: viewModel.layoutEditMode
+                                       ? "checkmark.circle.fill"
+                                       : "checkmark.circle")
+                        .font(.title3)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(viewModel.layoutEditMode ? .accentColor : .secondary)
+                .disabled(!viewModel.isShowFolderLoaded)
 
                 Button {
                     controlsVisible.toggle()
@@ -400,6 +539,7 @@ struct LayoutEditorView: View {
                                                 viewModel.layoutEditorSelectedModel)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(8)
 
             // J-3 (touch UX) — creation-mode banner. Visible while
@@ -451,6 +591,32 @@ struct LayoutEditorView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .allowsHitTesting(true)
+            } else if let importPath = viewModel.layoutPendingImportPath {
+                // J-4 (import) — pending-import banner. The file
+                // was picked; the next canvas tap drops the model
+                // at the touch point.
+                let fileName = (importPath as NSString).lastPathComponent
+                VStack {
+                    HStack(spacing: 12) {
+                        Image(systemName: "square.and.arrow.down.on.square.fill")
+                            .foregroundStyle(.green)
+                        Text("Tap canvas to place \(Text(fileName).fontWeight(.semibold))")
+                            .foregroundStyle(.white)
+                        Button("Cancel") {
+                            viewModel.layoutPendingImportPath = nil
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(radius: 3, y: 2)
+                    .padding(.top, 12)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+                .allowsHitTesting(true)
             }
 
             // J-2 UX — model-name labels overlay. Off by default;
@@ -466,8 +632,12 @@ struct LayoutEditorView: View {
             // — see plans/phase-j-touch-ux.md. Anchored to the
             // model's top-centre in screen coords; re-queries
             // every animation frame so it tracks pan / zoom /
-            // orbit / drag without observer wiring.
-            if let selected = viewModel.layoutEditorSelectedModel,
+            // orbit / drag without observer wiring. Hidden in
+            // multi-select mode (the multi-select bar takes over
+            // since the inline bar's per-model actions don't make
+            // sense across a set).
+            if viewModel.layoutEditorSelection.count < 2,
+               let selected = viewModel.layoutEditorSelectedModel,
                !selected.isEmpty {
                 InlineModelActionBar(modelName: selected,
                                       summaryToken: summaryToken,
@@ -480,6 +650,30 @@ struct LayoutEditorView: View {
                                           pendingDeleteModelName = selected
                                       })
                     .allowsHitTesting(true)
+            }
+
+            // J-4 (multi-select) — operations bar. Visible
+            // whenever 2+ models are selected. Hosts Align ▾,
+            // Distribute ▾, Match Size ▾, and a Clear action.
+            // Top-centered like the creation banner so it doesn't
+            // fight the bottom tool toolbar.
+            if viewModel.layoutEditorSelection.count >= 2 {
+                VStack {
+                    MultiSelectActionBar(
+                        selection: viewModel.layoutEditorSelection,
+                        leader: viewModel.layoutEditorSelectedModel,
+                        onAlign: { edge in performAlign(by: edge) },
+                        onDistribute: { axis in performDistribute(axis: axis) },
+                        onMatchSize: { dim in performMatchSize(dimension: dim) },
+                        onClear: {
+                            viewModel.layoutEditorSelection.removeAll()
+                            viewModel.layoutEditorSelectedModel = nil
+                        })
+                        .padding(.top, 12)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+                .allowsHitTesting(true)
             }
 
             // Bottom tool toolbar — see plans/phase-j-touch-ux.md.
@@ -605,7 +799,7 @@ struct LayoutEditorView: View {
         // clear selection so the side panel doesn't show stale data.
         if let sel = viewModel.layoutEditorSelectedModel,
            !modelNames.contains(sel) {
-            viewModel.layoutEditorSelectedModel = nil
+            viewModel.layoutSelectSingle(nil)
         }
     }
 
@@ -704,6 +898,10 @@ struct LayoutEditorView: View {
             viewModel.layoutPolylineInProgress = nil
             consumed = true
         }
+        if viewModel.layoutPendingImportPath != nil {
+            viewModel.layoutPendingImportPath = nil
+            consumed = true
+        }
         return consumed ? .handled : .ignored
     }
 
@@ -716,7 +914,7 @@ struct LayoutEditorView: View {
     private func deleteModel(name: String) {
         guard viewModel.document.deleteModel(name) else { return }
         if viewModel.layoutEditorSelectedModel == name {
-            viewModel.layoutEditorSelectedModel = nil
+            viewModel.layoutSelectSingle(nil)
         }
         summaryToken &+= 1
         hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
@@ -725,6 +923,80 @@ struct LayoutEditorView: View {
         NotificationCenter.default.post(name: .layoutEditorModelMoved,
                                         object: "LayoutEditor",
                                         userInfo: ["model": name])
+    }
+
+    // MARK: - J-4 multi-select operations
+
+    /// Align all selected models' named edge / centre to the
+    /// primary (leader). Pushes an undo snapshot per moved model
+    /// so the user can revert individual moves; bumps the summary
+    /// token + dirty state and repaints the canvas.
+    private func performAlign(by edge: String) {
+        guard let leader = viewModel.layoutEditorSelectedModel,
+              viewModel.layoutEditorSelection.count >= 2 else { return }
+        let names = Array(viewModel.layoutEditorSelection)
+        for n in names where n != leader {
+            viewModel.document.pushLayoutUndoSnapshot(forModel: n)
+        }
+        guard let bridge = XLightsBridgeBox.bridgeForLayoutEditor() else { return }
+        let moved = bridge.alignModels(names,
+                                        toLeader: leader,
+                                        by: edge,
+                                        for: viewModel.document)
+        if moved {
+            summaryToken &+= 1
+            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+            canUndo = viewModel.document.canUndoLayoutChange()
+            NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                             object: "LayoutEditor",
+                                             userInfo: ["model": leader])
+        }
+    }
+
+    /// Distribute centres along the named axis. Snapshots every
+    /// candidate before mutating so single-step undo works.
+    private func performDistribute(axis: String) {
+        guard viewModel.layoutEditorSelection.count >= 3 else { return }
+        let names = Array(viewModel.layoutEditorSelection)
+        for n in names {
+            viewModel.document.pushLayoutUndoSnapshot(forModel: n)
+        }
+        guard let bridge = XLightsBridgeBox.bridgeForLayoutEditor() else { return }
+        let moved = bridge.distributeModels(names,
+                                              axis: axis,
+                                              for: viewModel.document)
+        if moved {
+            summaryToken &+= 1
+            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+            canUndo = viewModel.document.canUndoLayoutChange()
+            NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                             object: "LayoutEditor",
+                                             userInfo: [:])
+        }
+    }
+
+    /// Resize the selection (except leader) so the named dimension
+    /// matches the leader. `dim` ∈ {"width","height","depth","all"}.
+    private func performMatchSize(dimension dim: String) {
+        guard let leader = viewModel.layoutEditorSelectedModel,
+              viewModel.layoutEditorSelection.count >= 2 else { return }
+        let names = Array(viewModel.layoutEditorSelection)
+        for n in names where n != leader {
+            viewModel.document.pushLayoutUndoSnapshot(forModel: n)
+        }
+        guard let bridge = XLightsBridgeBox.bridgeForLayoutEditor() else { return }
+        let resized = bridge.matchSize(ofModels: names,
+                                         toLeader: leader,
+                                         dimension: dim,
+                                         for: viewModel.document)
+        if resized {
+            summaryToken &+= 1
+            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+            canUndo = viewModel.document.canUndoLayoutChange()
+            NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                             object: "LayoutEditor",
+                                             userInfo: ["model": leader])
+        }
     }
 
     private func saveLayoutChanges() {
@@ -1033,6 +1305,102 @@ private struct AddModelSheet: View {
     }
 }
 
+/// Phase J-4 (multi-select) — operations bar shown when 2+ models
+/// are selected. Hosts Align ▾, Distribute ▾, Match Size ▾, and
+/// Clear. Top-centered like the creation banner.
+private struct MultiSelectActionBar: View {
+    let selection: Set<String>
+    let leader: String?
+    let onAlign: (String) -> Void
+    let onDistribute: (String) -> Void
+    let onMatchSize: (String) -> Void
+    let onClear: () -> Void
+
+    private var canDistribute: Bool { selection.count >= 3 }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            // Count + leader hint. Leader is shown so the user
+            // knows which model the align/match ops target.
+            VStack(alignment: .leading, spacing: 0) {
+                Text("\(selection.count) selected")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white)
+                if let leader = leader, !leader.isEmpty {
+                    Text("Leader: \(leader)")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 180, alignment: .leading)
+                }
+            }
+
+            Divider()
+                .frame(height: 24)
+                .background(.white.opacity(0.3))
+
+            Menu {
+                Button("Align Left")   { onAlign("left") }
+                Button("Align Right")  { onAlign("right") }
+                Button("Align Top")    { onAlign("top") }
+                Button("Align Bottom") { onAlign("bottom") }
+                Divider()
+                Button("Center Horizontal") { onAlign("centerH") }
+                Button("Center Vertical")   { onAlign("centerV") }
+                Button("Center Depth")      { onAlign("centerD") }
+            } label: {
+                Label("Align", systemImage: "align.horizontal.left")
+                    .font(.caption.weight(.medium))
+            }
+            .menuStyle(.borderlessButton)
+            .foregroundStyle(.white)
+
+            Menu {
+                Button("Distribute Horizontally") { onDistribute("horizontal") }
+                Button("Distribute Vertically")   { onDistribute("vertical") }
+                Button("Distribute Depth")        { onDistribute("depth") }
+            } label: {
+                Label("Distribute", systemImage: "rectangle.split.3x1")
+                    .font(.caption.weight(.medium))
+            }
+            .menuStyle(.borderlessButton)
+            .foregroundStyle(canDistribute ? .white : .white.opacity(0.4))
+            .disabled(!canDistribute)
+
+            Menu {
+                Button("Same Width")  { onMatchSize("width") }
+                Button("Same Height") { onMatchSize("height") }
+                Button("Same Depth")  { onMatchSize("depth") }
+                Divider()
+                Button("Match All")   { onMatchSize("all") }
+            } label: {
+                Label("Match Size", systemImage: "rectangle.expand.vertical")
+                    .font(.caption.weight(.medium))
+            }
+            .menuStyle(.borderlessButton)
+            .foregroundStyle(.white)
+
+            Divider()
+                .frame(height: 24)
+                .background(.white.opacity(0.3))
+
+            Button {
+                onClear()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.body)
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.black.opacity(0.55), in: Capsule())
+        .shadow(radius: 3, y: 2)
+    }
+}
+
 private struct InlineModelActionBar: View {
     @Environment(SequencerViewModel.self) var viewModel
     let modelName: String
@@ -1114,7 +1482,7 @@ private struct InlineModelActionBar: View {
                 .foregroundStyle(.red)
 
                 Button {
-                    viewModel.layoutEditorSelectedModel = nil
+                    viewModel.layoutSelectSingle(nil)
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.body)

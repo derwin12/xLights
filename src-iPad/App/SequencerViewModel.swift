@@ -303,7 +303,39 @@ class SequencerViewModel {
     // model-list highlight doesn't clobber `previewModelName` (which
     // drives the Model Preview's single-model render mode and the
     // effect grid's row-tap state). Empty / nil = nothing selected.
+    // `layoutEditorSelectedModel` is the "primary" / most-recently-
+    // selected model — used by single-model UI (inline action bar,
+    // property panel, drag origin). The full selection set lives in
+    // `layoutEditorSelection`; the primary is conventionally
+    // `selection.first` of insertion order (the last model added).
     var layoutEditorSelectedModel: String? = nil
+    /// Phase J-4 (multi-select) — full selection set. Empty when
+    /// nothing's selected. Contains exactly `layoutEditorSelectedModel`
+    /// for single-select; multiple entries when the user has
+    /// activated edit mode and tapped / marqueed multiple models.
+    /// Align / distribute / multi-delete operate on this set.
+    var layoutEditorSelection: Set<String> = []
+    /// Phase J-4 (multi-select) — when true, taps on the canvas
+    /// toggle a model's membership in the selection set instead of
+    /// replacing the selection. Driven by a "Select" toggle in the
+    /// Layout Editor toolbar (Photos-style). Cleared on editor
+    /// close and on "Done" / explicit exit.
+    var layoutEditMode: Bool = false
+
+    /// Set both primary + selection set to a single model (or
+    /// clear them both for nil/empty). All single-select call
+    /// sites should use this to keep the two fields in sync —
+    /// the primary IS the only entry of the selection set in
+    /// single-select mode.
+    func layoutSelectSingle(_ name: String?) {
+        if let n = name, !n.isEmpty {
+            layoutEditorSelectedModel = n
+            layoutEditorSelection = [n]
+        } else {
+            layoutEditorSelectedModel = nil
+            layoutEditorSelection.removeAll()
+        }
+    }
     /// Phase J-3 (touch UX) — when non-nil, the Layout Editor is
     /// in "creation mode": the next tap on the canvas creates a
     /// new model of this type at the touch point. Cleared on
@@ -317,6 +349,12 @@ class SequencerViewModel {
     /// `layoutPendingNewModelType` (which only governs the first
     /// vertex / fresh-model placement).
     var layoutPolylineInProgress: String? = nil
+    /// Phase J-4 (import) — file path of a pending .xmodel import.
+    /// When non-nil the Layout Editor is in placement mode; the
+    /// next tap on the canvas calls `bridge.importXmodelFromPath:`
+    /// with the touch as the placement target. Cleared after a
+    /// successful import or Cancel.
+    var layoutPendingImportPath: String? = nil
     /// True when the standalone Layout Editor scene is open. The
     /// Tools menu entry disables itself on a second press so we
     /// don't fight `WindowGroup`'s "focus existing instance"
