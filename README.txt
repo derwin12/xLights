@@ -11,7 +11,9 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.09  May ??, 2026
-    -bug (dkulp)                Fix 3D shift+drag lasso selecting models outside the selection box, especially
+    -bug (dkulp)                Stem Separator crash: guard the CoreML inference call with @try/@catch and reject
+                                outputs whose strides have fewer dimensions than the shape.
+    -bug (cybercop23)           Fix 3D shift+drag lasso selecting models outside the selection box, especially
                                 when zoomed in. The OBB containment test was projecting only 2 of the 8 AABB
                                 corners to screen space; now all 8 corners are projected and the true
                                 screen-space bounds are used. Added depth filtering so far-background models
