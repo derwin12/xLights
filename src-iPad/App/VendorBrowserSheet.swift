@@ -22,6 +22,12 @@ struct VendorBrowserSheet: View {
     @State private var downloadingWiring: String? = nil
     @State private var downloadError: String? = nil
 
+    /// J-4 (download) — vendor-list search text. Filters by
+    /// vendor name AND by any model name / type inside the
+    /// vendor, so a search like "icicle" surfaces vendors whose
+    /// names don't mention icicles but who carry icicle models.
+    @State private var vendorSearch: String = ""
+
     var body: some View {
         NavigationStack {
             Group {
@@ -31,6 +37,9 @@ struct VendorBrowserSheet: View {
                     errorView(err)
                 } else {
                     vendorList
+                        .searchable(text: $vendorSearch,
+                                    placement: .navigationBarDrawer(displayMode: .always),
+                                    prompt: "Search vendors or models")
                 }
             }
             .navigationTitle("Download Model")
@@ -112,22 +121,63 @@ struct VendorBrowserSheet: View {
 
     @ViewBuilder
     private var vendorList: some View {
-        List(vendors) { vendor in
-            NavigationLink {
-                VendorDetailView(vendor: vendor,
-                                  downloadingWiringId: $downloadingWiring,
-                                  catalog: catalog,
-                                  onDownloaded: { path in
-                                      onDownloaded(path)
-                                      dismiss()
-                                  },
-                                  onError: { msg in
-                                      downloadError = msg
-                                  })
-            } label: {
-                VendorRow(vendor: vendor, catalog: catalog)
+        let filtered = filteredVendors
+        List {
+            if filtered.isEmpty && !vendorSearch.isEmpty {
+                ContentUnavailableView.search(text: vendorSearch)
+            } else {
+                ForEach(filtered) { vendor in
+                    NavigationLink {
+                        VendorDetailView(vendor: vendor,
+                                          downloadingWiringId: $downloadingWiring,
+                                          catalog: catalog,
+                                          onDownloaded: { path in
+                                              onDownloaded(path)
+                                              dismiss()
+                                          },
+                                          onError: { msg in
+                                              downloadError = msg
+                                          })
+                    } label: {
+                        VendorRow(vendor: vendor, catalog: catalog,
+                                  matchedModelCount: matchedModelCount(in: vendor))
+                    }
+                }
             }
         }
+    }
+
+    /// Vendors filtered by `vendorSearch`. A vendor matches when
+    /// either its own name contains the query, OR any of its
+    /// models' names / types do — so searching "icicle" surfaces
+    /// vendors whose names don't mention icicles but carry them.
+    private var filteredVendors: [XLVendor] {
+        let q = vendorSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty { return vendors }
+        return vendors.filter { vendor in
+            if vendor.name.localizedCaseInsensitiveContains(q) { return true }
+            for model in vendor.models {
+                if model.name.localizedCaseInsensitiveContains(q) { return true }
+                if model.type.localizedCaseInsensitiveContains(q) { return true }
+            }
+            return false
+        }
+    }
+
+    /// Count of models inside `vendor` that match the active
+    /// search query. Used by `VendorRow` to show a "N match" hint
+    /// alongside the total. Zero when the vendor matched purely
+    /// on its own name (or search is empty).
+    private func matchedModelCount(in vendor: XLVendor) -> Int? {
+        let q = vendorSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty { return nil }
+        let count = vendor.models.reduce(into: 0) { acc, m in
+            if m.name.localizedCaseInsensitiveContains(q) ||
+               m.type.localizedCaseInsensitiveContains(q) {
+                acc += 1
+            }
+        }
+        return count > 0 ? count : nil
     }
 }
 
@@ -140,7 +190,10 @@ private struct VendorDetailView: View {
     let onDownloaded: (String) -> Void
     let onError: (String) -> Void
 
+    @State private var modelSearch: String = ""
+
     var body: some View {
+        let filtered = filteredModels
         List {
             if !vendor.contact.isEmpty || !vendor.website.isEmpty || !vendor.notes.isEmpty {
                 Section("About") {
@@ -159,13 +212,18 @@ private struct VendorDetailView: View {
                     }
                 }
             }
-            Section("Models (\(vendor.models.count))") {
+            let header = modelSearch.isEmpty
+                ? "Models (\(vendor.models.count))"
+                : "Models (\(filtered.count) of \(vendor.models.count))"
+            Section(header) {
                 if vendor.models.isEmpty {
                     Text("This vendor's inventory is empty or hidden.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                } else if filtered.isEmpty {
+                    ContentUnavailableView.search(text: modelSearch)
                 }
-                ForEach(vendor.models) { model in
+                ForEach(filtered) { model in
                     NavigationLink {
                         ModelDetailView(model: model,
                                           downloadingWiringId: $downloadingWiringId,
@@ -180,6 +238,24 @@ private struct VendorDetailView: View {
         }
         .navigationTitle(vendor.name)
         .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $modelSearch,
+                    placement: .navigationBarDrawer(displayMode: .always),
+                    prompt: "Search \(vendor.name) models")
+    }
+
+    /// Models filtered by `modelSearch`. Matches name OR type
+    /// OR pixel description (case-insensitive contains) so a
+    /// search like "16" surfaces 16-pixel matrices and a search
+    /// like "arch" surfaces every arch regardless of vendor name.
+    private var filteredModels: [XLVendorModel] {
+        let q = modelSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty { return vendor.models }
+        return vendor.models.filter { m in
+            m.name.localizedCaseInsensitiveContains(q) ||
+            m.type.localizedCaseInsensitiveContains(q) ||
+            m.pixelDescription.localizedCaseInsensitiveContains(q) ||
+            m.notes.localizedCaseInsensitiveContains(q)
+        }
     }
 }
 
@@ -403,6 +479,11 @@ struct VendorImageView: View {
 private struct VendorRow: View {
     let vendor: XLVendor
     let catalog: XLVendorCatalog?
+    /// Non-nil when the parent's search query is active. Number
+    /// of models inside this vendor that match the query, or 0
+    /// when the vendor was included purely on its own name.
+    let matchedModelCount: Int?
+
     var body: some View {
         HStack(spacing: 10) {
             VendorImageView(
@@ -416,6 +497,10 @@ private struct VendorRow: View {
                     Text("Hidden")
                         .font(.caption2)
                         .foregroundStyle(.orange)
+                } else if let matched = matchedModelCount, matched > 0 {
+                    Text("\(matched) of \(vendor.models.count) match")
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
                 } else {
                     Text("\(vendor.models.count) models")
                         .font(.caption)
