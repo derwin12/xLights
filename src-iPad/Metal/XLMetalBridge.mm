@@ -876,6 +876,81 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
     return nil;
 }
 
+- (NSArray<NSString*>*)pickModelsInRect:(CGRect)rect
+                                viewSize:(CGSize)viewSize
+                             forDocument:(XLSequenceDocument*)doc {
+    NSMutableArray<NSString*>* out = [NSMutableArray array];
+    if (!_preview || !doc) return out;
+    iPadRenderContext* rctx = ContextFromDoc(doc);
+    if (!rctx) return out;
+
+    auto isSubModel = [](Model* m) {
+        return m && m->GetDisplayAs() == DisplayAsType::SubModel;
+    };
+
+    // Convert UIKit points → window pixels. ScreenLocation::
+    // IsContained expects window pixels in the same Y-down
+    // convention as touch coords (it flips Y internally before
+    // calling the projection math), matching desktop mouse
+    // coords. Normalize so x1 ≤ x2, y1 ≤ y2 — `IsContained`
+    // doesn't sort its bounds and a backwards drag would return
+    // empty otherwise.
+    double scale = _canvas->getScaleFactor();
+    if (scale <= 0) scale = 1.0;
+    int x1 = (int)std::round((double)CGRectGetMinX(rect) * scale);
+    int y1 = (int)std::round((double)CGRectGetMinY(rect) * scale);
+    int x2 = (int)std::round((double)CGRectGetMaxX(rect) * scale);
+    int y2 = (int)std::round((double)CGRectGetMaxY(rect) * scale);
+    if (x1 > x2) std::swap(x1, x2);
+    if (y1 > y2) std::swap(y1, y2);
+
+    auto models = rctx->GetModelsForActivePreview();
+
+    if (_preview->Is3D()) {
+        // Gather candidates that are 2D-contained, then drop the
+        // ones beyond the foreground depth cutoff. Mirrors
+        // `LayoutPanel::SelectAllInBoundingRect`'s 3D branch.
+        struct Cand { Model* m; float depth; };
+        std::vector<Cand> candidates;
+        candidates.reserve(models.size());
+        const glm::mat4& pv = _preview->GetProjViewMatrix();
+        for (Model* m : models) {
+            if (!m || isSubModel(m)) continue;
+            if (!m->IsContained(_preview.get(), x1, y1, x2, y2)) continue;
+            glm::vec4 c = pv * glm::vec4(
+                m->GetBaseObjectScreenLocation().GetWorldPosition(), 1.0f);
+            if (c.w > 0.0f) candidates.push_back({m, c.w});
+        }
+        if (candidates.empty()) return out;
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const Cand& a, const Cand& b) { return a.depth < b.depth; });
+        // Depth cutoff: first gap > 40 % of the nearest depth.
+        const float gapThreshold = candidates.front().depth * 0.4f;
+        float cutoff = candidates.back().depth;
+        for (size_t i = 1; i < candidates.size(); ++i) {
+            if (candidates[i].depth - candidates[i - 1].depth > gapThreshold) {
+                cutoff = candidates[i - 1].depth;
+                break;
+            }
+        }
+        for (const auto& c : candidates) {
+            if (c.depth <= cutoff) {
+                [out addObject:[NSString stringWithUTF8String:c.m->GetName().c_str()]];
+            }
+        }
+        return out;
+    }
+
+    // 2D path — straight axis-aligned overlap.
+    for (Model* m : models) {
+        if (!m || isSubModel(m)) continue;
+        if (m->IsContained(_preview.get(), x1, y1, x2, y2)) {
+            [out addObject:[NSString stringWithUTF8String:m->GetName().c_str()]];
+        }
+    }
+    return out;
+}
+
 - (NSInteger)pickHandleAtScreenPoint:(CGPoint)point
                             viewSize:(CGSize)viewSize
                          forDocument:(XLSequenceDocument*)doc {
@@ -2455,6 +2530,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     if (!rctx) return @[];
     NSMutableArray<NSDictionary*>* out = [NSMutableArray array];
     const auto models = rctx->GetModelsForActivePreview();
+    OutputManager* om = &rctx->GetOutputManager();
     for (Model* m : models) {
         if (!m || m->GetDisplayAs() == DisplayAsType::SubModel) continue;
         auto& loc = m->GetModelScreenLocation();
@@ -2469,7 +2545,28 @@ float ReadAlignReference(Model* model, const std::string& edge) {
             continue;
         }
         NSString* name = [NSString stringWithUTF8String:m->GetName().c_str()];
-        [out addObject:@{ @"name": name, @"anchor": [NSValue valueWithCGPoint:pt] }];
+        // J-2 model-info parity — controller + connection-port range
+        // when assigned, start-channel string otherwise. Matches
+        // desktop's `ModelPreview::DrawModelNames` info-line shape
+        // so the iPad overlay reads the same when both panes are
+        // visible.
+        std::string info;
+        std::string const ctrlName = m->GetControllerName();
+        if (!ctrlName.empty() && ctrlName != "No Controller") {
+            info = ctrlName;
+            std::string const range = m->GetControllerConnectionPortRangeString();
+            if (!range.empty()) info += ": " + range;
+        } else if (om) {
+            info = m->GetStartChannelInDisplayFormat(om);
+        }
+        NSString* infoNS = info.empty()
+            ? @""
+            : [NSString stringWithUTF8String:info.c_str()];
+        [out addObject:@{
+            @"name":   name,
+            @"info":   infoNS,
+            @"anchor": [NSValue valueWithCGPoint:pt]
+        }];
     }
     return out;
 }
@@ -3096,6 +3193,13 @@ float ReadAlignReference(Model* model, const std::string& edge) {
         // && allowSelected` (Model.cpp:3254). Both conditions are met
         // for the LayoutEditor pane via the loop above, so no extra
         // bridge-side rendering is needed here.
+        //
+        // Model-name + model-info labels render as a SwiftUI overlay
+        // above the Metal canvas — see `ModelLabelsOverlay` in
+        // LayoutEditorView.swift and `modelLabelAnchorsForDocument:`
+        // below for the data feed. That route avoids spinning up an
+        // xlVertexTextureAccumulator + font atlas per frame just for
+        // a handful of labels.
     }
 
     // Finish and present. `_errorReason` reflects this frame's state:

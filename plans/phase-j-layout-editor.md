@@ -151,7 +151,32 @@ work. Model rename and copy/paste / reset menus are J-3+ as well.
   (today they accept input but the bridge silently rejects via
   `BaseObject::IsLocked` check — works correctly but is bad UX).
 
-### J-2 — Direct manipulation + canvas overlays (in progress)
+### J-2 — Direct manipulation + canvas overlays ✓ 2026-05-15
+
+**Closeout (2026-05-15):**
+- **Layout-side rubber-band multi-select** — two-finger
+  long-press (≥0.4s) + drag draws a dashed overlay; on release
+  the new bridge `pickModelsInRect:viewSize:forDocument:`
+  returns every model whose 2D screen bbox overlaps the rect
+  (with the desktop 3D depth-cutoff applied), and the selection
+  is replaced. Pinch / pan / rotate are temporarily disabled
+  while the marquee is active so a mid-gesture spread can't
+  fire a stray zoom. Same gesture idiom as the effects-grid
+  marquee (also migrated this session from a two-finger pan to
+  two-finger long-press, fixing the recognizer race that was
+  reading some drags as both scroll + marquee).
+- **Model-info overlay** — extended the existing SwiftUI
+  `ModelLabelsOverlay` route (already shipping model names) to
+  also render the controller-name + connection-port range, or
+  the start-channel string when no controller is assigned.
+  `modelLabelAnchorsForDocument:` now emits an `info` field per
+  model; toggled via a new "Info" button in the editor's
+  controls overlay, gated on the existing Labels toggle.
+- **Layout redo** is intentionally not implemented — desktop's
+  `LayoutPanel` doesn't have redo either, so iPad parity is at
+  "undo only."
+
+
 
 **First cut ✓ 2026-05-08:**
 - `XLMetalBridge.pickModel(atScreenPoint:viewSize:for:)` —

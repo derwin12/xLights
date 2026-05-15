@@ -108,6 +108,7 @@ struct PreviewPaneView: UIViewRepresentable {
         view.addGestureRecognizer(pinch)
 
         pinch.delegate = context.coordinator
+        context.coordinator.marqueePinch = pinch
 
         // One-finger drag only — orbit in 3D, pan in 2D. Capped at 1 touch so
         // adding a second finger cancels this recognizer and pinch takes over
@@ -119,6 +120,7 @@ struct PreviewPaneView: UIViewRepresentable {
         oneFingerPan.maximumNumberOfTouches = 1
         oneFingerPan.delegate = context.coordinator
         view.addGestureRecognizer(oneFingerPan)
+        context.coordinator.marqueeOneFingerPan = oneFingerPan
 
         // Two-finger pan is handled inside the pinch recognizer via its
         // centroid (see handlePinch). A dedicated UIPanGestureRecognizer
@@ -133,6 +135,25 @@ struct PreviewPaneView: UIViewRepresentable {
             action: #selector(Coordinator.handleRotate(_:)))
         rotate.delegate = context.coordinator
         view.addGestureRecognizer(rotate)
+        context.coordinator.marqueeRotate = rotate
+
+        // J-4 marquee — two-finger long-press + drag → multi-
+        // model rect selection. Only fires on the LayoutEditor
+        // pane (handler gates by `previewNameForNotifications`).
+        // 0.4s hold matches the effects grid; allowableMovement
+        // is generous (16 pt) because two fingers wiggle more
+        // than one. We tag the recognizer by `name` so the
+        // existing single-finger context-menu long-press
+        // (`handleLongPress`) is unambiguously distinct.
+        let marqueeLP = UILongPressGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleMarqueeLongPress(_:)))
+        marqueeLP.numberOfTouchesRequired = 2
+        marqueeLP.minimumPressDuration = 0.4
+        marqueeLP.allowableMovement = 16
+        marqueeLP.name = "marqueeLP"
+        marqueeLP.delegate = context.coordinator
+        view.addGestureRecognizer(marqueeLP)
 
         let dblTap = UITapGestureRecognizer(
             target: context.coordinator,
@@ -341,6 +362,19 @@ struct PreviewPaneView: UIViewRepresentable {
         /// twist.
         var twistingLayoutModel: Bool = false
         var twistRotateModelName: String? = nil
+
+        /// J-4 marquee — two-finger long-press + drag rectangle
+        /// for multi-model selection on the LayoutEditor pane.
+        /// Tracks the anchor + current touch in view coords; the
+        /// `marqueeLayer` is the dashed overlay rendered above the
+        /// MTKView. Disabled-recognizer list is restored on end so
+        /// pinch/pan resume after the marquee completes.
+        fileprivate var marqueeStart: CGPoint? = nil
+        fileprivate var marqueeCurrent: CGPoint? = nil
+        fileprivate var marqueeLayer: CAShapeLayer? = nil
+        fileprivate weak var marqueePinch: UIPinchGestureRecognizer? = nil
+        fileprivate weak var marqueeOneFingerPan: UIPanGestureRecognizer? = nil
+        fileprivate weak var marqueeRotate: UIRotationGestureRecognizer? = nil
         // nonisolated(unsafe): touched from the nonisolated deinit. Real use is
         // main-thread-only (set/invalidated from display-link lifecycle calls).
         nonisolated(unsafe) var displayLink: CADisplayLink?
@@ -1121,6 +1155,124 @@ struct PreviewPaneView: UIViewRepresentable {
                 name: .layoutEditorContextMenu,
                 object: previewNameForNotifications,
                 userInfo: info)
+        }
+
+        // MARK: - J-4 marquee (two-finger long-press + drag)
+
+        /// Two-finger long-press + drag → multi-model rect select
+        /// on the LayoutEditor pane. On `.began` we hide pinch /
+        /// pan / rotate so a finger spread mid-marquee can't fire
+        /// a zoom / orbit alongside, and draw a dashed overlay
+        /// rect. On `.ended` we call the bridge's
+        /// `pickModelsInRect:` and replace the selection.
+        @objc func handleMarqueeLongPress(_ recognizer: UILongPressGestureRecognizer) {
+            guard previewNameForNotifications == "LayoutEditor",
+                  let view = mtkView,
+                  let viewModel,
+                  let bridge else { return }
+
+            switch recognizer.state {
+            case .began:
+                // Bounce any conflicting recognizer that may have
+                // already begun on the first finger, then disable
+                // them for the marquee's duration. Re-enabled on
+                // end / cancel.
+                if let pan = marqueeOneFingerPan,
+                   pan.state == .began || pan.state == .changed {
+                    pan.isEnabled = false
+                    pan.isEnabled = true
+                }
+                marqueeOneFingerPan?.isEnabled = false
+                marqueePinch?.isEnabled = false
+                marqueeRotate?.isEnabled = false
+
+                let p = recognizer.location(in: view)
+                marqueeStart = p
+                marqueeCurrent = p
+                showMarqueeOverlay(in: view)
+                updateMarqueeOverlay()
+            case .changed:
+                guard marqueeStart != nil else { return }
+                marqueeCurrent = recognizer.location(in: view)
+                updateMarqueeOverlay()
+            case .ended:
+                defer { restoreRecognizersAfterMarquee() }
+                guard let start = marqueeStart,
+                      let end   = marqueeCurrent else {
+                    hideMarqueeOverlay()
+                    return
+                }
+                marqueeStart = nil
+                marqueeCurrent = nil
+                hideMarqueeOverlay()
+                let rect = CGRect(x: min(start.x, end.x),
+                                  y: min(start.y, end.y),
+                                  width:  abs(end.x - start.x),
+                                  height: abs(end.y - start.y))
+                // Tiny rectangles (accidental hold-and-release) —
+                // leave existing selection alone. 6 pt minimum on
+                // either axis matches the effects grid threshold.
+                if rect.width < 6 && rect.height < 6 { return }
+                let hits = bridge.pickModels(in: rect,
+                                              viewSize: view.bounds.size,
+                                              for: viewModel.document)
+                viewModel.layoutEditorSelection = Set(hits as [String])
+                viewModel.layoutEditorSelectedModel = hits.first as String?
+                NotificationCenter.default.post(
+                    name: .layoutEditorModelMoved,
+                    object: previewNameForNotifications,
+                    userInfo: [:])
+                view.setNeedsDisplay()
+            case .cancelled, .failed:
+                marqueeStart = nil
+                marqueeCurrent = nil
+                hideMarqueeOverlay()
+                restoreRecognizersAfterMarquee()
+            default:
+                break
+            }
+        }
+
+        private func restoreRecognizersAfterMarquee() {
+            marqueeOneFingerPan?.isEnabled = true
+            marqueePinch?.isEnabled = true
+            marqueeRotate?.isEnabled = true
+        }
+
+        private func showMarqueeOverlay(in view: UIView) {
+            if marqueeLayer == nil {
+                let layer = CAShapeLayer()
+                layer.fillColor = UIColor.systemBlue.withAlphaComponent(0.12).cgColor
+                layer.strokeColor = UIColor.systemBlue.cgColor
+                layer.lineWidth = 1.5
+                layer.lineDashPattern = [4, 3]
+                layer.zPosition = 1000
+                view.layer.addSublayer(layer)
+                marqueeLayer = layer
+            }
+            marqueeLayer?.isHidden = false
+        }
+
+        private func updateMarqueeOverlay() {
+            guard let layer = marqueeLayer,
+                  let start = marqueeStart,
+                  let end   = marqueeCurrent else { return }
+            let rect = CGRect(x: min(start.x, end.x),
+                              y: min(start.y, end.y),
+                              width:  abs(end.x - start.x),
+                              height: abs(end.y - start.y))
+            // CALayer geometry updates are implicitly animated; the
+            // dashed rectangle would lag behind the finger. Wrap in
+            // a no-animation transaction so it tracks live.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.path = CGPath(rect: rect, transform: nil)
+            CATransaction.commit()
+        }
+
+        private func hideMarqueeOverlay() {
+            marqueeLayer?.isHidden = true
+            marqueeLayer?.path = nil
         }
 
         // MARK: - Pencil interactions (J-3)

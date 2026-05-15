@@ -1464,7 +1464,7 @@ struct LayoutEditorView: View {
             // small Text per visible model at its projected centre;
             // refreshes each animation frame.
             if settings.showModelLabels {
-                ModelLabelsOverlay()
+                ModelLabelsOverlay(showInfo: settings.showModelInfo)
                     .allowsHitTesting(false)
             }
 
@@ -8457,6 +8457,10 @@ private struct InlineModelActionBar: View {
 // needed.
 private struct ModelLabelsOverlay: View {
     @Environment(SequencerViewModel.self) var viewModel
+    /// When true, render the controller / start-channel info line
+    /// beneath each model name. Driven by
+    /// `PreviewSettings.showModelInfo`.
+    let showInfo: Bool
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { _ in
@@ -8473,15 +8477,23 @@ private struct ModelLabelsOverlay: View {
                 if let name = entry["name"] as? String,
                    let value = entry["anchor"] as? NSValue {
                     let p = value.cgPointValue
-                    Text(name)
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Color.black.opacity(0.45),
-                                    in: RoundedRectangle(cornerRadius: 3))
-                        .fixedSize()
-                        .position(x: p.x, y: p.y)
+                    let info = (entry["info"] as? String) ?? ""
+                    VStack(spacing: 1) {
+                        Text(name)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.white)
+                        if showInfo, !info.isEmpty {
+                            Text(info)
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Color.black.opacity(0.45),
+                                in: RoundedRectangle(cornerRadius: 3))
+                    .fixedSize()
+                    .position(x: p.x, y: p.y)
                 }
             }
         }
@@ -8737,6 +8749,17 @@ private struct LayoutEditorCanvasControls: View {
             }
             .toggleStyle(.button)
             .controlSize(.small)
+
+            // J-2 — controller / start-channel info line under
+            // each label. Only meaningful when Labels is on, so
+            // disabled (greyed) otherwise. Matches desktop's
+            // `_showModelInfo` parity.
+            Toggle(isOn: $settings.showModelInfo) {
+                Text("Info").font(.caption2)
+            }
+            .toggleStyle(.button)
+            .controlSize(.small)
+            .disabled(!settings.showModelLabels)
         }
     }
 

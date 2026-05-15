@@ -31,6 +31,12 @@ final class PreviewSettings {
     /// J-2 (touch UX) — model-name labels rendered as a SwiftUI
     /// overlay above the Metal canvas. Off by default.
     var showModelLabels: Bool
+    /// J-2 — Layout Editor info-line under each model label
+    /// (controller name + connection range, or start channel when
+    /// no controller is assigned). Mirrors desktop's
+    /// `_showModelInfo`. Requires `showModelLabels = true` to
+    /// surface; off by default.
+    var showModelInfo: Bool
 
     init(is3DDefault: Bool, showViewObjectsDefault: Bool) {
         self.is3D = is3DDefault
@@ -43,6 +49,7 @@ final class PreviewSettings {
         self.uniformModifier = false
         self.lockAxis = 0
         self.showModelLabels = false
+        self.showModelInfo = false
     }
 }
 

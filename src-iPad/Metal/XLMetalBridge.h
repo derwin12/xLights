@@ -245,6 +245,23 @@ NS_ASSUME_NONNULL_BEGIN
                                     viewSize:(CGSize)viewSize
                                  forDocument:(XLSequenceDocument*)doc;
 
+// Phase J-2 (marquee) — pick every model whose 2D screen bounding
+// box overlaps `rect` (iPad points, view coords). Submodels are
+// excluded — they share their parent's screenLocation, matching
+// the single-point `pickModel` filter. Returns names in
+// `GetModelsForActivePreview` order (consistent draw order).
+//
+// 2D: pure axis-aligned overlap via
+// `BaseObject::IsContained(preview, x1, y1, x2, y2)`.
+// 3D: same containment plus a depth-cutoff pass (mirrors desktop's
+// `LayoutPanel::SelectAllInBoundingRect` — gather depths, find
+// the first > 40 %-of-nearest gap, drop everything past it) so a
+// background model directly behind a foreground hit doesn't sneak
+// in.
+- (NSArray<NSString*>*)pickModelsInRect:(CGRect)rect
+                                viewSize:(CGSize)viewSize
+                             forDocument:(XLSequenceDocument*)doc;
+
 // Phase J-2 — translate a screen-space drag delta (points) into a
 // world-space move on the named model's centre. Returns YES if the
 // model existed, was unlocked, and accepted the move (and was
