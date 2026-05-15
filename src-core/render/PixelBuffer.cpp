@@ -2664,7 +2664,9 @@ void PixelBufferClass::RotateZAndZoom(RenderBuffer& buffer, GPURenderUtils::Roto
 }
 
 void PixelBufferClass::RotoZoom(LayerInfo* layer, float offset) {
-    if (std::isinf(offset))
+    // __builtin_isinf: std::isinf may fold to `false` under -ffinite-math-only
+    // (Release -ffast-math); use the builtin to keep the clamp working.
+    if (__builtin_isinf(offset))
         offset = 1.0;
 
     GPURenderUtils::RotoZoomSettings settings;

@@ -57,13 +57,16 @@ BoxedScreenLocation::BoxedScreenLocation(int points)
 
 void BoxedScreenLocation::Init() {
 
-    if (!std::isfinite(worldPos_x)) {
+    // __builtin_isfinite — std::isfinite is folded to `true` under
+    // -ffinite-math-only on Release; the __builtin_ form survives the
+    // optimization and actually catches corrupt persisted coords.
+    if (!__builtin_isfinite(worldPos_x)) {
         worldPos_x = 0.0F;
     }
-    if (!std::isfinite(worldPos_y)) {
+    if (!__builtin_isfinite(worldPos_y)) {
         worldPos_y = 0.0F;
     }
-    if (!std::isfinite(worldPos_z)) {
+    if (!__builtin_isfinite(worldPos_z)) {
         worldPos_z = 0.0F;
     }
 

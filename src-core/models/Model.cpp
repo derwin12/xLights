@@ -3084,7 +3084,11 @@ void Model::DisplayModelOnWindow(IModelPreview* preview, xlGraphicsContext* ctx,
                 }
                 const auto& c = Nodes[n]->Coords[0];
                 float z = axis.x * c.screenX + axis.y * c.screenY + axis.z * c.screenZ;
-                if (!std::isfinite(z)) {
+                // __builtin_isfinite: std::isfinite folds to `true` under
+                // -ffinite-math-only (Release -ffast-math) — without this,
+                // NaN keys reach std::sort below and break strict weak
+                // ordering (UB; observed crashes).
+                if (!__builtin_isfinite(z)) {
                     z = 0.0f;
                 }
                 keys.emplace_back(z, n);

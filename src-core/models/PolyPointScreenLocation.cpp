@@ -111,17 +111,20 @@ void PolyPointScreenLocation::SetCurve(int seg_num, bool create)
 
 void PolyPointScreenLocation::Init()
 {
-    if (std::isnan(worldPos_x)) worldPos_x = 0.0;
-    if (std::isnan(worldPos_y)) worldPos_y = 0.0;
-    if (std::isnan(worldPos_z)) worldPos_z = 0.0;
+    // Use __builtin_* — desktop Release builds with -ffast-math license the
+    // compiler to assume operands are finite and may elide std::isnan/isinf
+    // entirely. The __builtin_ forms are preserved by clang even then.
+    if (__builtin_isnan(worldPos_x)) worldPos_x = 0.0;
+    if (__builtin_isnan(worldPos_y)) worldPos_y = 0.0;
+    if (__builtin_isnan(worldPos_z)) worldPos_z = 0.0;
 
-    if (scalex <= 0 || std::isinf(scalex) || std::isnan(scalex)) {
+    if (scalex <= 0 || __builtin_isinf(scalex) || __builtin_isnan(scalex)) {
         scalex = 1.0f;
     }
-    if (scaley <= 0 || std::isinf(scaley) || std::isnan(scaley)) {
+    if (scaley <= 0 || __builtin_isinf(scaley) || __builtin_isnan(scaley)) {
         scaley = 1.0f;
     }
-    if (scalez <= 0 || std::isinf(scalez) || std::isnan(scalez)) {
+    if (scalez <= 0 || __builtin_isinf(scalez) || __builtin_isnan(scalez)) {
         scalez = 1.0f;
     }
 

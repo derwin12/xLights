@@ -11,6 +11,13 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.09  May ??, 2026
+    -bug (dkulp)                Audit/fix for fast-math hazard elsewhere: TempoDetector (could
+                                pick wrong tempo when autocorrelation peak was negative), ChordDetector
+                                key/chord scoring (latent), mapbox earcut polygon triangulation for OBJ
+                                mesh import. Also switched std::isnan/isinf/isfinite guards in
+                                BoxedScreenLocation, PolyPointScreenLocation, Model::sort, PixelBuffer
+                                RotoZoom, and the polyline length helper to __builtin_* equivalents so
+                                -ffinite-math-only no longer elides them.
     -bug (dkulp)                OpenGL (Windows): check the LoadGLFunctions return value before initializing
                                 shaders, and check every required GL entry point (not just glCreateShader)
                                 inside ShaderProgram::Init.

@@ -549,11 +549,15 @@ int ScreenLocationPropertyHelper::OnPropertyGridChange(PolyPointScreenLocation& 
             float dy = diff.y * len / oldLen - diff.y;
             float dz = diff.z * len / oldLen - diff.z;
 
-            if (isnan(dx))
+            // __builtin_isnan: oldLen==0 produces NaN through the divide
+            // above, and std::isnan folds to `false` under -ffinite-math-only
+            // (Release -ffast-math) — without this guard, NaN propagates into
+            // every subsequent point's position and corrupts the model.
+            if (__builtin_isnan(dx))
                 dx = 1.0f;
-            if (isnan(dy))
+            if (__builtin_isnan(dy))
                 dy = 1.0f;
-            if (isnan(dz))
+            if (__builtin_isnan(dz))
                 dz = 1.0f;
 
             for (int i = h + 1; i < loc.GetNumPoints(); i++) {

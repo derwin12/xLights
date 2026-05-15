@@ -683,10 +683,13 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
     iPadRenderContext* rctx = ContextFromDoc(doc);
     if (!rctx || !_preview) return NO;
 
-    float minX = std::numeric_limits<float>::infinity();
-    float minY = std::numeric_limits<float>::infinity();
-    float maxX = -std::numeric_limits<float>::infinity();
-    float maxY = -std::numeric_limits<float>::infinity();
+    // -ffast-math implies -ffinite-math-only on the iPadLib Release build
+    // (inherited from the project-level OTHER_CFLAGS). infinity() would
+    // fold to 0 and break the min/max accumulation. Use finite sentinels.
+    float minX = std::numeric_limits<float>::max();
+    float minY = std::numeric_limits<float>::max();
+    float maxX = std::numeric_limits<float>::lowest();
+    float maxY = std::numeric_limits<float>::lowest();
     bool any = false;
     // Respect the active layout-group filter so Fit All matches what
     // the user actually sees — not every model in the show.
@@ -716,10 +719,11 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
     }
     if (!visible) return NO;
 
-    float minX = std::numeric_limits<float>::infinity();
-    float minY = std::numeric_limits<float>::infinity();
-    float maxX = -std::numeric_limits<float>::infinity();
-    float maxY = -std::numeric_limits<float>::infinity();
+    // Finite sentinels — see fitAllModelsForDocument above.
+    float minX = std::numeric_limits<float>::max();
+    float minY = std::numeric_limits<float>::max();
+    float maxX = std::numeric_limits<float>::lowest();
+    float maxY = std::numeric_limits<float>::lowest();
     if (!AccumulateModelBounds(target, minX, minY, maxX, maxY)) return NO;
     [self fitToBoundingBoxMinX:minX minY:minY maxX:maxX maxY:maxY ctx:rctx];
     return YES;
@@ -832,7 +836,10 @@ static void TouchPointToWorldRay(const CGPoint& p, double scale,
         TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
                               ray_origin, ray_direction);
         Model* best = nullptr;
-        float bestDist = std::numeric_limits<float>::infinity();
+        // Finite sentinel — see fitAllModelsForDocument. infinity() folds
+        // to 0 under -ffast-math and the `dist < bestDist` check would
+        // reject every 3D hit, breaking tap-to-select on iPad Release.
+        float bestDist = std::numeric_limits<float>::max();
         for (Model* m : rctx->GetModelsForActivePreview()) {
             if (!m || isSubModel(m)) continue;
             float dist = 0.0f;
@@ -1462,7 +1469,9 @@ float ReadAlignReference(Model* model, const std::string& edge) {
         TouchPointToWorldRay(point, _canvas->getScaleFactor(), _preview.get(),
                               ray_origin, ray_direction);
         ViewObject* best = nullptr;
-        float bestDist = std::numeric_limits<float>::infinity();
+        // Finite sentinel — see hitTestModelAtPoint above. Same -ffast-math
+        // hazard breaks 3D view-object hit-test in Release.
+        float bestDist = std::numeric_limits<float>::max();
         for (auto it = vm.begin(); it != vm.end(); ++it) {
             ViewObject* vo = it->second;
             if (!vo) continue;
