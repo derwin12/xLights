@@ -1095,6 +1095,7 @@ bool ApplyAlign(Model* model, const std::string& edge, float target) {
     else if (edge == "centerH"){ current = loc.GetHcenterPos();  isH = true; }
     else if (edge == "top")    { current = loc.GetTop();         isV = true; }
     else if (edge == "bottom") { current = loc.GetBottom();      isV = true; }
+    else if (edge == "ground") { current = loc.GetBottom();      isV = true; }
     else if (edge == "centerV"){ current = loc.GetVcenterPos();  isV = true; }
     else if (edge == "front")  { current = loc.GetFront();       isD = true; }
     else if (edge == "back")   { current = loc.GetBack();        isD = true; }
@@ -1119,6 +1120,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     if (edge == "front")       return loc.GetFront();
     if (edge == "back")        return loc.GetBack();
     if (edge == "centerD")     return loc.GetDcenterPos();
+    // `ground` is leader-less; the caller substitutes 0.
     return 0.0f;
 }
 } // namespace
@@ -1127,20 +1129,32 @@ float ReadAlignReference(Model* model, const std::string& edge) {
             toLeader:(NSString*)leader
                   by:(NSString*)edge
          forDocument:(XLSequenceDocument*)doc {
-    if (!doc || names.count == 0 || leader.length == 0 || edge.length == 0) return NO;
+    if (!doc || names.count == 0 || edge.length == 0) return NO;
     iPadRenderContext* rctx = ContextFromDoc(doc);
     if (!rctx) return NO;
-    Model* leaderModel = rctx->GetModelManager()[leader.UTF8String];
-    if (!leaderModel) return NO;
-    rctx->AbortRender(5000);
     const std::string edgeStr = edge.UTF8String;
-    const float target = ReadAlignReference(leaderModel, edgeStr);
+    // `ground` is leader-less: every selected model's bottom snaps
+    // to Y = 0, including whichever model the user picked as the
+    // multi-select leader. All other edges still need a leader to
+    // read the reference value from.
+    const bool isGround = (edgeStr == "ground");
+    float target = 0.0f;
+    std::string leaderStd;
+    if (isGround) {
+        target = 0.0f;
+    } else {
+        if (leader.length == 0) return NO;
+        Model* leaderModel = rctx->GetModelManager()[leader.UTF8String];
+        if (!leaderModel) return NO;
+        target = ReadAlignReference(leaderModel, edgeStr);
+        leaderStd = leader.UTF8String;
+    }
+    rctx->AbortRender(5000);
     BOOL anyMoved = NO;
-    const std::string leaderStd = leader.UTF8String;
     for (NSString* n in names) {
         if (n.length == 0) continue;
         const std::string nm = n.UTF8String;
-        if (nm == leaderStd) continue;
+        if (!isGround && nm == leaderStd) continue;
         Model* m = rctx->GetModelManager()[nm];
         if (!m) continue;
         if (ApplyAlign(m, edgeStr, target)) {

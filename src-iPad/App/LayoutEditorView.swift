@@ -2165,11 +2165,21 @@ struct LayoutEditorView: View {
     /// primary (leader). Pushes an undo snapshot per moved model
     /// so the user can revert individual moves; bumps the summary
     /// token + dirty state and repaints the canvas.
+    ///
+    /// `ground` is leader-less: every selected model snaps its
+    /// bottom to Y = 0. Works with 1+ models and ignores the
+    /// leader designation.
     private func performAlign(by edge: String) {
-        guard let leader = viewModel.layoutEditorSelectedModel,
-              viewModel.layoutEditorSelection.count >= 2 else { return }
+        let isGround = (edge == "ground")
+        let leader = viewModel.layoutEditorSelectedModel ?? ""
+        if isGround {
+            guard !viewModel.layoutEditorSelection.isEmpty else { return }
+        } else {
+            guard !leader.isEmpty,
+                  viewModel.layoutEditorSelection.count >= 2 else { return }
+        }
         let names = Array(viewModel.layoutEditorSelection)
-        for n in names where n != leader {
+        for n in names where isGround || n != leader {
             viewModel.document.pushLayoutUndoSnapshot(forModel: n)
         }
         guard let bridge = XLightsBridgeBox.bridgeForLayoutEditor() else { return }
@@ -2183,7 +2193,7 @@ struct LayoutEditorView: View {
             canUndo = viewModel.document.canUndoLayoutChange()
             NotificationCenter.default.post(name: .layoutEditorModelMoved,
                                              object: "LayoutEditor",
-                                             userInfo: ["model": leader])
+                                             userInfo: isGround ? [:] : ["model": leader])
         }
     }
 
@@ -8227,10 +8237,14 @@ private struct MultiSelectActionBar: View {
                 Button("Align Right")  { onAlign("right") }
                 Button("Align Top")    { onAlign("top") }
                 Button("Align Bottom") { onAlign("bottom") }
+                Button("Align Front")  { onAlign("front") }
+                Button("Align Back")   { onAlign("back") }
                 Divider()
                 Button("Center Horizontal") { onAlign("centerH") }
                 Button("Center Vertical")   { onAlign("centerV") }
                 Button("Center Depth")      { onAlign("centerD") }
+                Divider()
+                Button("Align to Ground") { onAlign("ground") }
             } label: {
                 Label("Align", systemImage: "align.horizontal.left")
                     .font(.caption.weight(.medium))

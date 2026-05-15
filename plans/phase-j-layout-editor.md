@@ -353,7 +353,9 @@ work. Model rename and copy/paste / reset menus are J-3+ as well.
 
 ### J-3 — Per-type properties + model creation (~4–6 wk)
 
-The long tail. Per-model property pages and the Add Model toolbar.
+The long tail. Per-model property pages. (Model creation runs
+through the existing Models-sidebar "+" button — no dedicated
+Add-Model toolbar.)
 
 **Per-type properties:**
 
@@ -370,14 +372,8 @@ The long tail. Per-model property pages and the Add Model toolbar.
 
 **Model creation:**
 
-- Add Model toolbar at the top of the editor screen with sticky-
-  toggle buttons (Arch, Tree, Star, Matrix, Cube, etc.).
-- Tap-button-then-tap-canvas to drop. Drag during the drop sets
-  initial bounding box.
-- Polyline gets a multi-tap mode (each tap adds a vertex; double-
-  tap or button-deselect ends).
-- Reuses desktop's `CreateNewModel(type)` factory and
-  `Model::InitializeLocation()` flow — both already wx-free.
+- The existing "+" button in the Models sidebar covers the create
+  flow well enough; no dedicated Add-Model toolbar planned.
 
 **Model groups:**
 
@@ -2522,20 +2518,31 @@ flat attribute list under `<modelGroups>`, not `<models>`).
   exposed).
 - Controllers tab (whole controller-setup surface).
 
-### J-4 — Multi-select operations (~1–2 wk)
+### J-4 — Multi-select operations ✓ mostly 2026-05-15
 
-Direct ports of the desktop math; the work is the contextual
-toolbar + selection handling.
+Direct ports of the desktop math; the work was the contextual
+toolbar + selection handling. `MultiSelectActionBar` surfaces
+when ≥2 models are selected (≥3 for Distribute), with the leader
+displayed in the bar.
 
-- **Align (8 ops):** top, bottom, ground, left, right, h-center,
-  v-center, d-center.
-- **Distribute (3):** horizontal, vertical, depth.
-- **Flip (2):** horizontal, vertical.
-- **Resize to match:** width, height, both.
-- **Bulk edit:** select N models → set one property → applies to
-  all.
-- All available from a contextual toolbar that surfaces only when
-  ≥2 models are selected. Single undo entry per op.
+**Done:**
+- **Align** — left, right, top, bottom, centerH, centerV, centerD,
+  front, back, ground. `XLMetalBridge.alignModels:toLeader:by:`
+  drives it; `ground` is leader-less and snaps every selected
+  model's bottom to Y=0. (J-4 / J-7 / extension 2026-05-15.)
+- **Distribute** — horizontal, vertical, depth.
+- **Flip** — horizontal, vertical. (J-7.)
+- **Resize to match** — width, height, depth, all.
+- **Duplicate** + **Group-from-selection.** (J-7.)
+- Single undo entry per op via `pushLayoutUndoSnapshotForModel:`
+  before each affected model's mutation.
+
+**Still pending:**
+- **Bulk edit** — select N models → set one property → applies to
+  all. Bridge plumbing already exists
+  (`setLayoutModelProperty:key:value:`); just needs the property
+  panel to route an edit through every selected model under one
+  undo group when multi-select is active.
 
 ## Out of scope (S-pro / future)
 
@@ -2652,5 +2659,3 @@ above is the surface to plan against, not a contract.
   property page? (J-1 decision.)
 - 3D gizmo gesture set — translate axes, rotate rings, scale handles
   — exact mapping. (J-2 design week.)
-- Add Model toolbar — top bar, side rail, or popover? Affects how
-  much horizontal canvas space we keep. (J-3 decision.)
