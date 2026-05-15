@@ -347,13 +347,20 @@ NS_ASSUME_NONNULL_BEGIN
 // the XML, runs it through `Model::CreateDefaultModelFromSavedModelNode`
 // so DMX / matrix / star / arch / etc. all deserialize through
 // the same path desktop uses, then positions the model at the
-// projected touch point via `InitializeLocation`. Returns the
-// final model name on success (the importer may uniquify it if
-// the show already has a model by that name), nil on failure.
-- (nullable NSString*)importXmodelFromPath:(NSString*)path
-                              atScreenPoint:(CGPoint)point
-                                   viewSize:(CGSize)viewSize
-                                forDocument:(XLSequenceDocument*)doc;
+// projected touch point via `InitializeLocation`.
+//
+// For multi-model xmodel files (`<models>` root with multiple
+// `<model>` children — desktop PR #6365 added support for
+// exporting these), the primary model goes at the touch point
+// and additional siblings are placed to its right with a
+// padding gap. Returns the final model names in order — first
+// element is the primary, the rest are the additionals. Caller
+// may uniquify since the show may already have models by those
+// names. nil on failure.
+- (nullable NSArray<NSString*>*)importXmodelFromPath:(NSString*)path
+                                        atScreenPoint:(CGPoint)point
+                                             viewSize:(CGSize)viewSize
+                                          forDocument:(XLSequenceDocument*)doc;
 
 // Phase J-3 (touch UX) — multi-vertex polyline create. Returns
 // YES if `name` is a PolyPoint-style model (Poly Line / MultiPoint).

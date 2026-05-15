@@ -5388,6 +5388,42 @@ class SequencerViewModel {
         }
     }
 
+    /// B53/B54 follow-up — paste the clipboard at the given row,
+    /// auto-inserting layers when the clipboard spans more rows
+    /// than the destination element currently has. Mirrors desktop
+    /// `EffectsGrid::PasteModelEffectsWithLayers` (PR #6363): copy a
+    /// multi-layer model, paste at another model with fewer layers,
+    /// and the destination grows to fit. Uses `playPositionMS` as
+    /// the time anchor — same convention as ⌘V.
+    func pasteAtRow(rowIndex: Int) {
+        if clipboardEntries.isEmpty { syncClipboardFromPasteboard() }
+        guard !clipboardEntries.isEmpty,
+              rowIndex >= 0, rowIndex < rows.count else { return }
+
+        let maxRowOffset = clipboardEntries.map { $0.rowOffset }.max() ?? 0
+        if maxRowOffset > 0,
+           let destModel = document.rowModelName(at: Int32(rowIndex)) as String?,
+           !destModel.isEmpty {
+            // Count consecutive rows after `rowIndex` that still
+            // belong to the destination model. Submodels of the same
+            // parent share `rowModelName` so they're counted in this
+            // trail — desktop's smart-paste does the same.
+            var existingTrail = 0
+            var probe = rowIndex + 1
+            while probe < rows.count,
+                  ((document.rowModelName(at: Int32(probe)) as String?) ?? "") == destModel {
+                existingTrail += 1
+                probe += 1
+            }
+            let toInsert = maxRowOffset - existingTrail
+            if toInsert > 0 {
+                _ = insertLayersBelow(rowIndex: rowIndex, count: toInsert)
+            }
+        }
+
+        pasteEffect(rowIndex: rowIndex, startMS: playPositionMS)
+    }
+
     // MARK: - Lock / Disable
 
     func toggleLockSelected() {

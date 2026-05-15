@@ -1245,16 +1245,30 @@ struct PreviewPaneView: UIViewRepresentable {
             // creation-mode branch so a stray creation flag
             // doesn't intercept.
             if let importPath = viewModel.layoutPendingImportPath {
-                if let newName = bridge.importXmodel(fromPath: importPath,
-                                                      atScreenPoint: point,
-                                                      viewSize: size,
-                                                      for: viewModel.document) {
+                // PR #6365 parity — multi-model xmodel files return
+                // multiple names. The primary lands at the touch
+                // point; siblings get batch-placed to the right.
+                // Select the primary single-mode when there's only
+                // one, or multi-select the whole batch so the user
+                // can immediately reposition them as a group.
+                if let names = bridge.importXmodel(fromPath: importPath,
+                                                    atScreenPoint: point,
+                                                    viewSize: size,
+                                                    for: viewModel.document),
+                   let primary = names.first {
                     viewModel.layoutPendingImportPath = nil
-                    viewModel.layoutSelectSingle(newName)
+                    if names.count == 1 {
+                        viewModel.layoutSelectSingle(primary)
+                    } else {
+                        viewModel.layoutSelectSingle(primary)
+                        for extra in names.dropFirst() {
+                            viewModel.layoutEditorSelection.insert(extra)
+                        }
+                    }
                     NotificationCenter.default.post(
                         name: .layoutEditorModelMoved,
                         object: previewNameForNotifications,
-                        userInfo: ["model": newName])
+                        userInfo: ["model": primary])
                     view.setNeedsDisplay()
                 }
                 return

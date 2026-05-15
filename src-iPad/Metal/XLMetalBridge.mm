@@ -2185,10 +2185,10 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     return [NSString stringWithUTF8String:m->GetName().c_str()];
 }
 
-- (nullable NSString*)importXmodelFromPath:(NSString*)path
-                              atScreenPoint:(CGPoint)point
-                                   viewSize:(CGSize)viewSize
-                                forDocument:(XLSequenceDocument*)doc {
+- (nullable NSArray<NSString*>*)importXmodelFromPath:(NSString*)path
+                                        atScreenPoint:(CGPoint)point
+                                             viewSize:(CGSize)viewSize
+                                          forDocument:(XLSequenceDocument*)doc {
     if (!_preview || !doc || !path || path.length == 0) return nil;
     iPadRenderContext* rctx = ContextFromDoc(doc);
     if (!rctx) return nil;
@@ -2272,7 +2272,59 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     rctx->GetModelManager().AddModel(imported);
     rctx->MarkLayoutModelDirty(imported->GetName());
 
-    return [NSString stringWithUTF8String:imported->GetName().c_str()];
+    NSMutableArray<NSString*>* names = [NSMutableArray array];
+    [names addObject:[NSString stringWithUTF8String:imported->GetName().c_str()]];
+
+    // PR #6365 — multi-model xmodel: if the root is `<models>`,
+    // load every additional `<model>` sibling and place each to
+    // the right of the previous one with a small gap. Mirrors
+    // desktop's `LayoutPanel::FinalizeModel` batch-placement
+    // loop (LayoutPanel.cpp:4972). The primary already occupies
+    // index 0; siblings start at root.first_child().next_sibling().
+    if (std::string_view(root.name()) == "models") {
+        constexpr float BATCH_PLACEMENT_PADDING    = 20.0f;
+        constexpr float BATCH_PLACEMENT_MIN_OFFSET = 50.0f;
+        const float originX = imported->GetHcenterPos();
+        const float originY = imported->GetVcenterPos();
+        const float originZ = imported->GetDcenterPos();
+        float previousWidth = std::max(imported->GetRestorableMWidth(),
+                                        BATCH_PLACEMENT_MIN_OFFSET);
+        float currentX = originX + previousWidth + BATCH_PLACEMENT_PADDING;
+
+        for (pugi::xml_node child = root.first_child().next_sibling();
+             child;
+             child = child.next_sibling()) {
+            Model* extraBaseline = rctx->GetModelManager().CreateDefaultModel("Custom", "1");
+            if (!extraBaseline) continue;
+            bool extraCancelled = false;
+            Model* extra = extraBaseline->CreateDefaultModelFromSavedModelNode(
+                extraBaseline, child, rctx->GetModelManager(), extraCancelled);
+            if (extraCancelled || !extra) {
+                delete extraBaseline;
+                continue;
+            }
+            extra->GetModelScreenLocation().SetWorldPosition(
+                glm::vec3(currentX, originY, originZ));
+            extra->SetLayoutGroup(layoutGroup);
+            extra->SetControllerName(NO_CONTROLLER, true);
+
+            // GenerateModelName uniquifies if the show already has
+            // a model with this name — matches desktop's
+            // FinalizeModel:4982.
+            std::string unique = rctx->GetModelManager().GenerateModelName(extra->GetName());
+            extra->SetName(unique);
+
+            rctx->GetModelManager().AddModel(extra);
+            rctx->MarkLayoutModelDirty(extra->GetName());
+            [names addObject:[NSString stringWithUTF8String:extra->GetName().c_str()]];
+
+            const float thisWidth = std::max(extra->GetRestorableMWidth(),
+                                              BATCH_PLACEMENT_MIN_OFFSET);
+            currentX += thisWidth + BATCH_PLACEMENT_PADDING;
+        }
+    }
+
+    return names;
 }
 
 - (BOOL)modelUsesPolyPointLocation:(NSString*)name
