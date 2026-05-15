@@ -143,6 +143,11 @@ struct LayoutEditorView: View {
     @State private var pendingImagePickKey: String = ""
     @State private var pendingImagePickModel: String = ""
 
+    // J-23 — Custom-model visual editor payload. When non-nil
+    // the `.sheet(item:)` opens the editor and the payload
+    // carries the captured-at-open grid + dims + bg image.
+    @State private var customModelEditorPayload: CustomModelPayload? = nil
+
     /// J-12 — generic view-object file picker (Mesh `.obj`,
     /// Image bitmap, Terrain image). `pendingObjectFilePickKey`
     /// tracks which property key to write on completion;
@@ -512,6 +517,18 @@ struct LayoutEditorView: View {
                       allowedContentTypes: [.png, .jpeg, .tiff, .bmp, .gif, .image],
                       allowsMultipleSelection: false,
                       onCompletion: handleImageFilePick)
+        // J-23 / J-23.4 — Custom-model visual editor. Full-screen
+        // cover on iPad so the canvas gets the whole window (the
+        // detent-clamped sheet was way too small for placing
+        // pixels on dense grids).
+        .fullScreenCover(item: $customModelEditorPayload) { payload in
+            CustomModelEditorSheet(payload: payload,
+                                   commit: { w, h, d, locs in
+                                       commitCustomModelGrid(
+                                           modelName: payload.modelName,
+                                           w: w, h: h, d: d, locations: locs)
+                                   })
+        }
         .sheet(isPresented: $renameModelSheetVisible) {
             if let oldName = pendingRenameModelOldName {
                 RenameGroupSheet(
@@ -891,6 +908,18 @@ struct LayoutEditorView: View {
                     onDeleteSubModel: { submodelName in
                         deleteSubModel(modelName: name, submodelName: submodelName)
                     },
+                    onAddSubModel: { submodelName in
+                        addSubModel(modelName: name, submodelName: submodelName)
+                    },
+                    onRenameSubModel: { oldName, newName in
+                        renameSubModel(modelName: name, oldName: oldName, newName: newName)
+                    },
+                    onLoadSubModelDetails: {
+                        loadSubModelDetails(modelName: name)
+                    },
+                    onCommitSubModelDetails: { entries in
+                        commitSubModelDetails(modelName: name, entries: entries)
+                    },
                     onNavigateToGroup: { groupName in
                         sidebarTab = .groups
                         viewModel.layoutEditorSelectedGroup = groupName
@@ -902,6 +931,60 @@ struct LayoutEditorView: View {
                     onPickImageFile: { key in
                         pendingImagePickKey = key
                         imageFilePickerVisible = true
+                    },
+                    onLoadFaceState: { kind in
+                        // J-22 — bridge returns NSDictionary which
+                        // Swift bridges to [String: AnyHashable].
+                        // Cast through NSDictionary to keep the
+                        // nested-dict shape intact regardless of
+                        // type-erasure quirks.
+                        let raw: NSDictionary
+                        switch kind {
+                        case .faces:
+                            raw = viewModel.document.faceInfo(forModel: name) as NSDictionary
+                        case .states:
+                            raw = viewModel.document.stateInfo(forModel: name) as NSDictionary
+                        default:
+                            return [:]
+                        }
+                        var out: [String: [String: String]] = [:]
+                        for (k, v) in raw {
+                            guard let key = k as? String,
+                                  let inner = v as? NSDictionary else { continue }
+                            var attrs: [String: String] = [:]
+                            for (ak, av) in inner {
+                                if let kk = ak as? String, let vv = av as? String {
+                                    attrs[kk] = vv
+                                }
+                            }
+                            out[key] = attrs
+                        }
+                        return out
+                    },
+                    onCommitFaceState: { kind, entries in
+                        commitFaceState(modelName: name, kind: kind, entries: entries)
+                    },
+                    onLoadDimming: {
+                        let raw = viewModel.document.dimmingInfo(forModel: name) as NSDictionary
+                        var out: [String: [String: String]] = [:]
+                        for (k, v) in raw {
+                            guard let key = k as? String,
+                                  let inner = v as? NSDictionary else { continue }
+                            var attrs: [String: String] = [:]
+                            for (ak, av) in inner {
+                                if let kk = ak as? String, let vv = av as? String {
+                                    attrs[kk] = vv
+                                }
+                            }
+                            out[key] = attrs
+                        }
+                        return out
+                    },
+                    onCommitDimming: { entries in
+                        commitDimming(modelName: name, entries: entries)
+                    },
+                    onOpenCustomModelEditor: {
+                        openCustomModelEditor(modelName: name)
                     }
                 )
             } else {
@@ -1732,6 +1815,184 @@ struct LayoutEditorView: View {
         canUndo = viewModel.document.canUndoLayoutChange()
     }
 
+    /// J-22 — add a new submodel on `modelName`. Returns the
+    /// sanitized name on success.
+    private func addSubModel(modelName: String, submodelName: String) -> String? {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
+        guard let added = viewModel.document.addSubModel(toModel: modelName,
+                                                          name: submodelName) else {
+            return nil
+        }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        canUndo = viewModel.document.canUndoLayoutChange()
+        return added
+    }
+
+    /// J-23.3 — Load full per-submodel details from the bridge.
+    private func loadSubModelDetails(modelName: String) -> [SubModelEntry] {
+        let raw = viewModel.document.submodelDetails(forModel: modelName) as NSArray
+        var out: [SubModelEntry] = []
+        for case let d as NSDictionary in raw {
+            let name        = (d["name"] as? String) ?? ""
+            let isRanges    = (d["isRanges"] as? Bool) ?? true
+            let isVertical  = (d["isVertical"] as? Bool) ?? false
+            let bufferStyle = (d["bufferStyle"] as? String) ?? "Default"
+            let strands     = (d["strands"] as? [String]) ?? []
+            let subBuffer   = (d["subBuffer"] as? String) ?? ""
+            out.append(SubModelEntry(
+                name: name,
+                isRanges: isRanges,
+                isVertical: isVertical,
+                bufferStyle: bufferStyle,
+                strands: strands,
+                subBuffer: subBuffer))
+        }
+        return out
+    }
+
+    /// J-23.3 — Wholesale-replace all submodels (matches
+    /// desktop's RemoveAllSubModels + re-add pattern).
+    private func commitSubModelDetails(modelName: String,
+                                        entries: [SubModelEntry]) -> Bool {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
+        let arr: NSMutableArray = NSMutableArray()
+        for e in entries {
+            let d: NSMutableDictionary = NSMutableDictionary()
+            d["name"]        = e.name
+            d["isRanges"]    = NSNumber(value: e.isRanges)
+            d["isVertical"]  = NSNumber(value: e.isVertical)
+            d["bufferStyle"] = e.bufferStyle
+            d["strands"]     = e.strands
+            d["subBuffer"]   = e.subBuffer
+            arr.add(d)
+        }
+        let ok = viewModel.document.replaceSubModels(
+            onModel: modelName,
+            withEntries: arr as? [[String : Any]] ?? [])
+        guard ok else { return false }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        canUndo = viewModel.document.canUndoLayoutChange()
+        return true
+    }
+
+    /// J-22 — rename a submodel on its parent.
+    private func renameSubModel(modelName: String,
+                                 oldName: String,
+                                 newName: String) -> Bool {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
+        guard viewModel.document.renameSubModelNamed(oldName,
+                                                      onModel: modelName,
+                                                      to: newName) else {
+            return false
+        }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        canUndo = viewModel.document.canUndoLayoutChange()
+        return true
+    }
+
+    /// J-23 — open the Custom-model visual grid editor. Reads
+    /// the current 3D grid + dims + bg-image fields from the
+    /// bridge into a payload, then surfaces the sheet.
+    private func openCustomModelEditor(modelName: String) {
+        let raw = viewModel.document.customModelData(forModel: modelName) as NSDictionary
+        let width  = (raw["width"]  as? NSNumber)?.intValue ?? 1
+        let height = (raw["height"] as? NSNumber)?.intValue ?? 1
+        let depth  = (raw["depth"]  as? NSNumber)?.intValue ?? 1
+        var locs: [[[Int]]] = []
+        if let arr = raw["locations"] as? NSArray {
+            for layer in arr {
+                guard let layerArr = layer as? NSArray else { continue }
+                var layerOut: [[Int]] = []
+                for row in layerArr {
+                    guard let rowArr = row as? NSArray else { continue }
+                    var rowOut: [Int] = []
+                    for cell in rowArr {
+                        rowOut.append((cell as? NSNumber)?.intValue ?? 0)
+                    }
+                    layerOut.append(rowOut)
+                }
+                locs.append(layerOut)
+            }
+        }
+        let bgPath  = raw["backgroundImage"] as? String ?? ""
+        let bgScale = (raw["backgroundScale"] as? NSNumber)?.intValue ?? 100
+        let bgBri   = (raw["backgroundBrightness"] as? NSNumber)?.intValue ?? 100
+        customModelEditorPayload = CustomModelPayload(
+            modelName: modelName,
+            initialWidth: width,
+            initialHeight: height,
+            initialDepth: depth,
+            initialLocations: locs,
+            initialBackground: bgPath,
+            initialBkgScale: bgScale,
+            initialBkgBrightness: bgBri)
+    }
+
+    /// J-23 — wholesale-replace the custom-model grid + dims.
+    private func commitCustomModelGrid(modelName: String,
+                                         w: Int, h: Int, d: Int,
+                                         locations: [[[Int]]]) {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
+        // SwiftUI [[[Int]]] doesn't bridge to NSArray<NSArray<
+        // NSArray<NSNumber>>>* automatically — build it.
+        let nsLocs: NSMutableArray = NSMutableArray()
+        for layer in locations {
+            let layerArr: NSMutableArray = NSMutableArray()
+            for row in layer {
+                let rowArr: NSMutableArray = NSMutableArray()
+                for v in row {
+                    rowArr.add(NSNumber(value: v))
+                }
+                layerArr.add(rowArr)
+            }
+            nsLocs.add(layerArr)
+        }
+        let ok = viewModel.document.setCustomModelData(
+            modelName,
+            width: Int32(w), height: Int32(h), depth: Int32(d),
+            locations: nsLocs as! [[[NSNumber]]])
+        guard ok else { return }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        canUndo = viewModel.document.canUndoLayoutChange()
+    }
+
+    /// J-22 — wholesale-replace a model's face / state map.
+    /// The Swift dictionary is bridged to an NSDictionary that
+    /// the ObjC++ bridge converts into the C++ `FaceStateData`.
+    private func commitFaceState(modelName: String,
+                                  kind: ModelDataKind,
+                                  entries: [String: [String: String]]) {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
+        let ok: Bool
+        switch kind {
+        case .faces:
+            ok = viewModel.document.setFaceInfo(modelName, entries: entries)
+        case .states:
+            ok = viewModel.document.setStateInfo(modelName, entries: entries)
+        default:
+            return
+        }
+        guard ok else { return }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        canUndo = viewModel.document.canUndoLayoutChange()
+    }
+
+    /// J-22 — wholesale-replace the dimming-curve map.
+    private func commitDimming(modelName: String,
+                                entries: [String: [String: String]]) {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
+        guard viewModel.document.setDimmingInfo(modelName,
+                                                 entries: entries) else { return }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        canUndo = viewModel.document.canUndoLayoutChange()
+    }
+
     /// J-18 pass 6 — clear the dimming curve on a model. Curve
     /// editing isn't on iPad yet; clear is the only mutation.
     private func clearDimmingCurve(modelName: String) {
@@ -2090,9 +2351,18 @@ private struct LayoutEditorPropertiesView: View {
     let onCommitAliases: (_ aliases: [String]) -> Void
     let onCommitIndexedNames: (_ kind: ModelDataKind, _ names: [String]) -> Void
     let onDeleteSubModel: (_ submodelName: String) -> Void
+    let onAddSubModel: (_ submodelName: String) -> String?
+    let onRenameSubModel: (_ oldName: String, _ newName: String) -> Bool
+    let onLoadSubModelDetails: () -> [SubModelEntry]
+    let onCommitSubModelDetails: (_ entries: [SubModelEntry]) -> Bool
     let onNavigateToGroup: (_ groupName: String) -> Void
     let onClearDimmingCurve: () -> Void
     let onPickImageFile: (_ key: String) -> Void
+    let onLoadFaceState: (_ kind: ModelDataKind) -> [String: [String: String]]
+    let onCommitFaceState: (_ kind: ModelDataKind, _ entries: [String: [String: String]]) -> Void
+    let onLoadDimming: () -> [String: [String: String]]
+    let onCommitDimming: (_ entries: [String: [String: String]]) -> Void
+    let onOpenCustomModelEditor: () -> Void
 
     @State private var expandedTypeProps: Bool = true
     @State private var expandedController: Bool = false
@@ -2106,6 +2376,8 @@ private struct LayoutEditorPropertiesView: View {
     // SubModels / etc) is currently presented. nil = none.
     @State private var modelDataViewer: ModelDataKind? = nil
     @State private var pendingClearDimmingCurve: Bool = false
+    // J-22 — dimming curve editor sheet visibility.
+    @State private var dimmingEditorVisible: Bool = false
     // J-19 — Layered Arches layer-size editor.
     // J-20.7 — Switched to `.sheet(item:)` so the sheet is bound
     // to the data's identity rather than a separate boolean flag.
@@ -2233,20 +2505,45 @@ private struct LayoutEditorPropertiesView: View {
                     HStack(spacing: 6) {
                         Text(hasDimmingCurve ? "Set" : "—")
                             .foregroundStyle(.secondary)
-                        if hasDimmingCurve && !isDisabled("dimmingCurve") {
+                        if !isDisabled("dimmingCurve") {
+                            // J-22 — pencil opens the same nested-
+                            // map editor used for faces / states.
+                            // Dimming channels are "all", "red",
+                            // "green", "blue", "white"; each has
+                            // its own attribute map (type / gamma
+                            // / offset / etc.).
                             Button {
-                                pendingClearDimmingCurve = true
+                                dimmingEditorVisible = true
                             } label: {
-                                Image(systemName: "trash")
+                                Image(systemName: "pencil")
                                     .font(.caption2)
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(.secondary)
-                            .accessibilityLabel("Clear dimming curve")
+                            .accessibilityLabel("Edit dimming curve")
+                            if hasDimmingCurve {
+                                Button {
+                                    pendingClearDimmingCurve = true
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.caption2)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                                .accessibilityLabel("Clear dimming curve")
+                            }
                         }
                     }
                 }
                 .opacity(isDisabled("dimmingCurve") ? 0.45 : 1.0)
+            }
+            .sheet(isPresented: $dimmingEditorVisible) {
+                FaceStateEditorSheet(
+                    payload: FaceStatePayload(
+                        kind: .dimming,
+                        entries: onLoadDimming(),
+                        modelName: modelName),
+                    commit: onCommitDimming)
             }
             .alert("Clear dimming curve?",
                    isPresented: $pendingClearDimmingCurve) {
@@ -2286,8 +2583,18 @@ private struct LayoutEditorPropertiesView: View {
                     let colours = (summary["superStringColours"] as? [String]) ?? []
                     ForEach(Array(colours.enumerated()), id: \.offset) { idx, hex in
                         row("Colour \(idx + 1)") {
-                            Text(hex).foregroundStyle(.secondary)
-                                .font(.caption.monospaced())
+                            // J-21 — Editable Superstring colour via
+                            // the new per-index bridge setter. sRGB
+                            // round-trip via the shared helpers.
+                            ColorPicker("",
+                                         selection: Binding(
+                                            get: { hexColor(hex) },
+                                            set: { commit("superStringColour\(idx)",
+                                                          hexFromColor($0) as NSString) }
+                                         ),
+                                         supportsOpacity: false)
+                                .labelsHidden()
+                                .frame(width: 40, height: 24)
                         }
                     }
                 } else {
@@ -2380,7 +2687,23 @@ private struct LayoutEditorPropertiesView: View {
                 SubModelListSheet(
                     modelName: modelName,
                     initial: entries(for: kind),
-                    delete: onDeleteSubModel)
+                    delete: onDeleteSubModel,
+                    add: onAddSubModel,
+                    rename: onRenameSubModel,
+                    loadDetails: onLoadSubModelDetails,
+                    commitDetails: onCommitSubModelDetails)
+            } else if kind == .faces || kind == .states {
+                // J-22 — full Faces / States editor. Bridge read
+                // / write happens in the parent — we just hand
+                // the entries through callbacks.
+                FaceStateEditorSheet(
+                    payload: FaceStatePayload(
+                        kind: kind == .faces ? .faces : .states,
+                        entries: onLoadFaceState(kind),
+                        modelName: modelName),
+                    commit: { newEntries in
+                        onCommitFaceState(kind, newEntries)
+                    })
             } else if kind == .groups {
                 GroupRefListSheet(modelName: modelName,
                                   groups: entries(for: kind),
@@ -2394,6 +2717,7 @@ private struct LayoutEditorPropertiesView: View {
             }
         }
     }
+
 
     // MARK: - Section header
 
@@ -3415,6 +3739,17 @@ private struct LayoutEditorPropertiesView: View {
                          supportsOpacity: false)
                 .labelsHidden()
                 .frame(width: 40, height: 24)
+        case "customModelData":
+            // J-23 — opens the visual grid editor (replaces
+            // desktop's type-numbers-into-cells dialog).
+            Button {
+                onOpenCustomModelEditor()
+            } label: {
+                Label("Edit Grid…", systemImage: "square.grid.3x3.fill")
+                    .font(.caption2)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
         case "imageFile":
             // J-20.2 — path label + folder button. Tapping the
             // button opens a .fileImporter scoped to image UTTypes
@@ -3524,13 +3859,16 @@ private enum ModelDataKind: String, Identifiable {
         case .groups:    return "In Model Groups"
         }
     }
-    /// J-18 pass 2/3/4 — only categories with a dedicated
-    /// bridge writer are editable. Everything else opens the
-    /// read-only viewer.
+    /// J-18 / J-22 — categories with a dedicated bridge writer
+    /// open the editable sheet; the rest fall back to the read-
+    /// only viewer.
     var isEditable: Bool {
         switch self {
-        case .aliases, .strands, .nodes, .submodels: return true
-        default:                                      return false
+        case .aliases, .strands, .nodes, .submodels,
+             .faces, .states:
+            return true
+        default:
+            return false
         }
     }
 }
@@ -3719,38 +4057,120 @@ private struct IndexedNamesEditorSheet: View {
 /// Add / rename / geometry editing are not in scope (each one
 /// needs its own slice — submodels carry per-instance range or
 /// line geometry that the iPad has no UI for yet).
+/// J-23.3 — Editable SubModel record. Mirrors the desktop's
+/// SubModelInfo struct: each field maps directly to one of
+/// SubModel's constructor args + the ranges / sub-buffer
+/// strings we recreate after `RemoveAllSubModels`.
+struct SubModelEntry: Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+    var isRanges: Bool
+    var isVertical: Bool
+    var bufferStyle: String
+    var strands: [String]      // when isRanges
+    var subBuffer: String      // when !isRanges
+}
+
 private struct SubModelListSheet: View {
     let modelName: String
     let initial: [String]
     let delete: (_ submodelName: String) -> Void
+    let add: (_ submodelName: String) -> String?
+    let rename: (_ oldName: String, _ newName: String) -> Bool
+    let loadDetails: () -> [SubModelEntry]
+    let commitDetails: (_ entries: [SubModelEntry]) -> Bool
 
-    @State private var names: [String] = []
+    @State private var names: [String]
+    @State private var entries: [SubModelEntry] = []
+    @State private var newSubName: String = ""
     @Environment(\.dismiss) private var dismiss
+
+    init(modelName: String,
+         initial: [String],
+         delete: @escaping (String) -> Void,
+         add: @escaping (String) -> String?,
+         rename: @escaping (String, String) -> Bool,
+         loadDetails: @escaping () -> [SubModelEntry],
+         commitDetails: @escaping ([SubModelEntry]) -> Bool) {
+        self.modelName = modelName
+        self.initial = initial
+        self.delete = delete
+        self.add = add
+        self.rename = rename
+        self.loadDetails = loadDetails
+        self.commitDetails = commitDetails
+        self._names = State(initialValue: initial)
+    }
 
     var body: some View {
         NavigationStack {
-            Group {
-                if names.isEmpty {
-                    ContentUnavailableView("No submodels",
-                        systemImage: "list.bullet.indent",
-                        description: Text("This model has no submodels."))
-                } else {
-                    List {
-                        Section(footer: Text("Swipe to delete. Geometry editing is not yet available on iPad — delete clears the submodel; you'll need the desktop to rebuild it.")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)) {
-                            ForEach(names, id: \.self) { sub in
-                                Text(sub).font(.body.monospaced())
-                            }
-                            .onDelete { idx in
-                                for i in idx {
-                                    let sub = names[i]
-                                    delete(sub)
+            List {
+                Section("Add") {
+                    HStack {
+                        TextField("New submodel name", text: $newSubName)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                            .submitLabel(.done)
+                            .onSubmit(addPressed)
+                        Button("Add", action: addPressed)
+                            .disabled(normalizedNewName.isEmpty ||
+                                      names.contains(normalizedNewName))
+                    }
+                }
+                Section(footer: Text("Tap a submodel to edit its name + geometry (ranges, lines, sub-buffer). Swipe to delete.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)) {
+                    if names.isEmpty {
+                        Text("No submodels yet.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(names, id: \.self) { sub in
+                            NavigationLink(value: sub) {
+                                HStack {
+                                    Text(sub).font(.body.monospaced())
+                                    Spacer()
+                                    let entry = entryFor(sub)
+                                    Text(entry?.isRanges ?? true
+                                         ? "ranges (\(entry?.strands.count ?? 0))"
+                                         : "sub-buffer")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
                                 }
-                                names.remove(atOffsets: idx)
                             }
                         }
+                        .onDelete { idx in
+                            for i in idx {
+                                let sub = names[i]
+                                delete(sub)
+                                entries.removeAll { $0.name == sub }
+                            }
+                            names.remove(atOffsets: idx)
+                        }
                     }
+                }
+            }
+            .navigationDestination(for: String.self) { sub in
+                if let idx = entries.firstIndex(where: { $0.name == sub }) {
+                    SubModelDetailEditor(
+                        entry: Binding(
+                            get: { entries[idx] },
+                            set: { entries[idx] = $0 }
+                        ),
+                        existingNames: Set(entries.filter { $0.name != sub }.map { $0.name }),
+                        onSave: {
+                            let oldName = sub
+                            let newName = entries[idx].name
+                            _ = commitDetails(entries)
+                            // Re-sync names list in case the
+                            // detail renamed the submodel or
+                            // re-keyed its identity.
+                            if oldName != newName,
+                               let ni = names.firstIndex(of: oldName) {
+                                names[ni] = newName
+                            }
+                            entries = loadDetails()
+                        })
                 }
             }
             .navigationTitle("SubModels — \(modelName)")
@@ -3760,10 +4180,141 @@ private struct SubModelListSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.large])
         .onAppear {
-            names = initial
+            entries = loadDetails()
         }
+    }
+
+    private func entryFor(_ name: String) -> SubModelEntry? {
+        entries.first(where: { $0.name == name })
+    }
+
+    private var normalizedNewName: String {
+        newSubName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func addPressed() {
+        let n = normalizedNewName
+        guard !n.isEmpty, !names.contains(n) else { return }
+        if let added = add(n) {
+            names.append(added)
+            entries = loadDetails()
+        }
+        newSubName = ""
+    }
+}
+
+/// J-23.3 — Per-submodel detail editor. Edits all fields
+/// (name / type / orientation / buffer style / ranges OR
+/// sub-buffer) of one submodel. Saving commits via the
+/// wholesale-replace bridge, since changing type / orientation
+/// / buffer style requires reconstructing the C++ SubModel.
+private struct SubModelDetailEditor: View {
+    @Binding var entry: SubModelEntry
+    let existingNames: Set<String>
+    let onSave: () -> Void
+
+    @State private var newRange: String = ""
+
+    private static let bufferStyles = [
+        "Default", "Keep XY", "Stacked", "Stacked Right",
+        "Stacked Left", "Stacked Up", "Stacked Down",
+        "Stacked Vertical Concatenate",
+    ]
+
+    var body: some View {
+        Form {
+            Section("Identity") {
+                TextField("Name", text: $entry.name)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
+                if existingNames.contains(entry.name) {
+                    Text("⚠ Name already used by another submodel")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+            Section("Type") {
+                Picker("Type", selection: $entry.isRanges) {
+                    Text("Ranges / Lines").tag(true)
+                    Text("Sub-buffer").tag(false)
+                }
+                .pickerStyle(.segmented)
+                if entry.isRanges {
+                    Toggle("Vertical orientation", isOn: $entry.isVertical)
+                    Picker("Buffer Style", selection: $entry.bufferStyle) {
+                        ForEach(Self.bufferStyles, id: \.self) { s in
+                            Text(s).tag(s)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
+            }
+            if entry.isRanges {
+                Section(footer: Text("One range per line, e.g. \"1-50\" or \"5,10-15,30\". Swipe to delete; tap Add to append. Range numbers refer to pixel indices on the parent model.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)) {
+                    HStack {
+                        TextField("e.g. 1-50", text: $newRange)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                            .submitLabel(.done)
+                            .onSubmit(addRange)
+                        Button("Add", action: addRange)
+                            .disabled(newRange.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    if entry.strands.isEmpty {
+                        Text("No ranges yet.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(entry.strands.enumerated()), id: \.offset) { idx, _ in
+                            HStack {
+                                Text("Line \(idx + 1)")
+                                    .frame(minWidth: 60, alignment: .leading)
+                                    .foregroundStyle(.secondary)
+                                    .font(.caption.monospacedDigit())
+                                TextField("range",
+                                          text: Binding(
+                                            get: { entry.strands[idx] },
+                                            set: { entry.strands[idx] = $0 }
+                                          ))
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled(true)
+                                    .multilineTextAlignment(.trailing)
+                            }
+                        }
+                        .onDelete { idx in
+                            entry.strands.remove(atOffsets: idx)
+                        }
+                    }
+                }
+            } else {
+                Section(footer: Text("Format: x1,y1,x2,y2 as percentages (0..100) of the parent model bounds.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)) {
+                    TextField("e.g. 0,0,100,100", text: $entry.subBuffer)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                }
+            }
+        }
+        .navigationTitle(entry.name)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") { onSave() }
+                    .disabled(entry.name.trimmingCharacters(in: .whitespaces).isEmpty ||
+                              existingNames.contains(entry.name))
+            }
+        }
+    }
+
+    private func addRange() {
+        let r = newRange.trimmingCharacters(in: .whitespaces)
+        guard !r.isEmpty else { return }
+        entry.strands.append(r)
+        newRange = ""
     }
 }
 
@@ -3978,6 +4529,1445 @@ private struct StartChannelEditorSheet: View {
 /// pipeline in the future). Slot count is variable — Add adds a
 /// new size-1 layer, swipe-to-delete removes a layer. Each row
 /// has an int field for the layer's node count.
+/// J-23 — Custom-model visual editor. Replaces desktop's
+/// type-numbers-into-cells dialog with a point/click/drag flow:
+///   - Set the grid size (Width × Height; Depth gates additional
+///     layers but defaults to 1 for the common 2D case).
+///   - Optionally pick a background image.
+///   - Tap an empty cell to place the next pixel; tap an
+///     existing pixel to select it.
+///   - Selected pixel: a chip shows its number; the user can
+///     drag it to a new cell, change the number (with
+///     auto-shift of neighbours), or delete it.
+///
+/// The grid is rendered as a SwiftUI Canvas so we can draw the
+/// background image, grid lines, numbered points, and selection
+/// highlight in a single pass without spawning a UIView tree
+/// per cell — important for grids with thousands of cells.
+private struct CustomModelPayload: Identifiable {
+    let id = UUID()
+    let modelName: String
+    let initialWidth: Int
+    let initialHeight: Int
+    let initialDepth: Int
+    let initialLocations: [[[Int]]]
+    let initialBackground: String
+    let initialBkgScale: Int
+    let initialBkgBrightness: Int
+}
+
+private struct CustomModelEditorSheet: View {
+    let payload: CustomModelPayload
+    let commit: (_ w: Int, _ h: Int, _ d: Int, _ locations: [[[Int]]]) -> Void
+
+    // Grid state
+    @State private var w: Int
+    @State private var h: Int
+    @State private var d: Int
+    @State private var layer: Int = 0
+    /// 3D grid indexed [d][h][w]. Each cell is 0 (empty) or the
+    /// 1-based pixel number that lights at that position.
+    @State private var grid: [[[Int]]]
+    /// Currently selected cell (row, col) in the active layer.
+    @State private var selection: GridPos? = nil
+    /// J-23.2 — lazily-loaded background image (UIImage so we
+    /// can hand a CGImage to the Canvas). Loaded from the bg
+    /// path on first body evaluation.
+    @State private var backgroundImage: UIImage? = nil
+
+    /// J-23.4 — canvas zoom. 1.0 = fit cellSide to available
+    /// space; >1 zooms in (cells get bigger, possibly clipped at
+    /// the canvas edges). Pinch updates this live, plus a slider
+    /// in the toolbar for explicit control.
+    @State private var zoom: CGFloat = 1.0
+    /// Accumulator while a MagnificationGesture is in flight.
+    @State private var zoomCommitted: CGFloat = 1.0
+    /// Pan offset in screen points. Allows scrolling the zoomed
+    /// canvas. Reset when zoom returns to 1.0.
+    @State private var panOffset: CGSize = .zero
+    @State private var panCommitted: CGSize = .zero
+    /// True when a multi-touch gesture is active so the single-
+    /// finger DragGesture suppresses its tap/move side effects.
+    @State private var multiTouchActive: Bool = false
+    /// J-23.5 — Live canvas size captured by GeometryReader so
+    /// the gesture closures can re-derive cellSize / xOff / yOff
+    /// from fresh @State values rather than stale local lets
+    /// captured at body-eval time.
+    @State private var canvasGeoSize: CGSize = .zero
+    /// J-23.5 — When true, single-finger drag pans the canvas
+    /// instead of placing / moving pixels. Toggled by a button
+    /// in the top toolbar. SwiftUI's DragGesture has no built-
+    /// in two-finger detection that works reliably alongside
+    /// the single-tap drag, so a mode toggle is the simplest
+    /// reliable UX.
+    @State private var panMode: Bool = false
+
+    @Environment(\.dismiss) private var dismiss
+
+    init(payload: CustomModelPayload,
+         commit: @escaping (Int, Int, Int, [[[Int]]]) -> Void) {
+        self.payload = payload
+        self.commit = commit
+        self._w = State(initialValue: max(1, payload.initialWidth))
+        self._h = State(initialValue: max(1, payload.initialHeight))
+        self._d = State(initialValue: max(1, payload.initialDepth))
+        self._grid = State(initialValue: payload.initialLocations.isEmpty
+            ? Self.emptyGrid(w: payload.initialWidth,
+                              h: payload.initialHeight,
+                              d: payload.initialDepth)
+            : payload.initialLocations)
+        // Image loading happens on .task in the body — keeps
+        // init synchronous and off the main-thread file-system
+        // path.
+    }
+
+    private struct GridPos: Equatable {
+        var row: Int
+        var col: Int
+    }
+
+    /// J-23.1 — in-flight drag state. `originValue > 0` means the
+    /// user started the drag on an occupied cell, so the gesture
+    /// is a move rather than a tap. `hoverCell` is the cell
+    /// currently under the touch — used for the orange drop-
+    /// target outline while dragging.
+    @State private var dragOrigin: GridPos? = nil
+    @State private var dragOriginValue: Int = 0
+    @State private var dragHoverCell: GridPos? = nil
+    /// J-23.5 — Initial touch location (in canvas coords) so the
+    /// gesture's .onEnded handler can hit-test line segments on
+    /// taps that didn't end up moving any pixels.
+    @State private var initialTouch: CGPoint = .zero
+    /// J-23.8 — Apple Pencil hover. iPadOS 16.1+ delivers
+    /// hover events to `.onContinuousHover`. Tracks the cell
+    /// currently under the pencil tip so the canvas can paint
+    /// a highlight ring.
+    @State private var hoverCell: GridPos? = nil
+
+    /// J-23.5 — Show lines connecting consecutive pixels.
+    /// Tapping a line segment opens a sheet to add N evenly-
+    /// distributed pixels along it. Captured at sheet-open so
+    /// the segment's endpoints survive subsequent edits.
+    @State private var showLines: Bool = true
+    @State private var distributePayload: DistributePayload? = nil
+    /// Plain-Int fields (instead of `GridPos`) so the payload
+    /// can carry a publicly-visible cell ref to the sheet
+    /// without exposing the editor's private nested type.
+    struct DistributePayload: Identifiable {
+        let id = UUID()
+        let fromNumber: Int
+        let toNumber: Int
+        let fromRow: Int
+        let fromCol: Int
+        let toRow: Int
+        let toCol: Int
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                gridSettingsBar
+                Divider()
+                if d > 1 {
+                    layerSlider
+                    Divider()
+                }
+                gridCanvas
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(uiColor: .systemBackground))
+                Divider()
+                selectionBar
+            }
+            .navigationTitle("Custom Model — \(payload.modelName)")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        commit(w, h, d, grid)
+                        dismiss()
+                    }
+                }
+            }
+            .alert("Renumber Pixel",
+                   isPresented: $renumberSheetVisible) {
+                TextField("New number", text: $renumberDraft)
+                    .keyboardType(.numberPad)
+                Button("Cancel", role: .cancel) {}
+                Button("Apply") {
+                    applyRenumber()
+                }
+            } message: {
+                Text("Enter the new pixel number. If another cell already uses it, that cell will be swapped to the previous number.")
+            }
+            .sheet(item: $distributePayload) { payload in
+                DistributePointsSheet(payload: payload,
+                                       commit: { count in
+                                           distributePixels(payload, count: count)
+                                       })
+            }
+        }
+    }
+
+    // MARK: - Top: grid size
+
+    private var gridSettingsBar: some View {
+        HStack(spacing: 16) {
+            HStack(spacing: 4) {
+                Text("W").foregroundStyle(.secondary).font(.caption2)
+                LayoutEditorIntSpin(
+                    id: "cm.w",
+                    initial: w,
+                    range: 1...500,
+                    commit: { newW in
+                        guard newW != w else { return }
+                        grid = Self.resized(grid, fromW: w, fromH: h,
+                                              toW: newW, toH: h)
+                        w = newW
+                        selection = nil
+                        panOffset = .zero
+                        panCommitted = .zero
+                    })
+                .frame(maxWidth: 160)
+            }
+            HStack(spacing: 4) {
+                Text("H").foregroundStyle(.secondary).font(.caption2)
+                LayoutEditorIntSpin(
+                    id: "cm.h",
+                    initial: h,
+                    range: 1...500,
+                    commit: { newH in
+                        guard newH != h else { return }
+                        grid = Self.resized(grid, fromW: w, fromH: h,
+                                              toW: w, toH: newH)
+                        h = newH
+                        selection = nil
+                        panOffset = .zero
+                        panCommitted = .zero
+                    })
+                .frame(maxWidth: 160)
+            }
+            HStack(spacing: 4) {
+                Text("D").foregroundStyle(.secondary).font(.caption2)
+                LayoutEditorIntSpin(
+                    id: "cm.d",
+                    initial: d,
+                    range: 1...50,
+                    commit: { newD in
+                        guard newD != d else { return }
+                        grid = Self.resizedDepth(grid, fromW: w, fromH: h,
+                                                   fromD: d, toD: newD)
+                        d = newD
+                        if layer >= newD { layer = newD - 1 }
+                    })
+                .frame(maxWidth: 140)
+            }
+            Spacer()
+            // J-23.4 — zoom slider (0.5x..5.0x). Pinch on the
+            // canvas updates the same `zoom` state so the two
+            // controls are kept in sync.
+            HStack(spacing: 4) {
+                Image(systemName: "minus.magnifyingglass")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Slider(value: $zoom, in: 0.5...5.0) { editing in
+                    if !editing { zoomCommitted = zoom }
+                }
+                .frame(width: 140)
+                Image(systemName: "plus.magnifyingglass")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Button {
+                    zoom = 1.0
+                    zoomCommitted = 1.0
+                    panOffset = .zero
+                    panCommitted = .zero
+                } label: {
+                    Text("1×").font(.caption2.monospacedDigit())
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+            }
+            // J-23.5 — Pan-mode toggle. When on, single-finger
+            // drag scrolls the canvas; turns off automatically
+            // when the user resets zoom to 1×.
+            Button {
+                panMode.toggle()
+            } label: {
+                Image(systemName: panMode ? "hand.draw.fill"
+                                          : "hand.draw")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(panMode ? .accentColor : .secondary)
+            .help(panMode ? "Pan mode on — single-finger drag scrolls"
+                          : "Pan mode off — single-finger drag places pixels")
+            Text("\(pointCount()) pts")
+                .foregroundStyle(.secondary)
+                .font(.caption.monospacedDigit())
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    @ViewBuilder
+    private var layerSlider: some View {
+        HStack(spacing: 8) {
+            Text("Layer").foregroundStyle(.secondary).font(.caption2)
+            LayoutEditorIntSpin(
+                id: "cm.layer",
+                initial: layer + 1,
+                range: 1...d,
+                commit: { newL in
+                    layer = max(0, min(d - 1, newL - 1))
+                    selection = nil
+                })
+            .frame(maxWidth: 130)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    // MARK: - Canvas
+
+    private var gridCanvas: some View {
+        GeometryReader { geo in
+            // J-23.5 — also stash geo.size in @State so the
+            // gesture closures (which may outlive the body
+            // eval) can compute fresh hit-test coords.
+            let _ = capture(geoSize: geo.size)
+            // Cell sizing — square cells; canvas centres in
+            // available rect. `zoom` scales the cellSide;
+            // `panOffset` offsets the centred origin so zoomed
+            // canvases can be scrolled.
+            let baseCellSide = min(geo.size.width / CGFloat(w),
+                                     geo.size.height / CGFloat(h))
+            let cellSide = baseCellSide * zoom
+            let canvasW = cellSide * CGFloat(w)
+            let canvasH = cellSide * CGFloat(h)
+            let xOff = (geo.size.width  - canvasW) / 2 + panOffset.width
+            let yOff = (geo.size.height - canvasH) / 2 + panOffset.height
+            ZStack(alignment: .topLeading) {
+                // Grid lines + cells.
+                Canvas { ctx, _ in
+                    // Background fill
+                    let bgRect = CGRect(x: xOff, y: yOff,
+                                         width: canvasW, height: canvasH)
+                    ctx.fill(Path(bgRect),
+                              with: .color(Color(uiColor: .secondarySystemBackground)))
+                    // J-23.2 — background image. Drawn first so
+                    // gridlines + points sit on top. Scale +
+                    // brightness mirror desktop: scale% sizes the
+                    // image relative to the model bounds (100 =
+                    // fit), brightness% modulates alpha.
+                    if let img = backgroundImage,
+                       let cg = img.cgImage {
+                        let scale = CGFloat(payload.initialBkgScale) / 100.0
+                        let bri   = max(0.0, min(1.0,
+                                          CGFloat(payload.initialBkgBrightness) / 100.0))
+                        let iw = canvasW * scale
+                        let ih = canvasH * scale
+                        let ix = xOff + (canvasW - iw) / 2
+                        let iy = yOff + (canvasH - ih) / 2
+                        let dest = CGRect(x: ix, y: iy, width: iw, height: ih)
+                        let imageRect = CGRect(origin: .zero,
+                                                 size: CGSize(width: cg.width,
+                                                              height: cg.height))
+                        ctx.opacity = bri
+                        ctx.draw(Image(cg, scale: 1.0, label: Text("bg")),
+                                  in: dest)
+                        ctx.opacity = 1.0
+                        _ = imageRect  // silence "unused" warning
+                    }
+                    // Grid lines.
+                    var path = Path()
+                    for c in 0...w {
+                        let x = xOff + CGFloat(c) * cellSide
+                        path.move(to: CGPoint(x: x, y: yOff))
+                        path.addLine(to: CGPoint(x: x, y: yOff + canvasH))
+                    }
+                    for r in 0...h {
+                        let y = yOff + CGFloat(r) * cellSide
+                        path.move(to: CGPoint(x: xOff, y: y))
+                        path.addLine(to: CGPoint(x: xOff + canvasW, y: y))
+                    }
+                    ctx.stroke(path, with: .color(.gray.opacity(0.3)), lineWidth: 0.5)
+
+                    // J-23.5 — Lines between consecutive pixels.
+                    // Drawn before the cell dots so the dots sit
+                    // on top of the lines. Sorted by pixel number
+                    // — gaps in numbering still produce a single
+                    // segment between the two nearest defined
+                    // pixels.
+                    let segments = self.lineSegments(cellSide: cellSide,
+                                                       xOff: xOff, yOff: yOff)
+                    if showLines && segments.count > 0 {
+                        var linePath = Path()
+                        for s in segments {
+                            linePath.move(to: s.from)
+                            linePath.addLine(to: s.to)
+                        }
+                        ctx.stroke(linePath,
+                                    with: .color(.accentColor.opacity(0.45)),
+                                    style: StrokeStyle(lineWidth: 1.5,
+                                                        lineCap: .round))
+                    }
+
+                    // Points: numbered circles on filled cells.
+                    let layerGrid = grid[safe: layer] ?? []
+                    for r in 0..<h {
+                        let rowArr = layerGrid[safe: r] ?? []
+                        for c in 0..<w {
+                            let v = rowArr[safe: c] ?? 0
+                            if v > 0 {
+                                let cellRect = CGRect(
+                                    x: xOff + CGFloat(c) * cellSide,
+                                    y: yOff + CGFloat(r) * cellSide,
+                                    width: cellSide,
+                                    height: cellSide)
+                                let dotRect = cellRect.insetBy(
+                                    dx: cellSide * 0.15,
+                                    dy: cellSide * 0.15)
+                                ctx.fill(Path(ellipseIn: dotRect),
+                                          with: .color(.accentColor))
+                                let txt = Text("\(v)")
+                                    .font(.system(size: max(8, cellSide * 0.4),
+                                                  weight: .semibold))
+                                    .foregroundStyle(.white)
+                                ctx.draw(txt, at: CGPoint(x: cellRect.midX,
+                                                           y: cellRect.midY))
+                            }
+                        }
+                    }
+
+                    // Selection highlight.
+                    if let sel = selection {
+                        let cellRect = CGRect(
+                            x: xOff + CGFloat(sel.col) * cellSide,
+                            y: yOff + CGFloat(sel.row) * cellSide,
+                            width: cellSide,
+                            height: cellSide)
+                        ctx.stroke(Path(cellRect),
+                                    with: .color(.orange),
+                                    lineWidth: 2.0)
+                    }
+                    // J-23.8 — Pencil hover ring. Subtle cyan so
+                    // it doesn't fight the orange selection
+                    // outline if the user hovers the selected
+                    // cell.
+                    if let hov = hoverCell, hov != selection {
+                        let cellRect = CGRect(
+                            x: xOff + CGFloat(hov.col) * cellSide,
+                            y: yOff + CGFloat(hov.row) * cellSide,
+                            width: cellSide,
+                            height: cellSide)
+                        let inset = cellRect.insetBy(dx: 1, dy: 1)
+                        ctx.stroke(Path(inset),
+                                    with: .color(.cyan.opacity(0.75)),
+                                    lineWidth: 1.5)
+                    }
+                    // Drag drop-target preview.
+                    if dragOriginValue > 0, let hover = dragHoverCell,
+                       hover != dragOrigin {
+                        let cellRect = CGRect(
+                            x: xOff + CGFloat(hover.col) * cellSide,
+                            y: yOff + CGFloat(hover.row) * cellSide,
+                            width: cellSide,
+                            height: cellSide)
+                        let dotRect = cellRect.insetBy(
+                            dx: cellSide * 0.15,
+                            dy: cellSide * 0.15)
+                        ctx.stroke(Path(ellipseIn: dotRect),
+                                    with: .color(.accentColor.opacity(0.7)),
+                                    style: StrokeStyle(lineWidth: 2,
+                                                        dash: [4, 3]))
+                        let txt = Text("\(dragOriginValue)")
+                            .font(.system(size: max(8, cellSide * 0.4),
+                                          weight: .semibold))
+                            .foregroundStyle(Color.accentColor.opacity(0.7))
+                        ctx.draw(txt, at: CGPoint(x: cellRect.midX,
+                                                   y: cellRect.midY))
+                    }
+                }
+                .gesture(canvasGesture(geoSize: geo.size))
+                .simultaneousGesture(magnificationGesture)
+                // J-23.8 — Apple Pencil hover. With pencil hover
+                // turned on at the iPadOS level (Settings →
+                // Apple Pencil → Hover), this fires as the user
+                // floats the tip over the canvas — used to
+                // highlight whichever cell would be acted on.
+                .onContinuousHover(coordinateSpace: .local) { phase in
+                    switch phase {
+                    case .active(let location):
+                        let m = currentMetrics(geoSize: geo.size)
+                        let r = Int(((location.y - m.yOff) / m.cellSide).rounded(.down))
+                        let c = Int(((location.x - m.xOff) / m.cellSide).rounded(.down))
+                        if r >= 0, r < h, c >= 0, c < w {
+                            hoverCell = GridPos(row: r, col: c)
+                        } else {
+                            hoverCell = nil
+                        }
+                    case .ended:
+                        hoverCell = nil
+                    }
+                }
+            }
+            .clipped()
+            .task(id: payload.initialBackground) {
+                await loadBackgroundImage()
+            }
+        }
+    }
+
+    private func capture(geoSize: CGSize) -> Int {
+        if canvasGeoSize != geoSize {
+            DispatchQueue.main.async {
+                if canvasGeoSize != geoSize {
+                    canvasGeoSize = geoSize
+                }
+            }
+        }
+        return 0
+    }
+
+    /// J-23.5/.6 — Compute current cellSide / xOff / yOff. The
+    /// gesture-time path passes `geoSize` from the GeometryReader
+    /// so it doesn't depend on the async-updated canvasGeoSize
+    /// @State; the no-arg variant falls back to that @State for
+    /// cases where the gesture didn't capture the size (none
+    /// today — kept for symmetry).
+    private func currentMetrics(geoSize: CGSize? = nil)
+            -> (cellSide: CGFloat, xOff: CGFloat, yOff: CGFloat) {
+        let size = geoSize ?? canvasGeoSize
+        guard size.width > 0, size.height > 0,
+              w > 0, h > 0 else { return (1, 0, 0) }
+        let baseCellSide = min(size.width  / CGFloat(w),
+                                size.height / CGFloat(h))
+        let cellSide = baseCellSide * zoom
+        let canvasW = cellSide * CGFloat(w)
+        let canvasH = cellSide * CGFloat(h)
+        let xOff = (size.width  - canvasW) / 2 + panOffset.width
+        let yOff = (size.height - canvasH) / 2 + panOffset.height
+        return (cellSide, xOff, yOff)
+    }
+
+    /// J-23.4 — Pinch-to-zoom. Multiplies the committed zoom by
+    /// the gesture's relative magnitude so the live value tracks
+    /// the user's fingers smoothly; on .ended we snap the
+    /// committed value to the live value and clamp to the
+    /// slider's range.
+    private var magnificationGesture: some Gesture {
+        MagnificationGesture()
+            .onChanged { value in
+                multiTouchActive = true
+                let z = zoomCommitted * value
+                zoom = max(0.5, min(5.0, z))
+            }
+            .onEnded { _ in
+                zoomCommitted = zoom
+                // Multi-touch flag clears on the next single-
+                // finger touch — leave it true here so the
+                // trailing finger-up doesn't fire a stray tap.
+                DispatchQueue.main.async { multiTouchActive = false }
+            }
+    }
+
+
+    /// J-23.2 — Async background image load. Loads off the main
+    /// thread so a giant texture doesn't stall the canvas.
+    /// `task(id:)` re-fires if the path changes (won't happen in
+    /// this MVP — bg is captured at sheet-open — but future
+    /// "change image inside the editor" lands here).
+    @MainActor
+    private func loadBackgroundImage() async {
+        let path = payload.initialBackground
+        if path.isEmpty {
+            backgroundImage = nil
+            return
+        }
+        let img = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+            return UIImage(contentsOfFile: path)
+        }.value
+        backgroundImage = img
+    }
+
+    /// J-23.1 — Tap + drag in one gesture. The DragGesture fires
+    /// .onChanged on every touch event including the initial
+    /// touch-down (because `minimumDistance: 0`). We record the
+    /// cell under the first .onChanged and remember its value;
+    /// subsequent .onChanged events update `dragHoverCell` so
+    /// the canvas can render the drop-target preview. .onEnded
+    /// is where the actual mutation happens — drag-to-move if
+    /// origin/end differ and origin was occupied, otherwise a
+    /// regular tap (handleTap takes over).
+    private func canvasGesture(geoSize: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                // J-23.4/.5/.6 — when a pinch is active the
+                // single-finger handler must not touch pixels;
+                // pinch fingers register here first and would
+                // otherwise look like a tap on an arbitrary
+                // cell. cellSide/xOff/yOff are recomputed each
+                // event from the geoSize captured at body-eval
+                // time + live @State so a mid-flight zoom can't
+                // desync the math.
+                if multiTouchActive {
+                    dragOrigin = nil
+                    dragHoverCell = nil
+                    return
+                }
+                // J-23.5 — Pan mode: single-finger drag scrolls
+                // the canvas instead of editing pixels. The
+                // committed pan offset is restored each gesture
+                // start so the user can swipe-pan repeatedly.
+                if panMode {
+                    panOffset = CGSize(
+                        width:  panCommitted.width  + value.translation.width,
+                        height: panCommitted.height + value.translation.height)
+                    return
+                }
+                let m = currentMetrics(geoSize: geoSize)
+                let p = value.location
+                let r = Int(((p.y - m.yOff) / m.cellSide).rounded(.down))
+                let c = Int(((p.x - m.xOff) / m.cellSide).rounded(.down))
+                guard r >= 0, r < h, c >= 0, c < w else {
+                    dragHoverCell = nil
+                    return
+                }
+                let cell = GridPos(row: r, col: c)
+                if dragOrigin == nil {
+                    // J-23.8 — Fat-finger snap. The drawn dot only
+                    // covers the middle 70% of the cell, so a
+                    // finger touch near the edge lands in an
+                    // adjacent empty cell and the user gets a new
+                    // pixel placed instead of selecting the
+                    // existing one. If the touched cell is empty
+                    // but there's a pixel within `slop` screen
+                    // distance of the touch point, snap to that
+                    // pixel. Pencil taps hit precisely and skip
+                    // the snap (the empty cell stays empty).
+                    let touchedVal = grid[safe: layer]?[safe: r]?[safe: c] ?? 0
+                    if touchedVal == 0 {
+                        let slop = max(m.cellSide * 0.85, 28)
+                        if let snapped = nearestPixelCell(to: p,
+                                                            cellSide: m.cellSide,
+                                                            xOff: m.xOff,
+                                                            yOff: m.yOff,
+                                                            slop: slop) {
+                            dragOrigin = snapped
+                            dragOriginValue = grid[layer][snapped.row][snapped.col]
+                        } else {
+                            dragOrigin = cell
+                            dragOriginValue = 0
+                        }
+                    } else {
+                        dragOrigin = cell
+                        dragOriginValue = touchedVal
+                    }
+                    initialTouch = p
+                }
+                dragHoverCell = cell
+            }
+            .onEnded { value in
+                defer {
+                    dragOrigin = nil
+                    dragOriginValue = 0
+                    dragHoverCell = nil
+                }
+                if multiTouchActive { return }
+                if panMode {
+                    panCommitted = panOffset
+                    return
+                }
+                guard let origin = dragOrigin else { return }
+                // J-23.7 — Removed the tap-on-line distribute
+                // detection. Taps on the line through an empty
+                // cell were ambiguous with "place new pixel
+                // here" and the math kept dropping legitimate
+                // line hits. Replaced with an explicit
+                // "Distribute to #N" button in the selection
+                // bar — tap a pixel, then the button to
+                // distribute along the segment going to the
+                // next-numbered pixel.
+                let endCell = dragHoverCell ?? origin
+                // J-23.8 — Drag-to-move now gates on physical
+                // movement distance, not just cell-difference.
+                // The snap-to-nearest-pixel for fat fingers
+                // moves dragOrigin into a different cell from
+                // the touched cell, so the old "endCell !=
+                // origin" check would fire on every tap-near-
+                // pixel. 16 pt threshold ≈ a deliberate drag;
+                // small finger jitter on a tap stays under.
+                let movement = hypot(value.location.x - initialTouch.x,
+                                      value.location.y - initialTouch.y)
+                let isDrag = movement > 16
+                if dragOriginValue > 0,
+                   isDrag,
+                   endCell != origin,
+                   endCell.row >= 0, endCell.row < h,
+                   endCell.col >= 0, endCell.col < w {
+                    let endVal = grid[layer][endCell.row][endCell.col]
+                    if endVal <= 0 {
+                        // Move into an empty cell. xLights's
+                        // CustomModel uses -1 for blank in loaded
+                        // models and 0 for blank in new grids, so
+                        // treat anything <= 0 as empty.
+                        grid[layer][origin.row][origin.col] = 0
+                        grid[layer][endCell.row][endCell.col] = dragOriginValue
+                    } else {
+                        // Swap with another pixel (same semantics
+                        // as the Renumber alert's swap).
+                        grid[layer][origin.row][origin.col] = endVal
+                        grid[layer][endCell.row][endCell.col] = dragOriginValue
+                    }
+                    selection = endCell
+                    return
+                }
+                // No drag → tap. origin may already be snapped
+                // (J-23.8) so handleTap on it lands on the
+                // right pixel cell.
+                handleTap(row: origin.row, col: origin.col)
+            }
+    }
+
+    // MARK: - Bottom: selection actions
+
+    @ViewBuilder
+    private var selectionBar: some View {
+        let selectedValue = selectedValue
+        HStack(spacing: 10) {
+            if let sel = selection, selectedValue > 0 {
+                Text("Pixel #\(selectedValue) @ (\(sel.col + 1), \(sel.row + 1))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                // J-23.7 — Distribute along the segment to the
+                // next-numbered pixel. Replaces the unreliable
+                // tap-on-line detection with an explicit
+                // button: tap a pixel, tap this, sheet opens
+                // with the segment (selected → next) preselected.
+                if let next = nextPixelSegmentFromSelection() {
+                    Button {
+                        distributePayload = DistributePayload(
+                            fromNumber: next.fromNum,
+                            toNumber: next.toNum,
+                            fromRow: next.fromCell.row,
+                            fromCol: next.fromCell.col,
+                            toRow: next.toCell.row,
+                            toCol: next.toCell.col)
+                    } label: {
+                        Label("Distribute → #\(next.toNum)",
+                              systemImage: "arrow.left.and.right")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                Button {
+                    renumberSelected()
+                } label: {
+                    Label("Renumber", systemImage: "number")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Button(role: .destructive) {
+                    deleteSelected()
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            } else if let _ = selection {
+                Text("Empty cell — tap to place next pixel")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            } else {
+                Text("Tap a cell to place a pixel.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(role: .destructive) {
+                    grid = Self.emptyGrid(w: w, h: h, d: d)
+                    selection = nil
+                } label: {
+                    Label("Clear All", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    /// J-23.7 — Find the segment going from the currently-
+    /// selected pixel to the next-higher-numbered pixel. Used
+    /// to power the "Distribute → #N" button. Returns nil
+    /// when there's no selection or the selected pixel is the
+    /// highest-numbered one.
+    private func nextPixelSegmentFromSelection() ->
+            (fromNum: Int, toNum: Int,
+             fromCell: GridPos, toCell: GridPos)? {
+        guard let sel = selection else { return nil }
+        let curVal = selectedValue
+        guard curVal > 0 else { return nil }
+        // Walk every layer / row / col to find the next-higher
+        // pixel by value. Could memoise but the cost is one
+        // O(w·h·d) scan per body re-eval, which is fine for
+        // realistic grids.
+        var next: (num: Int, cell: GridPos)? = nil
+        for li in 0..<grid.count {
+            for r in 0..<grid[li].count {
+                for c in 0..<grid[li][r].count {
+                    let v = grid[li][r][c]
+                    if v <= curVal { continue }
+                    if next == nil || v < next!.num {
+                        next = (v, GridPos(row: r, col: c))
+                    }
+                }
+            }
+        }
+        guard let n = next else { return nil }
+        return (curVal, n.num, sel, n.cell)
+    }
+
+    private var selectedValue: Int {
+        guard let sel = selection,
+              let row = grid[safe: layer]?[safe: sel.row],
+              let v = row[safe: sel.col] else { return 0 }
+        return v
+    }
+
+    // MARK: - Actions
+
+    /// Tap on a cell. Empty cell → place next free pixel.
+    /// Occupied cell → select. (Drag handles "move" now —
+    /// J-23.1.)
+    private func handleTap(row: Int, col: Int) {
+        let v = grid[safe: layer]?[safe: row]?[safe: col] ?? 0
+        if v > 0 {
+            selection = GridPos(row: row, col: col)
+        } else {
+            let next = nextFreeNumber()
+            grid[layer][row][col] = next
+            selection = GridPos(row: row, col: col)
+        }
+    }
+
+    /// J-23 — apply the renumber draft. Swap semantics: if the
+    /// target number already exists, that pixel takes the
+    /// selected pixel's old number. Otherwise just renumber in
+    /// place.
+    private func applyRenumber() {
+        guard let sel = selection else { return }
+        let old = grid[layer][sel.row][sel.col]
+        guard let newN = Int(renumberDraft.trimmingCharacters(in: .whitespaces)),
+              newN > 0, newN != old else { return }
+        // Look for an existing cell with the target number.
+        for li in 0..<grid.count {
+            for r in 0..<grid[li].count {
+                for c in 0..<grid[li][r].count {
+                    if grid[li][r][c] == newN {
+                        grid[li][r][c] = old
+                    }
+                }
+            }
+        }
+        grid[layer][sel.row][sel.col] = newN
+    }
+
+    /// J-23.8 — Snap-to-nearest-pixel for fat-finger taps. Walks
+    /// the active layer and returns the cell of the pixel whose
+    /// centre is closest to `tap` (in canvas screen coords), so
+    /// long as that distance is within `slop`. nil otherwise.
+    private func nearestPixelCell(to tap: CGPoint,
+                                    cellSide: CGFloat,
+                                    xOff: CGFloat,
+                                    yOff: CGFloat,
+                                    slop: CGFloat) -> GridPos? {
+        var best: (dist: CGFloat, cell: GridPos)? = nil
+        let layerGrid = grid[safe: layer] ?? []
+        let slop2 = slop * slop
+        for r in 0..<h {
+            let rowArr = layerGrid[safe: r] ?? []
+            for c in 0..<w {
+                if (rowArr[safe: c] ?? 0) <= 0 { continue }
+                let cx = xOff + (CGFloat(c) + 0.5) * cellSide
+                let cy = yOff + (CGFloat(r) + 0.5) * cellSide
+                let dx = tap.x - cx, dy = tap.y - cy
+                let d2 = dx * dx + dy * dy
+                if d2 > slop2 { continue }
+                if best == nil || d2 < (best!.dist * best!.dist) {
+                    best = (d2.squareRoot(), GridPos(row: r, col: c))
+                }
+            }
+        }
+        return best?.cell
+    }
+
+    // J-23.5 — Line-segment + distribute helpers.
+
+    /// Build pixel-to-pixel segments for the current layer,
+    /// sorted by pixel number. Includes screen-space endpoints
+    /// so the canvas can draw + the gesture handler can hit-
+    /// test the same data.
+    private func lineSegments(cellSide: CGFloat,
+                                xOff: CGFloat,
+                                yOff: CGFloat) ->
+            [(fromNum: Int, toNum: Int,
+              fromCell: GridPos, toCell: GridPos,
+              from: CGPoint, to: CGPoint)] {
+        var dots: [(num: Int, cell: GridPos, center: CGPoint)] = []
+        let layerGrid = grid[safe: layer] ?? []
+        for r in 0..<h {
+            let rowArr = layerGrid[safe: r] ?? []
+            for c in 0..<w {
+                let v = rowArr[safe: c] ?? 0
+                if v > 0 {
+                    let cx = xOff + (CGFloat(c) + 0.5) * cellSide
+                    let cy = yOff + (CGFloat(r) + 0.5) * cellSide
+                    dots.append((v, GridPos(row: r, col: c),
+                                  CGPoint(x: cx, y: cy)))
+                }
+            }
+        }
+        dots.sort { $0.num < $1.num }
+        var out: [(Int, Int, GridPos, GridPos, CGPoint, CGPoint)] = []
+        for i in 0..<(dots.count - (dots.isEmpty ? 0 : 1)) {
+            let a = dots[i], b = dots[i + 1]
+            out.append((a.num, b.num, a.cell, b.cell, a.center, b.center))
+        }
+        return out
+    }
+
+    /// Find the closest line segment to a tap point. Returns
+    /// nil when no segment is within the supplied threshold.
+    /// Caller supplies the threshold so dense grids (tiny
+    /// cellSide) can override the cellSide-derived default.
+    private func nearestSegment(to p: CGPoint,
+                                  cellSide: CGFloat,
+                                  xOff: CGFloat,
+                                  yOff: CGFloat,
+                                  threshold: CGFloat) -> (fromNum: Int, toNum: Int,
+                                                            fromCell: GridPos,
+                                                            toCell: GridPos)? {
+        let segs = lineSegments(cellSide: cellSide, xOff: xOff, yOff: yOff)
+        var best: (dist: CGFloat,
+                   fromNum: Int, toNum: Int,
+                   fromCell: GridPos, toCell: GridPos)? = nil
+        for s in segs {
+            let d = pointToSegmentDistance(p, a: s.from, b: s.to)
+            if d > threshold { continue }
+            if best == nil || d < best!.dist {
+                best = (d, s.fromNum, s.toNum, s.fromCell, s.toCell)
+            }
+        }
+        if let b = best {
+            return (b.fromNum, b.toNum, b.fromCell, b.toCell)
+        }
+        return nil
+    }
+
+    /// Standard point-to-segment distance. Returns the distance
+    /// from `p` to the segment `a`-`b` (closest point clamped
+    /// to within the segment endpoints).
+    private func pointToSegmentDistance(_ p: CGPoint,
+                                          a: CGPoint, b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let len2 = dx * dx + dy * dy
+        if len2 < 0.0001 {
+            let ex = p.x - a.x, ey = p.y - a.y
+            return (ex * ex + ey * ey).squareRoot()
+        }
+        var t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2
+        if t < 0 { t = 0 } else if t > 1 { t = 1 }
+        let cx = a.x + t * dx
+        let cy = a.y + t * dy
+        let ex = p.x - cx, ey = p.y - cy
+        return (ex * ex + ey * ey).squareRoot()
+    }
+
+    /// J-23.5/.8 — Insert N evenly-distributed pixels along the
+    /// segment from pixel `payload.fromNumber` to
+    /// `payload.toNumber`. The new pixels take numbers
+    /// (fromNumber+1)...(fromNumber+placed); any existing pixel
+    /// numbered > fromNumber shifts up to keep the numbering
+    /// contiguous.
+    ///
+    /// Cell picking uses Bresenham's line algorithm — this
+    /// avoids the lerp-and-round failure where two adjacent
+    /// endpoints (from=(5,3), to=(5,4)) round most fractions to
+    /// either endpoint and leave no room for intermediate
+    /// pixels.
+    private func distributePixels(_ payload: DistributePayload, count: Int) {
+        guard count > 0 else { return }
+        let fromCell = GridPos(row: payload.fromRow, col: payload.fromCol)
+        let toCell   = GridPos(row: payload.toRow,   col: payload.toCol)
+        let fromNum  = payload.fromNumber
+
+        // Walk the cells along the line; strip the two
+        // endpoints (which already hold pixels).
+        let line = cellsAlongLine(from: fromCell, to: toCell)
+        let intermediate: [GridPos] = line.count > 2
+            ? Array(line.dropFirst().dropLast())
+            : []
+        if intermediate.isEmpty { return }
+
+        // Pick `count` evenly-spaced cells from the intermediate
+        // list. Each i in 0..<n samples at fraction
+        // ((i + 0.5) / n) of the intermediate strip.
+        let n = min(count, intermediate.count)
+        var picked: [GridPos] = []
+        for i in 0..<n {
+            let frac = (Double(i) + 0.5) / Double(n)
+            var idx = Int((frac * Double(intermediate.count)).rounded(.down))
+            if idx < 0 { idx = 0 }
+            if idx >= intermediate.count { idx = intermediate.count - 1 }
+            picked.append(intermediate[idx])
+        }
+        if picked.isEmpty { return }
+
+        // Shift existing pixel numbers > fromNum up by `picked
+        // .count` so we have a contiguous (fromNum+1) ...
+        // (fromNum+n) range to assign.
+        let shift = picked.count
+        for li in 0..<grid.count {
+            for r in 0..<grid[li].count {
+                for c in 0..<grid[li][r].count {
+                    if grid[li][r][c] > fromNum {
+                        grid[li][r][c] += shift
+                    }
+                }
+            }
+        }
+
+        // Place the new pixels. xLights's CustomModel uses -1 for
+        // a blank cell in loaded models and 0 for blank in new
+        // grids; treat anything <= 0 as empty so we don't refuse
+        // to fill cells that the canvas already shows as blank.
+        for (i, p) in picked.enumerated() {
+            guard p.row >= 0, p.row < h, p.col >= 0, p.col < w else { continue }
+            if grid[layer][p.row][p.col] <= 0 {
+                grid[layer][p.row][p.col] = fromNum + i + 1
+            }
+        }
+    }
+
+    /// J-23.8 — Bresenham's line-cell walk between two grid
+    /// positions. Returns every cell intersected by the line,
+    /// including both endpoints. Useful for picking
+    /// intermediate cells when distributing pixels.
+    private func cellsAlongLine(from: GridPos, to: GridPos) -> [GridPos] {
+        var out: [GridPos] = []
+        var x = from.col, y = from.row
+        let x1 = to.col, y1 = to.row
+        let dx = abs(x1 - x)
+        let dy = -abs(y1 - y)
+        let sx = x  < x1 ? 1 : -1
+        let sy = y  < y1 ? 1 : -1
+        var err = dx + dy
+        while true {
+            out.append(GridPos(row: y, col: x))
+            if x == x1 && y == y1 { break }
+            let e2 = 2 * err
+            if e2 >= dy {
+                err += dy
+                x   += sx
+            }
+            if e2 <= dx {
+                err += dx
+                y   += sy
+            }
+        }
+        return out
+    }
+
+    private func nextFreeNumber() -> Int {
+        var seen = Set<Int>()
+        for layerArr in grid {
+            for rowArr in layerArr {
+                for v in rowArr where v > 0 {
+                    seen.insert(v)
+                }
+            }
+        }
+        var n = 1
+        while seen.contains(n) { n += 1 }
+        return n
+    }
+
+    private func deleteSelected() {
+        guard let sel = selection else { return }
+        grid[layer][sel.row][sel.col] = 0
+        selection = nil
+    }
+
+    /// Renumber the selected pixel — show an alert with the
+    /// current number; user types a new one. If the target
+    /// number already exists elsewhere, shift the existing
+    /// pixel out of the way by giving it the old number
+    /// (swap semantics).
+    @State private var renumberSheetVisible: Bool = false
+    @State private var renumberDraft: String = ""
+    private func renumberSelected() {
+        renumberDraft = "\(selectedValue)"
+        renumberSheetVisible = true
+    }
+
+    // MARK: - Helpers
+
+    private func pointCount() -> Int {
+        var n = 0
+        for layerArr in grid {
+            for rowArr in layerArr {
+                for v in rowArr where v > 0 { n += 1 }
+            }
+        }
+        return n
+    }
+
+    static func emptyGrid(w: Int, h: Int, d: Int) -> [[[Int]]] {
+        let safeW = max(1, w), safeH = max(1, h), safeD = max(1, d)
+        return Array(repeating:
+            Array(repeating:
+                Array(repeating: 0, count: safeW),
+            count: safeH),
+        count: safeD)
+    }
+
+    /// Resize the grid in W/H dimensions. Existing cells outside
+    /// the new bounds are dropped; new cells are zero.
+    static func resized(_ src: [[[Int]]],
+                          fromW: Int, fromH: Int,
+                          toW: Int, toH: Int) -> [[[Int]]] {
+        let depth = src.count
+        var dst = emptyGrid(w: toW, h: toH, d: depth)
+        let copyH = min(fromH, toH)
+        let copyW = min(fromW, toW)
+        for layer in 0..<depth {
+            for r in 0..<copyH where r < src[layer].count {
+                for c in 0..<copyW where c < src[layer][r].count {
+                    dst[layer][r][c] = src[layer][r][c]
+                }
+            }
+        }
+        return dst
+    }
+
+    /// Resize the depth dimension. Cropping drops back layers;
+    /// new layers are empty.
+    static func resizedDepth(_ src: [[[Int]]],
+                               fromW: Int, fromH: Int,
+                               fromD: Int, toD: Int) -> [[[Int]]] {
+        if fromD == toD { return src }
+        if toD < fromD {
+            return Array(src.prefix(toD))
+        }
+        var dst = src
+        for _ in fromD..<toD {
+            dst.append(emptyGrid(w: fromW, h: fromH, d: 1)[0])
+        }
+        return dst
+    }
+}
+
+private extension Array {
+    subscript(safe i: Int) -> Element? {
+        return (i >= 0 && i < count) ? self[i] : nil
+    }
+}
+
+/// J-22 — Generic FaceState-shaped editor (`map<name, map<attr,
+/// value>>`). Faces, States, and Dimming Curve all share this
+/// shape on the C++ side, so one editor + one bridge surface
+/// covers all three. The editor uses a two-level navigation:
+/// list of entries (face / state / channel names) → tap to drill
+/// into the per-attribute editor. Top-level supports
+/// Add / Rename / Delete entries; detail supports Add / Edit /
+/// Delete attribute key-value pairs.
+private struct FaceStatePayload: Identifiable {
+    let id = UUID()
+    /// `faces`, `states`, or `dimming` — drives the title + the
+    /// initial-keys hint shown when the user adds a new entry.
+    let kind: Kind
+    let entries: [String: [String: String]]
+    let modelName: String
+    enum Kind: String {
+        case faces, states, dimming
+        var title: String {
+            switch self {
+            case .faces:   return "Faces"
+            case .states:  return "States"
+            case .dimming: return "Dimming Curve"
+            }
+        }
+        /// Suggested keys when the user creates a new entry —
+        /// matches desktop's standard phoneme set for faces and
+        /// the channel list for dimming. States are user-named
+        /// so no suggestions.
+        var suggestedAttributeKeys: [String] {
+            switch self {
+            case .faces:
+                return ["AI", "E", "FV", "L", "MBP", "O", "U", "WQ", "etc",
+                        "Eyes-Open", "Eyes-Closed"]
+            case .states:  return []
+            case .dimming: return ["gamma", "offset", "subtract", "scale", "file"]
+            }
+        }
+    }
+}
+
+private struct FaceStateEditorSheet: View {
+    let payload: FaceStatePayload
+    let commit: (_ entries: [String: [String: String]]) -> Void
+
+    @State private var entries: [String: [String: String]]
+    @State private var newEntryName: String = ""
+    @State private var editingEntry: String? = nil
+    @Environment(\.dismiss) private var dismiss
+
+    init(payload: FaceStatePayload,
+         commit: @escaping (_ entries: [String: [String: String]]) -> Void) {
+        self.payload = payload
+        self.commit = commit
+        self._entries = State(initialValue: payload.entries)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Add") {
+                    HStack {
+                        TextField("New \(payload.kind.title.lowercased()) name",
+                                  text: $newEntryName)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                            .submitLabel(.done)
+                            .onSubmit(addEntry)
+                        Button("Add", action: addEntry)
+                            .disabled(normalizedNewName.isEmpty ||
+                                      entries[normalizedNewName] != nil)
+                    }
+                }
+                Section(entries.isEmpty ? "Nothing defined"
+                                        : "\(entries.count) entr\(entries.count == 1 ? "y" : "ies")") {
+                    if entries.isEmpty {
+                        Text("Tap Add to create the first \(payload.kind.title.lowercased()) entry.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(entries.keys.sorted(), id: \.self) { name in
+                            NavigationLink(value: name) {
+                                HStack {
+                                    Text(name).font(.body.monospaced())
+                                    Spacer()
+                                    let attrCount = entries[name]?.count ?? 0
+                                    Text("\(attrCount) attr\(attrCount == 1 ? "" : "s")")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .onDelete { idx in
+                            let sorted = entries.keys.sorted()
+                            for i in idx {
+                                entries.removeValue(forKey: sorted[i])
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationDestination(for: String.self) { name in
+                FaceStateEntryDetailView(
+                    entryName: name,
+                    suggestedKeys: payload.kind.suggestedAttributeKeys,
+                    attributes: Binding(
+                        get: { entries[name] ?? [:] },
+                        set: { entries[name] = $0 }
+                    )
+                )
+            }
+            .navigationTitle("\(payload.kind.title) — \(payload.modelName)")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        commit(entries)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.large])
+    }
+
+    private var normalizedNewName: String {
+        newEntryName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func addEntry() {
+        let n = normalizedNewName
+        guard !n.isEmpty, entries[n] == nil else { return }
+        entries[n] = [:]
+        newEntryName = ""
+    }
+}
+
+/// J-22 — Detail view for one face / state / dimming entry. Lists
+/// the attribute key-value pairs and lets the user edit values,
+/// add new keys (with optional suggested-key buttons), and remove
+/// entries via swipe.
+private struct FaceStateEntryDetailView: View {
+    let entryName: String
+    let suggestedKeys: [String]
+    @Binding var attributes: [String: String]
+    @State private var newKey: String = ""
+
+    var body: some View {
+        List {
+            if !suggestedKeys.isEmpty {
+                Section("Suggested keys") {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(suggestedKeys, id: \.self) { k in
+                                Button {
+                                    if attributes[k] == nil {
+                                        attributes[k] = ""
+                                    }
+                                } label: {
+                                    Text(k)
+                                        .font(.caption)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(
+                                            Capsule().fill(
+                                                attributes[k] == nil
+                                                ? Color.accentColor.opacity(0.2)
+                                                : Color.gray.opacity(0.2)
+                                            )
+                                        )
+                                }
+                                .disabled(attributes[k] != nil)
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+            }
+            Section("Add attribute") {
+                HStack {
+                    TextField("Key", text: $newKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .submitLabel(.done)
+                        .onSubmit(addAttr)
+                    Button("Add", action: addAttr)
+                        .disabled(normalizedNewKey.isEmpty ||
+                                  attributes[normalizedNewKey] != nil)
+                }
+            }
+            Section(attributes.isEmpty ? "No attributes"
+                                       : "Attributes (\(attributes.count))") {
+                if attributes.isEmpty {
+                    Text("Tap a suggested key, or type a new key in 'Add attribute' above.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(attributes.keys.sorted(), id: \.self) { key in
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(key)
+                                .font(.caption.monospacedDigit())
+                                .frame(minWidth: 100, alignment: .leading)
+                                .foregroundStyle(.secondary)
+                            TextField("value", text: Binding(
+                                get: { attributes[key] ?? "" },
+                                set: { attributes[key] = $0 }
+                            ))
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled(true)
+                                .multilineTextAlignment(.trailing)
+                        }
+                    }
+                    .onDelete { idx in
+                        let sorted = attributes.keys.sorted()
+                        for i in idx {
+                            attributes.removeValue(forKey: sorted[i])
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle(entryName)
+    }
+
+    private var normalizedNewKey: String {
+        newKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func addAttr() {
+        let k = normalizedNewKey
+        guard !k.isEmpty, attributes[k] == nil else { return }
+        attributes[k] = ""
+        newKey = ""
+    }
+}
+
+
+/// J-23.5 — Sheet asking "how many points to add along this
+/// line?" Opens when the user taps a line segment in the
+/// custom-model editor. New pixels are inserted between the
+/// two endpoints (numbered fromNum+1 .. fromNum+N) and any
+/// existing pixel > fromNum shifts up by N to make room.
+private struct DistributePointsSheet: View {
+    let payload: CustomModelEditorSheet.DistributePayload
+    let commit: (_ count: Int) -> Void
+
+    @State private var count: Int = 1
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Segment") {
+                    LabeledContent("From pixel", value: "#\(payload.fromNumber)")
+                    LabeledContent("To pixel",   value: "#\(payload.toNumber)")
+                }
+                Section("Points to add") {
+                    LayoutEditorIntSpin(
+                        id: "distribute.count",
+                        initial: count,
+                        range: 1...500,
+                        commit: { count = $0 })
+                }
+                Section {
+                    Text("New pixels will be numbered #\(payload.fromNumber + 1) through #\(payload.fromNumber + count). Pixels above #\(payload.fromNumber) shift up by \(count) to keep numbering contiguous.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Distribute Along Line")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        commit(count)
+                        dismiss()
+                    }
+                    .disabled(count <= 0)
+                }
+            }
+        }
+        .presentationDetents([.large])
+    }
+}
+
 /// J-20.7 — Identifiable payload for the layer-sizes editor.
 /// `.sheet(item:)` recreates the sheet whenever the item changes,
 /// so the sheet's @State always initialises from the right sizes.
@@ -5702,7 +7692,10 @@ private struct LayoutEditorIntSpin: View {
                 .multilineTextAlignment(.trailing)
                 .keyboardType(.numbersAndPunctuation)
                 .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 70)
+                // J-23.7 — bumped from 70 to 95 so 4-digit
+                // values (e.g. matrix dims, channel counts) fit
+                // without being clipped.
+                .frame(maxWidth: 95)
                 .focused($focused)
                 .id(id)
                 .onAppear { draft = "\(initial)" }
@@ -6814,6 +8807,7 @@ fileprivate extension Color {
 struct LayoutEditorWindowRoot: View {
     @Environment(SequencerViewModel.self) var viewModel
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.openWindow) private var openWindow
     @State private var suppressed: Bool = false
 
     var body: some View {
@@ -6831,8 +8825,16 @@ struct LayoutEditorWindowRoot: View {
             if viewModel.pendingDetachTokens.remove("layout-editor") != nil {
                 viewModel.layoutEditorOpen = true
             } else {
+                // F-5 follow-up: when iPadOS picks an aux scene
+                // as the "connecting" session (i.e. last-quit
+                // with the layout editor open), the AppDelegate
+                // has already destroyed the main `sequencer`
+                // session. Dismissing ourselves with no main
+                // window alive leaves the app at a black screen
+                // with no controls. Open the sequencer first.
                 suppressed = true
                 DispatchQueue.main.async {
+                    openWindow(id: "sequencer")
                     dismissWindow(id: "layout-editor")
                 }
             }

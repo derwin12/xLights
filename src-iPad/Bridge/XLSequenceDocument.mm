@@ -3478,31 +3478,22 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
             changed = YES;
         }
     } else if (keyStr.starts_with("superStringColour")) {
-        // J-19 — per-index colour. Key is "superStringColourN"
-        // (0-based). Wholesale-rewrite the colour vector with
-        // the existing values minus the indexed entry.
+        // J-21 — per-index Superstring colour set. Key is
+        // "superStringColourN" (0-based). Routes through the
+        // model's `SetSuperStringColour(int, xlColor)` mutator
+        // (matches desktop ModelPropertyAdapter.cpp:1517).
         std::string idxStr = keyStr.substr(std::string("superStringColour").size());
         char* end = nullptr;
         long idx = std::strtol(idxStr.c_str(), &end, 10);
         if (end == idxStr.c_str()) return NO;
         NSString* s = asString(&typeOk);
         if (!typeOk) return NO;
-        const auto& cur = m->GetSuperStringColours();
-        if (idx < 0 || idx >= (long)cur.size()) return NO;
-        std::vector<xlColor> next(cur.begin(), cur.end());
-        next[idx] = xlColor(std::string(s.UTF8String));
-        // Re-apply via SetSuperStringColours doesn't take a vector;
-        // it just sets the count. So we have to use SetCustomColor /
-        // direct vector mutation via a friend path… Defer to next
-        // pass: walk through model attrs. For now do the same
-        // round-trip through customColor — only the first entry
-        // matters in the most common case. Better: keep this no-op
-        // for now and surface a "Desktop only for now" hint.
-        // TODO J-19+: superStringColour<N> set requires either
-        // exposing the vector mutator on Model or wholesale rebuild
-        // via SetSuperStringColours + per-index after.
-        (void)next;
-        return NO;
+        if (idx < 0 || idx >= (long)m->GetSuperStringColours().size()) return NO;
+        xlColor newC(std::string(s.UTF8String));
+        if (newC != m->GetSuperStringColours()[idx]) {
+            m->SetSuperStringColour((int)idx, newC);
+            changed = YES;
+        }
     } else if (keyStr == "rgbwHandlingIndex") {
         double v = asDouble(&typeOk);
         if (!typeOk) return NO;
@@ -3904,6 +3895,182 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     return YES;
 }
 
+// J-22 — Faces / States / Dimming nested-dictionary helpers.
+// All three use the same `FaceStateData` shape on the C++ side
+// (map<string, map<string, string>>) so the bridge converters
+// are shared, with the inner mutator chosen by caller.
+static FaceStateData faceStateFromNSDict(NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>* entries) {
+    FaceStateData out;
+    if (!entries) return out;
+    for (NSString* k in entries) {
+        NSDictionary<NSString*, NSString*>* attrs = entries[k];
+        std::map<std::string, std::string> attrMap;
+        for (NSString* ak in attrs) {
+            NSString* v = attrs[ak];
+            attrMap[ak.UTF8String] = v.UTF8String;
+        }
+        out[k.UTF8String] = attrMap;
+    }
+    return out;
+}
+static NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>* faceStateToNSDict(const FaceStateData& info) {
+    NSMutableDictionary<NSString*, NSMutableDictionary<NSString*, NSString*>*>* out =
+        [NSMutableDictionary dictionary];
+    for (const auto& [k, attrs] : info) {
+        NSMutableDictionary<NSString*, NSString*>* attrDict = [NSMutableDictionary dictionary];
+        for (const auto& [ak, av] : attrs) {
+            attrDict[[NSString stringWithUTF8String:ak.c_str()]] =
+                [NSString stringWithUTF8String:av.c_str()];
+        }
+        out[[NSString stringWithUTF8String:k.c_str()]] = attrDict;
+    }
+    return out;
+}
+
+- (BOOL)setFaceInfo:(NSString*)modelName
+            entries:(NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)entries {
+    if (!_context || !_context->HasModelManager() || !modelName) return NO;
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    if (!m) return NO;
+    _context->AbortRender(5000);
+    m->SetFaceInfo(faceStateFromNSDict(entries));
+    _context->MarkLayoutModelDirty(std::string(modelName.UTF8String));
+    return YES;
+}
+
+- (BOOL)setStateInfo:(NSString*)modelName
+             entries:(NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)entries {
+    if (!_context || !_context->HasModelManager() || !modelName) return NO;
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    if (!m) return NO;
+    _context->AbortRender(5000);
+    m->SetStateInfo(faceStateFromNSDict(entries));
+    _context->MarkLayoutModelDirty(std::string(modelName.UTF8String));
+    // States have a separate state-info save path (used by the
+    // DMX state editor); make sure it picks up the change too.
+    _context->MarkModelStateDirty(std::string(modelName.UTF8String));
+    return YES;
+}
+
+- (NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)
+        faceInfoForModel:(NSString*)modelName {
+    if (!_context || !_context->HasModelManager() || !modelName) return @{};
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    if (!m) return @{};
+    return faceStateToNSDict(m->GetFaceInfo());
+}
+
+- (NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)
+        stateInfoForModel:(NSString*)modelName {
+    if (!_context || !_context->HasModelManager() || !modelName) return @{};
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    if (!m) return @{};
+    return faceStateToNSDict(m->GetStateInfo());
+}
+
+- (BOOL)setDimmingInfo:(NSString*)modelName
+               entries:(NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)entries {
+    if (!_context || !_context->HasModelManager() || !modelName) return NO;
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    if (!m) return NO;
+    _context->AbortRender(5000);
+    m->SetDimmingInfo(faceStateFromNSDict(entries));
+    _context->MarkLayoutModelDirty(std::string(modelName.UTF8String));
+    return YES;
+}
+
+- (NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)
+        dimmingInfoForModel:(NSString*)modelName {
+    if (!_context || !_context->HasModelManager() || !modelName) return @{};
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    if (!m) return @{};
+    return faceStateToNSDict(m->GetDimmingInfo());
+}
+
+// J-23 — Custom-model 3D grid bridge. Exposes `_locations` as
+// a nested NSArray for SwiftUI canvas rendering + edits.
+- (NSDictionary*)customModelDataForModel:(NSString*)modelName {
+    if (!_context || !_context->HasModelManager() || !modelName) return @{};
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    auto* cm = dynamic_cast<CustomModel*>(m);
+    if (!cm) return @{};
+    int w = (int)cm->GetCustomWidth();
+    int h = (int)cm->GetCustomHeight();
+    int d = (int)cm->GetCustomDepth();
+    NSMutableArray<NSArray<NSArray<NSNumber*>*>*>* locs = [NSMutableArray array];
+    const auto& data = cm->GetData();
+    for (int layer = 0; layer < d; ++layer) {
+        NSMutableArray<NSArray<NSNumber*>*>* layerArr = [NSMutableArray array];
+        for (int row = 0; row < h; ++row) {
+            NSMutableArray<NSNumber*>* rowArr = [NSMutableArray array];
+            for (int col = 0; col < w; ++col) {
+                int v = 0;
+                if (layer < (int)data.size() &&
+                    row < (int)data[layer].size() &&
+                    col < (int)data[layer][row].size()) {
+                    v = data[layer][row][col];
+                }
+                [rowArr addObject:@(v)];
+            }
+            [layerArr addObject:rowArr];
+        }
+        [locs addObject:layerArr];
+    }
+    return @{
+        @"width":     @(w),
+        @"height":    @(h),
+        @"depth":     @(d),
+        @"locations": locs,
+        // J-23.2 — expose the bg-image trio so the visual editor
+        // can paint the image under the gridlines and respect
+        // scale + brightness.
+        @"backgroundImage": [NSString stringWithUTF8String:cm->GetCustomBackground().c_str()],
+        @"backgroundScale": @(cm->GetCustomBkgScale()),
+        @"backgroundBrightness": @(cm->GetCustomBkgBrightness()),
+    };
+}
+
+- (BOOL)setCustomModelData:(NSString*)modelName
+                     width:(int)w
+                    height:(int)h
+                     depth:(int)d
+                 locations:(NSArray<NSArray<NSArray<NSNumber*>*>*>*)locations {
+    if (!_context || !_context->HasModelManager() || !modelName) return NO;
+    if (w < 1 || h < 1 || d < 1) return NO;
+    if (!locations || (int)locations.count != d) return NO;
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    auto* cm = dynamic_cast<CustomModel*>(m);
+    if (!cm) return NO;
+
+    // Build the C++ 3D vector. Pad / truncate so the result is
+    // rectangular and matches the declared dims even if the
+    // caller sent slightly off-shape arrays.
+    std::vector<std::vector<std::vector<int>>> data(d,
+        std::vector<std::vector<int>>(h, std::vector<int>(w, 0)));
+    for (int layer = 0; layer < d; ++layer) {
+        NSArray<NSArray<NSNumber*>*>* layerArr = locations[layer];
+        if (![layerArr isKindOfClass:[NSArray class]]) continue;
+        int hh = std::min((int)layerArr.count, h);
+        for (int row = 0; row < hh; ++row) {
+            NSArray<NSNumber*>* rowArr = layerArr[row];
+            if (![rowArr isKindOfClass:[NSArray class]]) continue;
+            int ww = std::min((int)rowArr.count, w);
+            for (int col = 0; col < ww; ++col) {
+                if ([rowArr[col] isKindOfClass:[NSNumber class]]) {
+                    data[layer][row][col] = [rowArr[col] intValue];
+                }
+            }
+        }
+    }
+    _context->AbortRender(5000);
+    cm->SetCustomWidth(w);
+    cm->SetCustomHeight(h);
+    cm->SetCustomDepth(d);
+    cm->SetCustomData(data);
+    _context->MarkLayoutModelDirty(std::string(modelName.UTF8String));
+    return YES;
+}
+
 - (BOOL)clearDimmingCurveOnModel:(NSString*)modelName {
     if (!_context || !_context->HasModelManager() || !modelName) return NO;
     Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
@@ -3913,6 +4080,131 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     m->SetDimmingInfo({});
     _context->MarkLayoutModelDirty(std::string(modelName.UTF8String));
     return YES;
+}
+
+- (BOOL)renameSubModelNamed:(NSString*)oldName
+                    onModel:(NSString*)parentName
+                         to:(NSString*)newName {
+    if (!_context || !_context->HasModelManager()) return NO;
+    if (!oldName || !parentName || !newName) return NO;
+    Model* parent = _context->GetModelManager()[std::string(parentName.UTF8String)];
+    if (!parent) return NO;
+    std::string oldStd = oldName.UTF8String;
+    std::string newStd = Model::SafeModelName(newName.UTF8String);
+    if (newStd.empty() || oldStd == newStd) return NO;
+    Model* sm = parent->GetSubModel(oldStd);
+    if (!sm) return NO;
+    if (parent->GetSubModel(newStd)) return NO; // collision
+    _context->AbortRender(5000);
+    sm->name = newStd;
+    parent->IncrementChangeCount();
+    _context->MarkLayoutModelDirty(std::string(parentName.UTF8String));
+    return YES;
+}
+
+- (NSArray<NSDictionary*>*)submodelDetailsForModel:(NSString*)parentName {
+    NSMutableArray<NSDictionary*>* out = [NSMutableArray array];
+    if (!_context || !_context->HasModelManager() || !parentName) return out;
+    Model* parent = _context->GetModelManager()[std::string(parentName.UTF8String)];
+    if (!parent) return out;
+    for (Model* m : parent->GetSubModels()) {
+        auto* sm = dynamic_cast<SubModel*>(m);
+        if (!sm) continue;
+        NSMutableDictionary* d = [NSMutableDictionary dictionary];
+        d[@"name"]        = [NSString stringWithUTF8String:sm->GetName().c_str()];
+        d[@"isRanges"]    = @(sm->IsRanges() ? YES : NO);
+        d[@"isVertical"]  = @(sm->IsVertical() ? YES : NO);
+        d[@"bufferStyle"] = [NSString stringWithUTF8String:sm->GetSubModelBufferStyle().c_str()];
+        if (sm->IsRanges()) {
+            NSMutableArray<NSString*>* strands = [NSMutableArray array];
+            int n = sm->GetNumRanges();
+            for (int i = 0; i < n; ++i) {
+                [strands addObject:[NSString stringWithUTF8String:sm->GetRange(i).c_str()]];
+            }
+            d[@"strands"] = strands;
+            d[@"subBuffer"] = @"";
+        } else {
+            d[@"strands"] = @[];
+            // Sub-buffer's actual rectangle isn't trivially
+            // exposed today; surface the property-grid display
+            // string and let the desktop be authoritative for
+            // exact editing. (Most submodel editing on iPad will
+            // be ranges anyway.)
+            d[@"subBuffer"] = [NSString stringWithUTF8String:sm->GetSubModelLines().c_str()];
+        }
+        [out addObject:d];
+    }
+    return out;
+}
+
+- (BOOL)replaceSubModelsOnModel:(NSString*)parentName
+                    withEntries:(NSArray<NSDictionary*>*)entries {
+    if (!_context || !_context->HasModelManager() || !parentName || !entries) return NO;
+    Model* parent = _context->GetModelManager()[std::string(parentName.UTF8String)];
+    if (!parent) return NO;
+    _context->AbortRender(5000);
+    parent->RemoveAllSubModels();
+    for (NSDictionary* d in entries) {
+        NSString* nm = d[@"name"];
+        if (![nm isKindOfClass:[NSString class]]) continue;
+        std::string name = Model::SafeModelName(nm.UTF8String);
+        if (name.empty()) continue;
+        bool isRanges    = [d[@"isRanges"]   boolValue];
+        bool isVertical  = [d[@"isVertical"] boolValue];
+        NSString* bsObj  = d[@"bufferStyle"];
+        std::string bs   = [bsObj isKindOfClass:[NSString class]]
+                            ? std::string(bsObj.UTF8String) : "Default";
+        auto* sm = new SubModel(parent, name, isVertical, isRanges, bs);
+        parent->AddSubmodel(sm);
+        if (isRanges) {
+            NSArray<NSString*>* strands = d[@"strands"];
+            if ([strands isKindOfClass:[NSArray class]]) {
+                if (bs == KEEP_XY) {
+                    for (NSString* s in strands) {
+                        if (![s isKindOfClass:[NSString class]]) continue;
+                        sm->AddRangeXY(s.UTF8String);
+                    }
+                    sm->CalcRangeXYBufferSize();
+                } else {
+                    for (NSString* s in strands) {
+                        if (![s isKindOfClass:[NSString class]]) continue;
+                        sm->AddDefaultBuffer(s.UTF8String);
+                    }
+                }
+            }
+        } else {
+            NSString* sub = d[@"subBuffer"];
+            if ([sub isKindOfClass:[NSString class]]) {
+                sm->AddSubbuffer(sub.UTF8String);
+            }
+        }
+        sm->Setup();
+    }
+    parent->IncrementChangeCount();
+    _context->MarkLayoutModelDirty(std::string(parentName.UTF8String));
+    return YES;
+}
+
+- (nullable NSString*)addSubModelToModel:(NSString*)parentName
+                                    name:(NSString*)submodelName {
+    if (!_context || !_context->HasModelManager()) return nil;
+    if (!parentName || !submodelName) return nil;
+    Model* parent = _context->GetModelManager()[std::string(parentName.UTF8String)];
+    if (!parent) return nil;
+    std::string std_name = Model::SafeModelName(submodelName.UTF8String);
+    if (std_name.empty()) return nil;
+    if (parent->GetSubModel(std_name)) return nil;
+    _context->AbortRender(5000);
+    // Defaults: horizontal, ranges, "Default" buffer style.
+    // Mirrors what the desktop SubModelsDialog creates for a
+    // brand-new submodel before the user edits its ranges.
+    auto* sm = new SubModel(parent, std_name, false, true, "Default");
+    parent->AddSubmodel(sm);
+    sm->AddDefaultBuffer("1-1");
+    sm->Setup();
+    parent->IncrementChangeCount();
+    _context->MarkLayoutModelDirty(std::string(parentName.UTF8String));
+    return [NSString stringWithUTF8String:std_name.c_str()];
 }
 
 - (BOOL)deleteSubModelNamed:(NSString*)submodelName
@@ -5286,26 +5578,51 @@ static void BuildLabelProps(LabelModel* lm, NSMutableArray* out) {
     }];
 }
 
-// J-20.2 — MultiPoint. Basic surface only: nodes / lights are
-// read-only (driven by canvas vertex placement), # Strings,
-// Height. Indiv Start Nodes per-string editor deferred — that
-// pipeline mirrors the Indiv Start Channels surface and warrants
-// its own slice.
+// J-21 — MultiPoint. Mirrors MultiPointPropertyAdapter:
+// # Lights / # Nodes (read-only), # Strings, optional Indiv
+// Start Nodes toggle + per-string node fields, Height.
 static void BuildMultiPointProps(MultiPointModel* mp, NSMutableArray* out) {
     NSString* nodesLabel = mp->IsSingleNode() ? @"# Lights" : @"# Nodes";
     NSMutableDictionary* d = MakeIntProp(@"MultiPointNodes", nodesLabel,
                                           mp->GetNumPoints(), 1, 10000);
-    d[@"enabled"] = @NO;  // Canvas-driven on desktop too.
+    d[@"enabled"] = @NO;
     [out addObject:d];
     [out addObject:MakeIntProp(@"MultiPointStrings", @"Strings",
                                 mp->GetNumStrings(), 1, 48)];
+
+    // Indiv Start Nodes toggle + per-string fields, only when
+    // there's more than one string. Mirrors the desktop's
+    // adapter: the toggle defaults to off; turning it on
+    // surfaces N spin-able fields, one per string.
+    if (mp->GetNumStrings() > 1) {
+        bool indiv = mp->HasIndivStartNodes();
+        [out addObject:MakeBoolProp(@"ModelIndividualStartNodes",
+                                     @"Indiv Start Nodes", indiv)];
+        if (indiv) {
+            int strings = mp->GetNumStrings();
+            int nodeCount = std::max(1, (int)mp->GetNodeCount());
+            for (int i = 0; i < strings; ++i) {
+                int v = i < mp->GetIndivStartNodesCount() ? mp->GetIndivStartNode(i)
+                                                          : mp->ComputeStringStartNode(i);
+                if (v < 1) v = 1;
+                if (v > nodeCount) v = nodeCount;
+                NSString* nm = [NSString stringWithUTF8String:mp->StartNodeAttrName(i).c_str()];
+                NSString* key = [NSString stringWithFormat:@"IndivStartNode%d", i];
+                [out addObject:MakeIntProp(key, nm, v, 1, nodeCount)];
+            }
+        }
+    }
+
     [out addObject:MakeDoubleProp(@"ModelHeight", @"Height",
                                    mp->GetModelHeight(), -100, 100, 0.1, 2)];
 }
 
-// J-20.2 — PolyLine. Basic surface only: # Lights/Nodes,
-// Lights/Node, Strings, Alternate Drop Nodes, Height, Starting
-// Location. Segment / corner / per-string-start editors deferred.
+// J-21 — PolyLine. # Lights/Nodes (read-only), Lights/Node,
+// Strings, Indiv Start Nodes toggle + per-string fields,
+// Starting Location, Alternate Drop Nodes, Height. Segment /
+// corner editors still deferred — those need a per-vertex
+// editor (segment node-count + corner-style enum per vertex)
+// that doesn't yet exist on iPad.
 static void BuildPolyLineProps(PolyLineModel* pl, NSMutableArray* out) {
     if (pl->IsSingleNode()) {
         NSMutableDictionary* d = MakeIntProp(@"PolyLineNodes", @"# Lights",
@@ -5322,20 +5639,88 @@ static void BuildPolyLineProps(PolyLineModel* pl, NSMutableArray* out) {
     }
     [out addObject:MakeIntProp(@"PolyLineStrings", @"Strings",
                                 pl->GetNumStrings(), 1, 48)];
+
+    // Indiv Start Nodes (only when > 1 string).
+    if (pl->GetNumStrings() > 1) {
+        bool indiv = pl->HasIndivStartNodes();
+        [out addObject:MakeBoolProp(@"ModelIndividualStartNodes",
+                                     @"Start Nodes", indiv)];
+        if (indiv) {
+            int strings = pl->GetNumStrings();
+            int nodeCount = std::max(1, (int)pl->GetNodeCount());
+            for (int i = 0; i < strings; ++i) {
+                int v = i < pl->GetIndivStartNodesCount() ? pl->GetIndivStartNode(i)
+                                                          : pl->ComputeStringStartNode(i);
+                if (v < 1) v = 1;
+                if (v > nodeCount) v = nodeCount;
+                NSString* nm = [NSString stringWithUTF8String:pl->StartNodeAttrName(i).c_str()];
+                NSString* key = [NSString stringWithFormat:@"IndivStartNode%d", i];
+                [out addObject:MakeIntProp(key, nm, v, 1, nodeCount)];
+            }
+        }
+    }
+
     [out addObject:MakeEnumProp(@"PolyLineStart", @"Starting Location",
                                  pl->GetIsLtoR() ? 0 : 1,
                                  @[@"Green Square", @"Blue Square"])];
+    // J-21.1 — Drop Pattern. Shared with Icicles via the
+    // `IciclesDrops` key + `Model::SetDropPattern` setter.
+    [out addObject:MakeStringProp(@"IciclesDrops", @"Drop Pattern",
+        [NSString stringWithUTF8String:pl->GetDropPattern().c_str()])];
     [out addObject:MakeBoolProp(@"AlternateNodes", @"Alternate Drop Nodes",
                                  pl->HasAlternateNodes())];
     [out addObject:MakeDoubleProp(@"ModelHeight", @"Height",
                                    pl->GetModelHeight(), -100, 100, 0.1, 2)];
+
+    // J-21.1 — Per-segment node counts. Each segment between two
+    // PolyPoint vertices gets a `Segment N` row with a spin int.
+    // Mirrors desktop's `ModelIndividualSegments.SegmentN` keys.
+    // Editing a segment turns off AutoDistribute (matches desktop)
+    // so the user's manual sizes are respected.
+    int numSegments = pl->GetNumSegments();
+    std::vector<int> segSizes = pl->GetSegmentsSizes();
+    for (int x = 0; x < numSegments; ++x) {
+        NSString* nm  = [NSString stringWithFormat:@"Segment %d", x + 1];
+        NSString* key = [NSString stringWithFormat:@"PolySegmentSize%d", x];
+        int sz = (x < (int)segSizes.size()) ? segSizes[x] : 1;
+        [out addObject:MakeIntProp(key, nm, sz, 1, 100000)];
+    }
+
+    // J-21.1 — Corner settings. There are numSegments + 1 corners
+    // (one per vertex). Each corner picks how the surrounding
+    // segments connect: Leading / Trailing / Neither. Desktop
+    // translates the enum into lead/trail offsets at the segment
+    // boundaries; bridge mirrors that math in the setter below.
+    std::vector<std::string> corners = pl->GetCorners();
+    for (int x = 0; x < numSegments + 1; ++x) {
+        NSString* nm  = [NSString stringWithFormat:@"Corner %d", x + 1];
+        NSString* key = [NSString stringWithFormat:@"PolyCorner%d", x];
+        std::string val = (x < (int)corners.size()) ? corners[x] : "Neither";
+        int idx = (val == "Leading Segment") ? 0 : (val == "Trailing Segment") ? 1 : 2;
+        [out addObject:MakeEnumProp(key, nm, idx,
+                                     @[@"Leading Segment",
+                                       @"Trailing Segment",
+                                       @"Neither"])];
+    }
 }
 
 static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
-    // Read-only — custom matrix authoring needs a 2D grid editor
-    // that doesn't exist on iPad yet. Surface the dims so the user
-    // at least knows what they're looking at.
+    // J-21/J-23 — mirrors CustomPropertyAdapter:
+    // Model Data opens the new point/click/drag grid editor;
+    // # Strings, optional Indiv Start Nodes, Background Image
+    // + Scale + Brightness follow. Matrix dimensions are now
+    // editable via the visual editor — surfacing them here as
+    // read-only summary rows.
     NSMutableDictionary* d;
+    // Open-grid-editor pseudo-descriptor; SwiftUI picks this
+    // up via the `customModelData` kind and replaces the row
+    // body with an "Edit Grid…" button.
+    [out addObject:@{
+        @"key":   @"CustomModelData",
+        @"label": @"Model Data",
+        @"kind":  @"customModelData",
+        @"value": @"",
+    }];
     d = MakeIntProp(@"CustomWidth", @"Matrix Width",
                      (int)cm->GetCustomWidth(), 1, 10000);
     d[@"enabled"] = @NO; [out addObject:d];
@@ -5345,6 +5730,42 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
     d = MakeIntProp(@"CustomDepth", @"Matrix Depth",
                      (int)cm->GetCustomDepth(), 1, 10000);
     d[@"enabled"] = @NO; [out addObject:d];
+
+    [out addObject:MakeIntProp(@"CustomModelStrings", @"# Strings",
+                                cm->GetNumStrings(), 1, 100)];
+
+    if (cm->GetNumStrings() > 1) {
+        bool indiv = cm->HasIndivStartNodes();
+        [out addObject:MakeBoolProp(@"ModelIndividualStartNodes",
+                                     @"Start Nodes", indiv)];
+        if (indiv) {
+            int strings = cm->GetNumStrings();
+            int nodeCount = std::max(1, (int)cm->GetNodeCount());
+            for (int i = 0; i < strings; ++i) {
+                int v = i < cm->GetIndivStartNodesCount() ? cm->GetIndivStartNode(i)
+                                                          : cm->ComputeStringStartNode(i);
+                if (v < 1) v = 1;
+                if (v > nodeCount) v = nodeCount;
+                NSString* nm = [NSString stringWithUTF8String:cm->StartNodeAttrName(i).c_str()];
+                NSString* key = [NSString stringWithFormat:@"IndivStartNode%d", i];
+                [out addObject:MakeIntProp(key, nm, v, 1, nodeCount)];
+            }
+        }
+    }
+
+    // Background image group — reuse the `imageFile` descriptor
+    // kind so users can pick / clear via the same file picker
+    // the model Image type uses.
+    [out addObject:@{
+        @"key":   @"CustomBkgImage",
+        @"label": @"Background Image",
+        @"kind":  @"imageFile",
+        @"value": [NSString stringWithUTF8String:cm->GetCustomBackground().c_str()],
+    }];
+    [out addObject:MakeIntProp(@"CustomBkgScale", @"Background Scale %",
+                                cm->GetCustomBkgScale(), 10, 500)];
+    [out addObject:MakeIntProp(@"CustomBkgBrightness", @"Background Brightness %",
+                                cm->GetCustomBkgBrightness(), 0, 100)];
 }
 
 - (NSArray<NSDictionary*>*)perTypePropertiesForModel:(NSString*)modelName {
@@ -5666,9 +6087,14 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
         auto* ic = dynamic_cast<IciclesModel*>(m);
         if (ic && ic->GetLightsPerString() != v) { ic->SetLightsPerString(v); changed = YES; }
     } else if (k == "IciclesDrops") {
+        // J-21.1 — Shared key; both IciclesModel and PolyLineModel
+        // expose `SetDropPattern`. Dispatch on the live type.
         std::string v = asString(&ok); if (!ok) return NO;
-        auto* ic = dynamic_cast<IciclesModel*>(m);
-        if (ic && ic->GetDropPattern() != v) { ic->SetDropPattern(v); changed = YES; }
+        if (auto* ic = dynamic_cast<IciclesModel*>(m)) {
+            if (ic->GetDropPattern() != v) { ic->SetDropPattern(v); changed = YES; }
+        } else if (auto* pl = dynamic_cast<PolyLineModel*>(m)) {
+            if (pl->GetDropPattern() != v) { pl->SetDropPattern(v); changed = YES; }
+        }
     } else if (k == "IciclesStart") {
         int v = asInt(&ok); if (!ok) return NO;
         m->SetDirection(v == 0 ? "L" : "R");
@@ -5870,6 +6296,39 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
         auto* cb = dynamic_cast<ChannelBlockModel*>(m);
         if (cb && cb->GetNumChannels() != v) { cb->SetNumChannels(v); changed = YES; }
     }
+    // J-21 — Custom Model
+    else if (k == "CustomModelStrings") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* cm = dynamic_cast<CustomModel*>(m);
+        if (cm && cm->GetNumStrings() != v) {
+            cm->SetNumStrings(v);
+            // Desktop mirrors this: forcing indiv-start-nodes on
+            // when strings > 1 + populating per-string defaults.
+            cm->SetHasIndivStartNodes(v > 1);
+            if (v > 1) {
+                cm->SetIndivStartNodesCount(v);
+                for (int x = 0; x < v; ++x) {
+                    cm->SetIndivStartNode(x, cm->ComputeStringStartNode(x));
+                }
+            }
+            changed = YES;
+        }
+    } else if (k == "CustomBkgImage") {
+        std::string v = asString(&ok); if (!ok) return NO;
+        auto* cm = dynamic_cast<CustomModel*>(m);
+        if (cm && v != cm->GetCustomBackground()) {
+            cm->SetCustomBackground(v);
+            changed = YES;
+        }
+    } else if (k == "CustomBkgScale") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* cm = dynamic_cast<CustomModel*>(m);
+        if (cm && cm->GetCustomBkgScale() != v) { cm->SetCustomBkgScale(v); changed = YES; }
+    } else if (k == "CustomBkgBrightness") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* cm = dynamic_cast<CustomModel*>(m);
+        if (cm && cm->GetCustomBkgBrightness() != v) { cm->SetCustomBkgBrightness(v); changed = YES; }
+    }
     // J-20 — Image
     else if (k == "Image") {
         std::string v = asString(&ok); if (!ok) return NO;
@@ -5888,6 +6347,40 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
         if (im && im->IsWhiteAsAlpha() != (v?true:false)) {
             im->ClearImageCache();
             im->SetWhiteAsAlpha(v?true:false); changed = YES;
+        }
+    }
+    // J-21 — Indiv Start Nodes (shared between MultiPoint and
+    // PolyLine). Toggle flips `_hasIndivNodes`; per-string key
+    // `IndivStartNode<N>` writes through `SetIndivStartNode`.
+    else if (k == "ModelIndividualStartNodes") {
+        BOOL v = asBool(&ok); if (!ok) return NO;
+        bool desired = v ? true : false;
+        if (m->HasIndivStartNodes() != desired) {
+            m->SetHasIndivStartNodes(desired);
+            if (desired) {
+                int strings = m->GetNumStrings();
+                while (m->GetIndivStartNodesCount() < strings) {
+                    m->AddIndivStartNode(m->ComputeStringStartNode(m->GetIndivStartNodesCount()));
+                }
+                if (m->GetIndivStartNodesCount() > strings) {
+                    m->SetIndivStartNodesCount(strings);
+                }
+            }
+            changed = YES;
+        }
+    } else if (k.starts_with("IndivStartNode")) {
+        std::string idxStr = k.substr(std::string("IndivStartNode").size());
+        char* end = nullptr;
+        long idx = std::strtol(idxStr.c_str(), &end, 10);
+        if (end == idxStr.c_str()) return NO;
+        int v = asInt(&ok); if (!ok) return NO;
+        if (idx < 0) return NO;
+        while (m->GetIndivStartNodesCount() <= (int)idx) {
+            m->AddIndivStartNode(m->ComputeStringStartNode(m->GetIndivStartNodesCount()));
+        }
+        if (m->GetIndivStartNode((size_t)idx) != v) {
+            m->SetIndivStartNode((int)idx, v);
+            changed = YES;
         }
     }
     // J-20.2 — MultiPoint
@@ -5918,6 +6411,59 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
         m->SetDirection(v == 0 ? "L" : "R");
         m->SetIsLtoR(v == 0);
         changed = YES;
+    }
+    // J-21.1 — Per-segment size. Editing turns off auto-distribute
+    // so the user's manual count survives (matches desktop's
+    // `SetAutoDistribute(false)` in the segment-edit handler).
+    else if (k.starts_with("PolySegmentSize")) {
+        std::string idxStr = k.substr(std::string("PolySegmentSize").size());
+        char* end = nullptr;
+        long idx = std::strtol(idxStr.c_str(), &end, 10);
+        if (end == idxStr.c_str()) return NO;
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* pl = dynamic_cast<PolyLineModel*>(m);
+        if (pl && idx >= 0 && idx < pl->GetNumSegments()) {
+            pl->SetRawSegmentSize((int)idx, v);
+            pl->SetAutoDistribute(false);
+            changed = YES;
+        }
+    }
+    // J-21.1 — Per-corner enum. The 3-choice value maps to
+    // lead/trail offsets at the segment boundaries: Leading =
+    // lead 1.0 / trail 0.0; Trailing = lead 0.0 / trail 1.0;
+    // Neither = lead 0.5 / trail 0.5. First / last corners only
+    // touch one side. Mirrors PolyLinePropertyAdapter.cpp:171-177.
+    else if (k.starts_with("PolyCorner")) {
+        std::string idxStr = k.substr(std::string("PolyCorner").size());
+        char* end = nullptr;
+        long idx = std::strtol(idxStr.c_str(), &end, 10);
+        if (end == idxStr.c_str()) return NO;
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* pl = dynamic_cast<PolyLineModel*>(m);
+        if (pl && idx >= 0 && idx <= pl->GetNumSegments()) {
+            static const char* CORNER_NAMES[] = {
+                "Leading Segment", "Trailing Segment", "Neither"
+            };
+            if (v < 0 || v > 2) return NO;
+            std::string cornerVal = CORNER_NAMES[v];
+            pl->SetCornerString((int)idx, cornerVal);
+            int numSegments = pl->GetNumSegments();
+            float leadOn  = (cornerVal == "Leading Segment")  ? 1.0f
+                          : (cornerVal == "Trailing Segment") ? 0.0f
+                          :                                      0.5f;
+            float trailOn = (cornerVal == "Leading Segment")  ? 0.0f
+                          : (cornerVal == "Trailing Segment") ? 1.0f
+                          :                                      0.5f;
+            if (idx == 0) {
+                pl->SetLeadOffset((int)idx, leadOn);
+            } else if (idx == numSegments) {
+                pl->SetTrailOffset((int)idx - 1, trailOn);
+            } else {
+                pl->SetTrailOffset((int)idx - 1, trailOn);
+                pl->SetLeadOffset((int)idx, leadOn);
+            }
+            changed = YES;
+        }
     }
     // J-20.2 — shared between Multi/PolyLine: Height (key matches
     // desktop "ModelHeight"). Multi/PolyLine both store on Model

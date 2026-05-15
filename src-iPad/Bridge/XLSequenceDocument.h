@@ -970,13 +970,102 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)deleteSubModelNamed:(NSString*)submodelName
                     onModel:(NSString*)parentName;
 
+// J-22 — rename a submodel on its parent model. Sanitizes via
+// Model::SafeModelName. Refuses collisions with an existing
+// submodel on the same parent. Returns NO on lookup / collide /
+// empty-name failures.
+- (BOOL)renameSubModelNamed:(NSString*)oldName
+                    onModel:(NSString*)parentName
+                         to:(NSString*)newName;
+
+// J-23.3 — Submodel detail accessor. Returns an array of dicts
+// (one per submodel) with all the editable fields:
+//   "name"        — NSString
+//   "isRanges"    — NSNumber bool (true = ranges/lines, false =
+//                   sub-buffer)
+//   "isVertical"  — NSNumber bool
+//   "bufferStyle" — NSString ("Default", "Keep XY", "Stacked",
+//                   "Stacked Right", "Stacked Left", "Stacked Up",
+//                   "Stacked Down", "Stacked Vertical Concatenate")
+//   "strands"     — NSArray<NSString*> (when isRanges)
+//   "subBuffer"   — NSString             (when !isRanges)
+- (NSArray<NSDictionary*>*)submodelDetailsForModel:(NSString*)parentName;
+
+// J-23.3 — Wholesale-replace all submodels on `parentName`. The
+// payload mirrors `submodelDetailsForModel:`. Internally calls
+// `RemoveAllSubModels` then re-creates each entry via
+// `new SubModel(...)` + `AddDefaultBuffer` / `AddRangeXY` /
+// `AddSubbuffer`. Mirrors desktop SubModelsDialog::Save.
+- (BOOL)replaceSubModelsOnModel:(NSString*)parentName
+                    withEntries:(NSArray<NSDictionary*>*)entries;
+
+// J-22 — add a new submodel to a parent. Type defaults to
+// "ranges" (the most common form on desktop); the bridge
+// creates a single placeholder "1-1" range so the new
+// submodel is immediately valid. Returns the sanitized name
+// on success, nil on failure (empty / colliding name or
+// parent lookup miss).
+- (nullable NSString*)addSubModelToModel:(NSString*)parentName
+                                    name:(NSString*)submodelName;
+
 // J-18 pass 6 — clear any dimming curve set on this model.
 // SetDimmingInfo({}) deletes the cached `modelDimmingCurve`
 // and empties the `<dimmingCurve>` XML child block on save.
-// Editing the curve is not yet supported on iPad — clear is
-// the only mutation we expose. Returns NO if the model
-// doesn't resolve or there's nothing to clear.
+// Returns NO if the model doesn't resolve or there's
+// nothing to clear.
 - (BOOL)clearDimmingCurveOnModel:(NSString*)modelName;
+
+// J-22 — wholesale-replace a model's full face / state map.
+// Value is NSDictionary<NSString*, NSDictionary<NSString*,
+// NSString*>*>* mirroring the desktop's `FaceStateData`
+// (map<faceOrStateName, map<attrName, attrValue>>). Routes
+// through Model::SetFaceInfo / SetStateInfo, which also
+// recomputes the derived node-list map. Marks the model
+// dirty so save re-serializes the `<faceInfo>` / `<stateInfo>`
+// child block. Returns NO if the model doesn't resolve.
+- (BOOL)setFaceInfo:(NSString*)modelName
+            entries:(NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)entries;
+- (BOOL)setStateInfo:(NSString*)modelName
+             entries:(NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)entries;
+
+// J-22 — read the model's face / state map as a structured
+// NSDictionary suitable for SwiftUI consumption. Format mirrors
+// `setFaceInfo:`/`setStateInfo:`. Returns an empty dictionary
+// if the model has no face / state data.
+- (NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)
+        faceInfoForModel:(NSString*)modelName;
+- (NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)
+        stateInfoForModel:(NSString*)modelName;
+
+// J-23 — Custom-model grid data accessor / mutator. The editor
+// works on the 3D `_locations` vector directly: each cell holds
+// the 1-based pixel number that lights at that position, or 0
+// for empty. Dictionary returned by `customModelDataForModel:`
+// has these keys:
+//   "width"     — NSNumber (int)
+//   "height"    — NSNumber (int)
+//   "depth"     — NSNumber (int)
+//   "locations" — NSArray<NSArray<NSArray<NSNumber>>>
+//                 indexed as [depth][height][width]
+// `setCustomModelData:width:height:depth:locations:` wholesale-
+// replaces both the dimensions and the grid. Locations must be
+// rectangular and match the dimensions, else returns NO.
+- (NSDictionary*)customModelDataForModel:(NSString*)modelName;
+- (BOOL)setCustomModelData:(NSString*)modelName
+                     width:(int)w
+                    height:(int)h
+                     depth:(int)d
+                 locations:(NSArray<NSArray<NSArray<NSNumber*>*>*>*)locations;
+
+// J-22 — wholesale-set the dimming curve for a model. `entries`
+// mirrors desktop's `dimmingInfo` map<channel, map<attr,
+// value>>. Channel keys are "all", "red", "green", "blue",
+// "white". Empty dict clears (equivalent to
+// clearDimmingCurveOnModel:). Returns NO on lookup failure.
+- (BOOL)setDimmingInfo:(NSString*)modelName
+               entries:(NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)entries;
+- (NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>*)
+        dimmingInfoForModel:(NSString*)modelName;
 
 // Phase J-5 (sidebar tabs) — ModelGroups visible in the active
 // layout group. Names only, in the same order as

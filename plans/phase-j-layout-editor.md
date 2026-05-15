@@ -386,6 +386,440 @@ The long tail. Per-model property pages and the Add Model toolbar.
   with two columns (in-group / available) similar to
   `DisplayElementsSheet`.
 
+### J-23.8 — Fat-finger snap, Pencil hover, Bresenham distribute ✓ 2026-05-15
+
+Three issues, all addressed in `CustomModelEditorSheet`:
+
+**Tap-on-pixel snap.** Finger taps on a pixel were placing new
+pixels in adjacent empty cells instead of selecting the touched
+pixel — the touch centroid often falls just outside the pixel
+glyph. Added `nearestPixelCell(to:cellSide:xOff:yOff:slop:)` —
+when the tapped cell is empty, search the active layer for the
+closest occupied cell within `slop = max(cellSide * 0.85, 28)`
+and treat that as the touch target. Apple Pencil hits were
+already accurate, so this only kicks in on misses.
+
+**Drag detection rewrite.** The snap broke drag-to-move: with
+the touch snapped to a nearby occupied cell, `dragHoverCell !=
+dragOrigin` was trivially true and every tap that snapped fired
+a move. Replaced the cell-difference check with a physical-
+distance gate — `hypot(end - initialTouch) > 16pt` — so small
+finger jitter still resolves as a tap.
+
+**Apple Pencil hover.** Added `.onContinuousHover` over the
+canvas: when the Pencil hovers a cell on the active layer, the
+cell is outlined (gray for empty, accent for occupied). Helps
+the user line up Pencil taps before committing.
+
+**Distribute — Bresenham cell walk.** User reported the
+distribute action put every new pixel at the starting pixel's
+cell. Root cause was the lerp-and-round formula: when the two
+endpoints were close (e.g. `from=(5,3)`, `to=(5,4)`), most
+fractional positions rounded to one endpoint or the other, the
+collision-skip then dropped every placement, and visually the
+selected pixel "absorbed" the requested distribution.
+
+Replaced the formula with Bresenham's line walk
+(`cellsAlongLine(from:to:)`), strip the two endpoints, then
+sample the intermediate strip at `(i + 0.5) / n` fractions. The
+placement count is clamped to the available intermediate cells
+so adjacent endpoints just no-op instead of silently dropping
+work. Numbering shift is now based on `picked.count` (the
+actual placement count) rather than the requested count.
+
+### J-23.7 — Explicit Distribute button + wider W/H fields ✓ 2026-05-15
+
+**Distribute button.** Tap-on-line detection (J-23.5/.6) kept
+losing taps to "place new pixel" because both gestures live on
+empty cells. Ripped it out and replaced with an explicit
+button in the selection bar:
+
+- Tap a pixel to select it.
+- The bar now also shows "Distribute → #N" (when the
+  selected pixel has a higher-numbered sibling). N is the
+  next pixel by number, computed via a single O(w·h·d) scan.
+- Tapping the button opens the existing
+  `DistributePointsSheet` with that segment preselected.
+
+Unambiguous, hit-test independent, and the bar already had
+Renumber / Delete so it's the natural home for a third
+per-pixel action.
+
+**Wider W/H fields.** User reported 3-4 digit values (352,
+157) were overflowing the W/H spin fields. Two fixes:
+
+- `LayoutEditorIntSpin`'s inner TextField bumped from
+  `maxWidth: 70` → `95` (applies app-wide).
+- The Custom editor's W/H outer frames bumped from
+  `maxWidth: 120` → `160`; D from `100` → `140`.
+
+### J-23.6 — Line-tap detection fix ✓ 2026-05-15
+
+User feedback after J-23.5: tap-on-line wasn't opening the
+distribute sheet — it just placed a pixel. Three contributing
+issues, fixed together:
+
+**Movement gate too strict.** `movement < 6` was suppressing
+legitimate taps where the finger jittered ≥6 pt before lift.
+Dropped the movement check entirely — cell-level "the start
+and end cell are the same empty cell" is a sufficient signal
+that the user didn't intend a drag.
+
+**Threshold too tight on dense grids.** Was `cellSide * 0.5`,
+which on a 100×100 grid filling an 800-pt canvas is just 4 pt
+— easy to miss. Bumped to `max(cellSide * 0.5, 18)` so the
+hit-test always has a generous minimum reach regardless of
+cell size.
+
+**Async geoSize race.** The canvas gesture was reading metrics
+via `canvasGeoSize` @State which `capture(geoSize:)` updates
+through `DispatchQueue.main.async`. Plumbed `geo.size`
+directly into the gesture factory (`canvasGesture(geoSize:)`)
+so metrics are derived from the same value the body just used
+for rendering — no async window, no stale read.
+
+### J-23.5 — Hit-test fix + Pan mode + Distribute-along-line ✓ 2026-05-15
+
+User feedback after J-23.4: hit-tests landed at random cells
+after zoom; two-finger pan never worked; and a line +
+distribute-points feature would be valuable.
+
+**Hit-test fix:**
+
+The gesture closure was capturing `cellSide` / `xOff` / `yOff`
+as local lets at body-eval time. SwiftUI sometimes hangs onto
+an older closure across renders, so a tap that fired through
+the older closure used stale post-resize / post-zoom math.
+
+Fixed by stashing `geo.size` into a `@State canvasGeoSize` and
+adding `currentMetrics()` that re-derives `cellSide` / `xOff` /
+`yOff` from live @State on every gesture callback. The
+`canvasGesture()` factory no longer takes parameters; metrics
+recompute inside `onChanged` / `onEnded`.
+
+**Pan mode toggle:**
+
+Native SwiftUI doesn't expose a touch-count on DragGesture, so
+the previous "drag when magnification is active" approach
+missed pure pans (no pinch movement → `MagnificationGesture`
+doesn't fire → `multiTouchActive` stays false → pan never
+triggers). Replaced with a simple toolbar toggle:
+
+- `hand.draw` button in the top bar flips `panMode`.
+- When ON: single-finger drag scrolls (`panOffset = panCommitted
+  + value.translation`); `.onEnded` snaps `panCommitted` to
+  the new value so subsequent drags continue from there.
+- When OFF: single-finger drag places / moves pixels (the
+  original behaviour).
+
+The pinch gesture still works for live zoom regardless of pan
+mode.
+
+**Lines + Distribute Along Line:**
+
+Lines render in a single Canvas stroke pass between
+consecutive pixels (sorted by pixel number) for the active
+layer. A tap on a line (within `cellSide * 0.5` perpendicular
+distance, with `<6 pt` movement so taps-on-pixels still place
+new ones) opens `DistributePointsSheet`:
+
+- Shows the segment's two endpoints.
+- A spin field asks for the number of points to add.
+- On Apply: linearly interpolates `count` positions between
+  the from / to cell centres, rounds each to its containing
+  cell, and assigns numbers (fromNumber+1) ... (fromNumber+N).
+- All pixels with numbers > fromNumber shift up by N so the
+  numbering stays contiguous. Cells already taken
+  (post-shift) are skipped rather than overwritten.
+
+### J-23.4 — Custom editor full-screen + zoom + pan ✓ 2026-05-15
+
+User feedback: "Editor needs to be a LOT bigger (close to full
+screen size on 10" iPad). Likely needs ability to zoom in to
+place things better."
+
+**Full-screen presentation:**
+
+- Switched `.sheet(item:)` → `.fullScreenCover(item:)`. Removed
+  the `.presentationDetents([.large])` constraint. The canvas
+  now gets the entire window on iPad.
+
+**Pinch-to-zoom (+ slider):**
+
+- New `zoom` state (0.5..5.0) multiplied into the base
+  `cellSide`. `MagnificationGesture` updates it live; on
+  `.onEnded` the committed value snaps to the live value.
+- A slider in the top toolbar (with - / + magnifying-glass
+  icons and a `1×` reset button) drives the same `zoom`
+  state, so users can pick a zoom level explicitly or pinch
+  for fine control.
+
+**Two-finger pan:**
+
+- SwiftUI has no built-in two-finger drag. Approximated via a
+  second `DragGesture(minimumDistance: 0)` simultaneous with
+  the pinch — only updates `panOffset` while `multiTouchActive`
+  is true. Pinch sets that flag on .onChanged and clears it
+  asynchronously on .onEnded so the trailing finger-up doesn't
+  trigger a stray pixel tap.
+- Single-finger DragGesture (tap-to-place / drag-to-move) now
+  early-returns when `multiTouchActive` is true so pinches /
+  pans never mutate pixels.
+
+**Resize resets pan:**
+
+- Changing Width / Height resets `panOffset` so the user
+  doesn't get stuck with the canvas off-screen after a
+  resize-while-zoomed.
+
+### J-23.1 / J-23.2 — Custom editor polish ✓ 2026-05-15
+
+Follow-ups to the J-23 MVP.
+
+**Drag-to-move:** Single `DragGesture(minimumDistance: 0)` on
+the canvas now handles both taps and drags. `onChanged` tracks
+the cell under the touch (records the origin's value on first
+event so we know whether it's a "tap on empty" / "tap on pixel"
+/ "drag a pixel"). `onEnded`:
+- If origin had a pixel and the end cell is different → move
+  (or swap if the end cell was already occupied).
+- Otherwise → fall through to `handleTap` for tap-to-place /
+  tap-to-select.
+
+Drop-target preview: while dragging an occupied cell, the
+canvas paints a dashed circle + faded number in the hover cell
+so the user can see where the pixel will land. Selection
+highlight remains on the origin until the gesture ends.
+
+**Background image:** `customModelDataForModel:` now also
+surfaces `backgroundImage`, `backgroundScale`,
+`backgroundBrightness`. The editor loads the image via
+`UIImage(contentsOfFile:)` in a `.task(id:)` block (off the
+main thread so a huge texture doesn't stall the canvas), then
+draws it under the gridlines inside the `Canvas` pass. Scale %
+sizes the image relative to the model bounds (100 = fit);
+brightness % modulates `ctx.opacity`.
+
+### J-23.3 — SubModel geometry editor ✓ 2026-05-15
+
+Adds the full per-submodel detail editor on iPad. Replaces the
+"swipe to delete only" list with a NavigationLink-per-row that
+drills into a per-submodel detail view.
+
+**Bridge:**
+
+- `submodelDetailsForModel:` returns an array of dicts (one per
+  submodel) with name, isRanges, isVertical, bufferStyle,
+  strands (array of range strings), subBuffer (string).
+- `replaceSubModelsOnModel:withEntries:` wholesale-replaces the
+  parent's submodel list. Internally calls
+  `RemoveAllSubModels()` then re-creates each entry via the
+  `new SubModel(...)` + `AddDefaultBuffer` / `AddRangeXY` /
+  `AddSubbuffer` pattern desktop uses in
+  SubModelsDialog::Save.
+
+**SwiftUI:**
+
+- `SubModelEntry` value type carries the editable fields.
+- `SubModelListSheet` rebuilt: list of submodels with
+  `NavigationLink(value:)` per row; add + swipe-delete at the
+  list level still work via the existing per-submodel
+  mutators.
+- `SubModelDetailEditor` drills into one submodel: Name +
+  Type picker (Ranges vs Sub-buffer) + Orientation toggle +
+  Buffer Style picker + ranges editor (Add / Delete / Edit
+  per line) or sub-buffer rectangle field.
+- Save on the detail view commits via the wholesale-replace
+  bridge so type / orientation / buffer style changes survive
+  (those fields are `const` on the C++ SubModel — only
+  RemoveAllSubModels + re-add can change them).
+
+**Type-change caveat:** Switching a submodel from Ranges to
+Sub-buffer (or vice versa) on Save reconstructs ALL submodels
+through `replaceSubModelsOnModel:`. That's the same pattern
+the desktop dialog uses; it's idempotent for the other
+submodels.
+
+### J-23 — Custom-model visual editor (MVP) ✓ 2026-05-15
+
+User feedback: "The current editor on the desktop is complete
+crap. Entering node numbers into a grid is slow an annoying."
+Replaces the type-numbers-into-cells dialog with a point/click
+flow.
+
+**Editor UX:**
+
+- **Grid size:** W / H / D spin buttons in the top bar. Resizing
+  preserves existing cells inside the new bounds; new cells
+  are empty. Live (no separate "apply" step).
+- **Layer slider:** appears when Depth > 1. Selects which 2D
+  slice the canvas edits.
+- **Canvas:** SwiftUI `Canvas` draws gridlines + a numbered
+  accent-color circle in each filled cell. One pass — no
+  per-cell UIView spawn, so grids with thousands of cells stay
+  responsive.
+- **Tap empty cell:** places the next free pixel number, or
+  *moves* the currently-selected pixel (mirrors the desktop's
+  drag-to-move intent but with a simpler tap-then-tap idiom
+  that survives touch loss).
+- **Tap occupied cell:** selects it. Bottom bar shows
+  "Pixel #N @ (col, row)" plus Renumber / Delete buttons.
+- **Renumber:** alert prompts for the new number. If that
+  number already exists elsewhere, the editor swaps — the
+  other cell takes the old number. (Avoids holes in the
+  numbering.)
+- **Clear All:** when nothing is selected, the bottom bar
+  surfaces a destructive Clear All button that wipes the
+  grid.
+- **Save:** wholesale-replace via the new
+  `setCustomModelData:width:height:depth:locations:` bridge.
+
+**Bridge:**
+
+- `customModelDataForModel:` returns
+  `{ width, height, depth, locations: [[[NSNumber]]] }`.
+- `setCustomModelData:width:height:depth:locations:` writes
+  back; the bridge pads / truncates so dim mismatches don't
+  corrupt the grid.
+
+**Still parked:**
+
+- Background image overlay on the editor canvas. (Already
+  surfaced as Custom Model props — Image / Scale / Brightness
+  — just not rendered behind the grid yet.)
+- Drag-to-move (current flow is tap-old-then-tap-new).
+
+### J-22 — Faces / States / Dimming Curve / SubModels editors ✓ 2026-05-15
+
+Closes the popup-editor parity gap on the Model Data section.
+Three of the categories (Faces, States, Dimming Curve) share
+the desktop's `FaceStateData` shape — `map<name, map<attr,
+value>>` — so one bridge surface + one generic SwiftUI editor
+covers all three. SubModels keeps its own list-shaped editor
+since each submodel is a structured object (name + geometry).
+
+**Generic FaceState editor:**
+
+- Bridge: `setFaceInfo:entries:`, `setStateInfo:entries:`,
+  `setDimmingInfo:entries:` (wholesale replace) and the
+  read-side `faceInfoForModel:` / `stateInfoForModel:` /
+  `dimmingInfoForModel:`. All five route through their
+  matching `Model::Set*Info` / `Get*Info` accessors. The
+  bridge converts between Swift dictionaries and the C++
+  `FaceStateData` via shared helpers.
+- States additionally call `MarkModelStateDirty` so the DMX
+  state-info save path picks the change up too.
+- SwiftUI `FaceStateEditorSheet` is a two-level navigation:
+  list of entries (face / state / channel names) → tap to
+  drill into a per-attribute editor. Top-level supports
+  Add / Delete entries (delete = swipe). Detail view has
+  suggested-key chips (standard phonemes for Faces, channel
+  attributes for Dimming), Add Attribute, Delete Attribute
+  (swipe), and an editable value field per key.
+- Wired into the Model Data section: Faces, States, and the
+  Dimming Curve row all open the editor. Dimming row keeps its
+  trash icon for one-tap clear.
+
+**SubModel add + rename:**
+
+- Bridge: `addSubModelToModel:name:` creates a new SubModel
+  with sensible defaults (horizontal / ranges / "Default"
+  buffer style / single placeholder "1-1" range), mirrors the
+  desktop SubModelsDialog's brand-new-row behaviour.
+- Bridge: `renameSubModelNamed:onModel:to:` sanitises via
+  `Model::SafeModelName`, refuses collisions, updates the
+  SubModel's name field directly + marks the parent dirty.
+- `SubModelListSheet` gained an Add row + per-row Rename
+  pencil. Delete still by swipe.
+- Geometry editing (ranges / lines / sub-buffer) intentionally
+  remains desktop-only — needs a real per-submodel grid /
+  range editor that's outside this slice.
+
+**Still deferred:**
+
+- SubModel geometry (ranges / lines / sub-buffer) editor.
+- Custom-model 2D grid (channel-per-cell) editor.
+
+### J-21.1 — PolyLine segments + corners + drop pattern ✓ 2026-05-15
+
+Closes the last deferred non-grid item from the PolyLine
+adapter parity audit. Custom-model 2D grid editor is the only
+remaining parked piece.
+
+**Per-segment node count:**
+
+- `GetNumSegments()` is `vertexCount - 1`; each segment gets a
+  `Segment N` row (key `PolySegmentSize<N>`) with a spin int.
+- Setter routes through `PolyLineModel::SetRawSegmentSize` and
+  flips `SetAutoDistribute(false)` so the user's manual count
+  survives — mirrors desktop's behaviour.
+
+**Per-corner enum (Leading / Trailing / Neither):**
+
+- One corner per vertex; `numSegments + 1` rows total. Each row
+  (`PolyCorner<N>`) is a 3-choice enum routing through
+  `SetCornerString` plus the desktop's enum-to-offset math:
+  Leading → lead 1.0 / trail 0.0; Trailing → lead 0.0 / trail
+  1.0; Neither → 0.5 / 0.5. First / last corners only touch
+  one side (the corresponding `SetLeadOffset` or
+  `SetTrailOffset`).
+
+**Drop Pattern:**
+
+- Was missing entirely on iPad. Added as a shared `IciclesDrops`
+  key (same as Icicles) since both `IciclesModel` and
+  `PolyLineModel` expose `SetDropPattern`. Bridge's setter
+  dispatches on the live type.
+
+### J-21 — Wrap-up of Layout Editor deferreds ✓ 2026-05-15
+
+Closes the long tail of Models-tab parity gaps. Three items off
+the deferred list; one (Custom-model 2D grid editor) stays
+parked because it needs its own slice.
+
+**Superstring per-index colour set:**
+
+- iPad bridge's `superStringColour<N>` setter was a no-op
+  (returned NO with a TODO). Replaced with a routed call to
+  `Model::SetSuperStringColour(int, xlColor)` which the upstream
+  Model API already exposes — the bridge just wasn't using it.
+- SwiftUI's `Colour N` row was a read-only Text label;
+  upgraded to a SwiftUI `ColorPicker` round-tripping through
+  the shared sRGB-pinned helpers. Per-index colour edits now
+  persist.
+
+**MultiPoint / PolyLine Indiv Start Nodes:**
+
+- Mirrors the desktop `ModelIndividualStartNodes` pattern.
+  When `GetNumStrings() > 1`, the model exposes a toggle that
+  surfaces N per-string start-node spin fields. Same shape as
+  the existing Indiv Start Channels surface from J-18.
+- Bridge: `ModelIndividualStartNodes` toggle key, plus per-
+  string `IndivStartNode<N>` keys. Routes through
+  `Model::SetHasIndivStartNodes` + `SetIndivStartNode`. Add
+  / pop entries to match the string count via the existing
+  `AddIndivStartNode` / `SetIndivStartNodesCount` mutators.
+
+**Custom Model basic props:**
+
+- Was: read-only matrix-dimension display (Width/Height/Depth).
+- Adds: # Strings (1..100), Indiv Start Nodes (shared pattern
+  with MultiPoint/PolyLine), Background Image (uses the
+  `imageFile` descriptor kind from J-20.2 so the existing
+  file-picker pipeline drives it), Background Scale % (10..500),
+  Background Brightness % (0..100). Each routes through the
+  matching `CustomModel::Set*` mutator.
+
+**Still deferred for a later slice:**
+
+- Custom-model 2D grid editor (the channel-number-per-cell
+  popup). Desktop's CustomModelDialog is a substantial 2D
+  editor; needs its own design pass. iPad shows the dims
+  read-only so users see what they have, edit on desktop.
+- PolyLine segment / corner editors — per-vertex segment node
+  counts and corner-style (Leading / Trailing / Half) enums.
+  Needs a per-vertex list UI; deferred.
+
 ### J-20.3 — Editable spin buttons ✓ 2026-05-15
 
 User feedback: the J-20 bare-Stepper rows showed no value —
