@@ -11,6 +11,10 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.09  May ??, 2026
+    -enh (cybercop23)           Enhance "Paste Effects" on model context menu to automatically insert the needed
+                                layers when pasting multi-layer effects so the paste does not bleed into
+                                subsequent models or groups. Also adds "Copy Layers/SubModels to Models" option
+                                to copy effects to multiple models at once.
     -bug (dkulp)                Audit/fix for fast-math hazard elsewhere: TempoDetector (could
                                 pick wrong tempo when autocorrelation peak was negative), ChordDetector
                                 key/chord scoring (latent), mapbox earcut polygon triangulation for OBJ
