@@ -37,6 +37,7 @@
 #include "../outputs/IPOutput.h"
 #include "../outputs/Output.h"
 #include "../outputs/OutputManager.h"
+#include "../utils/FloatChecks.h"
 #include "../utils/ip_utils.h"
 #include "../utils/NodeUtils.h"
 #include "../render/RenderContext.h"
@@ -3084,11 +3085,11 @@ void Model::DisplayModelOnWindow(IModelPreview* preview, xlGraphicsContext* ctx,
                 }
                 const auto& c = Nodes[n]->Coords[0];
                 float z = axis.x * c.screenX + axis.y * c.screenY + axis.z * c.screenZ;
-                // __builtin_isfinite: std::isfinite folds to `true` under
+                // xl::isfinite: std::isfinite folds to `true` under
                 // -ffinite-math-only (Release -ffast-math) — without this,
                 // NaN keys reach std::sort below and break strict weak
-                // ordering (UB; observed crashes).
-                if (!__builtin_isfinite(z)) {
+                // ordering (UB; observed crashes). See FloatChecks.h.
+                if (!xl::isfinite(z)) {
                     z = 0.0f;
                 }
                 keys.emplace_back(z, n);

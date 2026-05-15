@@ -21,6 +21,7 @@
 #include "../graphics/IModelPreview.h"
 #include "../graphics/xlGraphicsContext.h"
 #include "../graphics/xlGraphicsAccumulators.h"
+#include "../utils/FloatChecks.h"
 #include "../utils/VectorMath.h"
 #include "RulerObject.h"
 #include "../utils/AppCallbacks.h"
@@ -57,16 +58,16 @@ BoxedScreenLocation::BoxedScreenLocation(int points)
 
 void BoxedScreenLocation::Init() {
 
-    // __builtin_isfinite — std::isfinite is folded to `true` under
-    // -ffinite-math-only on Release; the __builtin_ form survives the
-    // optimization and actually catches corrupt persisted coords.
-    if (!__builtin_isfinite(worldPos_x)) {
+    // xl::isfinite — std::isfinite folds to `true` under -ffinite-math-only
+    // (Release -ffast-math); use the helper to keep the guard real. See
+    // `src-core/utils/FloatChecks.h`.
+    if (!xl::isfinite(worldPos_x)) {
         worldPos_x = 0.0F;
     }
-    if (!__builtin_isfinite(worldPos_y)) {
+    if (!xl::isfinite(worldPos_y)) {
         worldPos_y = 0.0F;
     }
-    if (!__builtin_isfinite(worldPos_z)) {
+    if (!xl::isfinite(worldPos_z)) {
         worldPos_z = 0.0F;
     }
 
