@@ -1347,7 +1347,12 @@ struct PreviewPaneView: UIViewRepresentable {
             // J-13 — when no model is under the touch, try view
             // objects. Selecting one flips the sidebar to the
             // Objects tab via the J-11 mutex.
-            if hit == nil {
+            // J-20.6 — but only when the user is NOT actively on
+            // the Models tab. Otherwise tapping empty space picks
+            // up things like the House mesh, which is on the
+            // Objects tab — the user expects an empty-space tap
+            // to simply deselect.
+            if hit == nil && viewModel.layoutEditorActiveTab != "models" {
                 if let voHit = bridge.pickViewObject(atScreenPoint: point,
                                                        viewSize: size,
                                                        for: viewModel.document) {

@@ -452,7 +452,8 @@ bool iPadRenderContext::SaveLayoutChanges() {
         _deletedViewObjects.empty() &&
         _dirtyBackgroundGroups.empty() &&
         _renamedGroups.empty() &&
-        _renamedViewObjects.empty()) {
+        _renamedViewObjects.empty() &&
+        _renamedModels.empty()) {
         return true;
     }
     if (_showDir.empty()) return false;
@@ -642,23 +643,26 @@ bool iPadRenderContext::SaveLayoutChanges() {
         pugi::xml_node serModel = serRoot.first_child();
         if (!serModel) continue;
 
-        // Find the existing <model name="..."/> in the on-disk file.
-        // SetName edits update the live `m->GetName()` first, so the
-        // serialized node carries the new name. To keep the on-disk
-        // entry findable across renames we'd need an old-name → new-
-        // name map; J-1 does not support model rename yet, so the
-        // name here is stable.
+        // J-18 — rename support. If this model was renamed in
+        // memory, the on-disk `<model>` still has the OLD name.
+        // Find by old name (taken from the renames map keyed by
+        // new) and let `insert_copy_before` swap it for the
+        // serialized copy (which already carries the new name).
+        std::string findName = modelName;
+        if (auto it = _renamedModels.find(modelName); it != _renamedModels.end()) {
+            findName = it->second;
+        }
         pugi::xml_node existing;
         for (auto n = modelsNode.first_child(); n; n = n.next_sibling()) {
             if (std::string_view(n.name()) != "model") continue;
-            if (modelName == n.attribute("name").as_string()) {
+            if (findName == n.attribute("name").as_string()) {
                 existing = n;
                 break;
             }
         }
         if (!existing) {
             spdlog::warn("iPadRenderContext::SaveLayoutChanges: <model name='{}'> not found in xml — appending",
-                         modelName);
+                         findName);
             modelsNode.append_copy(serModel);
             continue;
         }
@@ -948,6 +952,7 @@ bool iPadRenderContext::SaveLayoutChanges() {
     _deletedViewObjects.clear();
     _renamedGroups.clear();
     _renamedViewObjects.clear();
+    _renamedModels.clear();
     return true;
 }
 
@@ -1634,11 +1639,23 @@ TimingElement* iPadRenderContext::AddTimingElement(const std::string& name,
     return e;
 }
 
-bool iPadRenderContext::AbortRender(int /*maxTimeMs*/) {
-    if (_renderEngine) {
-        _renderEngine->SignalAbort();
+bool iPadRenderContext::AbortRender(int maxTimeMs) {
+    // Mirror the desktop's xLightsFrame::AbortRender contract: signal
+    // every in-flight render job to bail and then BLOCK until they
+    // actually finish (or the timeout elapses). Callers depend on
+    // this — once AbortRender returns, layout-mutation code is free
+    // to rewrite Model state without racing the render thread.
+    if (!_renderEngine) return true;
+    if (IsRenderDone()) return true;
+    _renderEngine->SignalAbort();
+    if (maxTimeMs <= 0) maxTimeMs = 60000;
+    int loops = maxTimeMs / 10;
+    int i = 0;
+    while (!IsRenderDone() && i < loops) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        ++i;
     }
-    return true;
+    return IsRenderDone();
 }
 
 bool iPadRenderContext::WasRenderAborted() const {

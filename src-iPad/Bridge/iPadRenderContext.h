@@ -397,6 +397,23 @@ public:
         }
         _renamedViewObjects[newName] = disk;
     }
+    // J-18 (model rename) — same pattern. Models don't have a
+    // "created in memory" path on iPad yet (Add Model goes
+    // through the regular CreateDefaultModel + immediate save),
+    // so no created-rename interaction to worry about.
+    void MarkModelRenamed(const std::string& oldName, const std::string& newName) {
+        if (oldName.empty() || newName.empty() || oldName == newName) return;
+        std::string disk = oldName;
+        if (auto it = _renamedModels.find(disk); it != _renamedModels.end()) {
+            disk = it->second;
+            _renamedModels.erase(it);
+        }
+        if (disk == newName) {
+            _renamedModels.erase(newName);
+            return;
+        }
+        _renamedModels[newName] = disk;
+    }
     // J-7 (group CRUD) — structural group lifecycle. A newly-
     // created group needs a fresh `<modelGroup>` element appended;
     // a deleted group needs its element removed. Plain edits go
@@ -465,7 +482,8 @@ public:
                !_createdViewObjects.empty() ||
                !_deletedViewObjects.empty() ||
                !_renamedGroups.empty() ||
-               !_renamedViewObjects.empty();
+               !_renamedViewObjects.empty() ||
+               !_renamedModels.empty();
     }
     bool SaveLayoutChanges();
     // Clear the dirty set without writing to disk — used after a
@@ -483,6 +501,7 @@ public:
         _deletedViewObjects.clear();
         _renamedGroups.clear();
         _renamedViewObjects.clear();
+        _renamedModels.clear();
     }
 
     // Phase J-2 — layout undo. Snapshot the common-properties
@@ -625,6 +644,10 @@ private:
     std::map<std::string, std::string> _renamedGroups;
     // J-17 — same plumbing for view-object renames.
     std::map<std::string, std::string> _renamedViewObjects;
+    // J-18 — same plumbing for model renames. Tracked separately
+    // because models live in `<models>` (and the patcher needs
+    // to find by old name) while groups live in `<modelGroups>`.
+    std::map<std::string, std::string> _renamedModels;
     // J-12 — view objects created in-memory that need full
     // serialization on next save (append to <view_objects>).
     std::set<std::string> _createdViewObjects;

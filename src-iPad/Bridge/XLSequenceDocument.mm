@@ -61,6 +61,13 @@
 #include "models/TwoPointScreenLocation.h"
 #include "XmlSerializer/XmlSerializingVisitor.h"
 #include "models/ArchesModel.h"
+#include "models/ThreePointScreenLocation.h"
+#include "models/ControllerConnection.h"
+#include "controllers/ControllerCaps.h"
+#include "models/ImageModel.h"
+#include "models/LabelModel.h"
+#include "models/MultiPointModel.h"
+#include "models/PolyLineModel.h"
 #include "models/CandyCaneModel.h"
 #include "models/ChannelBlockModel.h"
 #include "models/CircleModel.h"
@@ -89,6 +96,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -101,6 +109,15 @@
 #include <unordered_set>
 
 #import <os/proc.h>
+
+// Private helpers. extrasFor: takes a C++ Model* so it lives here
+// (not in the ObjC++-free header). Declared up front so it can be
+// called from any method below without ordering concerns.
+@interface XLSequenceDocument ()
+- (NSDictionary<NSString*, id>*)extrasFor:(Model*)m;
+- (NSDictionary<NSString*, id>*)controllerConnectionFor:(Model*)m;
+- (std::string)joinIndexedNames:(NSArray<NSString*>*)names;
+@end
 
 @implementation XLSequenceDocument {
     std::unique_ptr<iPadRenderContext> _context;
@@ -2624,6 +2641,258 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     return out;
 }
 
+// J-18 pass 3 — comma-join positional names for Model::Set
+// StrandNames / SetNodeNames. Commas inside an entry are
+// stripped (they'd corrupt the wire format). Empty slots stay
+// empty so the index ordering is preserved.
+- (std::string)joinIndexedNames:(NSArray<NSString*>*)names {
+    std::string out;
+    bool first = true;
+    for (NSString* s in names ?: @[]) {
+        std::string entry = s.UTF8String;
+        entry.erase(std::remove(entry.begin(), entry.end(), ','), entry.end());
+        if (!first) out += ',';
+        out += entry;
+        first = false;
+    }
+    return out;
+}
+
+// J-20 — Controller Connection sub-dictionary. Mirrors desktop's
+// ModelPropertyAdapter::AddControllerProperties. Everything the
+// SwiftUI Controller Connection section renders comes from this
+// one dictionary, including:
+//   - protocol list + current selection
+//   - port number + max (gated on protocol type via ControllerCaps)
+//   - smart-remote subsection (pixel protocols + caps say so)
+//   - per-pixel toggle/value pairs (null pixels, brightness,
+//     gamma, color order, direction, group count, zig-zag,
+//     smart Ts) — each entry exposes both the `Active` flag and
+//     the value plus a `supports` flag so the UI can skip
+//     unavailable controls entirely.
+//   - serial-only DMX channel + Speed enum
+//   - PWM-only gamma + brightness
+// "Most ports we expect" mirrors the desktop constant when no
+// caps are available — keep the iPad in sync if that changes.
+#define IPAD_MOST_CONTROLLER_PORTS 128
+- (NSDictionary<NSString*, id>*)controllerConnectionFor:(Model*)m {
+    if (!m) return @{};
+
+    NSMutableDictionary<NSString*, id>* out = [NSMutableDictionary dictionary];
+    ControllerCaps* caps = m->GetControllerCaps();
+    std::string protocol = m->GetControllerProtocol();
+
+    // --- Port ---
+    int portMax = IPAD_MOST_CONTROLLER_PORTS;
+    if (caps != nullptr && !protocol.empty()) {
+        if (m->IsSerialProtocol())            portMax = caps->GetMaxSerialPort();
+        else if (m->IsPixelProtocol())        portMax = caps->GetMaxPixelPort();
+        else if (m->IsLEDPanelMatrixProtocol()) portMax = caps->GetMaxLEDPanelMatrixPort();
+        else if (m->IsVirtualMatrixProtocol()) portMax = caps->GetMaxVirtualMatrixPort();
+        else if (m->IsPWMProtocol())           portMax = caps->GetMaxPWMPort();
+    }
+    out[@"port"]    = @(m->GetControllerPort(1));
+    out[@"portMin"] = @0;
+    out[@"portMax"] = @(portMax);
+
+    // --- Protocol list + selection ---
+    std::vector<std::string> cp;
+    int protoIdx = -1;
+    m->GetControllerProtocols(cp, protoIdx);
+    NSMutableArray<NSString*>* protoOpts = [NSMutableArray array];
+    for (const auto& s : cp) {
+        [protoOpts addObject:[NSString stringWithUTF8String:s.c_str()]];
+    }
+    out[@"protocolOptions"] = protoOpts;
+    out[@"protocolIndex"]   = @(protoIdx);
+    out[@"protocol"]        = [NSString stringWithUTF8String:protocol.c_str()];
+
+    bool isPixel  = m->IsPixelProtocol();
+    bool isSerial = m->IsSerialProtocol();
+    bool isPWM    = m->IsPWMProtocol();
+    out[@"isPixelProtocol"]  = @(isPixel  ? YES : NO);
+    out[@"isSerialProtocol"] = @(isSerial ? YES : NO);
+    out[@"isPWMProtocol"]    = @(isPWM    ? YES : NO);
+
+    // --- Smart Remote (pixel + caps>0) ---
+    if (isPixel) {
+        int smartRemoteCount = (caps != nullptr) ? caps->GetSmartRemoteCount() : 15;
+        out[@"smartRemoteCount"] = @(smartRemoteCount);
+        if (smartRemoteCount > 0) {
+            bool useSR = m->IsCtrlPropertySet(ControllerConnection::USE_SMART_REMOTE);
+            out[@"useSmartRemote"] = @(useSR ? YES : NO);
+            if (useSR) {
+                if (m->GetSmartRemote() != 0) {
+                    auto srTypes = m->GetSmartRemoteTypes();
+                    NSMutableArray<NSString*>* typeOpts = [NSMutableArray array];
+                    for (const auto& t : srTypes) {
+                        [typeOpts addObject:[NSString stringWithUTF8String:t.c_str()]];
+                    }
+                    out[@"smartRemoteTypeOptions"] = typeOpts;
+                    out[@"smartRemoteTypeIndex"]   = @(m->GetSmartRemoteTypeIndex(m->GetSmartRemoteType()));
+                    out[@"smartRemoteType"]        =
+                        [NSString stringWithUTF8String:m->GetSmartRemoteType().c_str()];
+                }
+                NSMutableArray<NSString*>* srValues = [NSMutableArray array];
+                for (const auto& v : m->GetSmartRemoteValues(smartRemoteCount)) {
+                    [srValues addObject:[NSString stringWithUTF8String:v.c_str()]];
+                }
+                out[@"smartRemoteOptions"] = srValues;
+                out[@"smartRemoteIndex"]   = @(m->GetSmartRemote() - 1);
+                if (m->GetNumPhysicalStrings() > 1) {
+                    out[@"srMaxCascade"]      = @(m->GetSRMaxCascade());
+                    out[@"srMaxCascadeMax"]   = @(smartRemoteCount);
+                    out[@"srCascadeOnPort"]   = @(m->GetSRCascadeOnPort() ? YES : NO);
+                }
+            }
+        }
+    }
+
+    // --- Serial: DMX channel + Speed ---
+    if (isSerial) {
+        int dmxChannelMax = (caps != nullptr) ? caps->GetMaxSerialPortChannels() : 512;
+        out[@"dmxChannel"]    = @(m->GetControllerDMXChannel());
+        out[@"dmxChannelMax"] = @(dmxChannelMax);
+        if (protoIdx >= 0 && protoIdx < (int)cp.size() &&
+            (cp[protoIdx] != "dmx" || protocol.find("DMX") != std::string::npos)) {
+            std::vector<std::string> cs;
+            int speedIdx = -1;
+            m->GetSerialProtocolSpeeds(cp[protoIdx], cs, speedIdx);
+            NSMutableArray<NSString*>* speeds = [NSMutableArray array];
+            for (const auto& s : cs) {
+                [speeds addObject:[NSString stringWithUTF8String:s.c_str()]];
+            }
+            out[@"speedOptions"] = speeds;
+            out[@"speedIndex"]   = @(speedIdx);
+        }
+    }
+
+    // --- PWM: gamma + brightness ---
+    if (isPWM) {
+        out[@"pwmGamma"]      = @((double)m->GetControllerGamma());
+        out[@"pwmBrightness"] = @(m->GetControllerBrightness());
+    }
+
+    // --- Pixel: per-property toggles. `supports` keys gate
+    // whether the UI renders the row at all; `active` / value
+    // pairs drive the toggle + sub-field.
+    if (isPixel) {
+        auto supports = [&](bool defaultYes) -> NSNumber* { return @(defaultYes ? YES : NO); };
+        out[@"supportsStartNulls"]   = supports(caps == nullptr || caps->SupportsPixelPortNullPixels());
+        out[@"startNullsActive"]     = @(m->IsCtrlPropertySet(ControllerConnection::START_NULLS_ACTIVE) ? YES : NO);
+        out[@"startNulls"]           = @(m->GetControllerStartNulls());
+
+        out[@"supportsEndNulls"]     = supports(caps == nullptr || caps->SupportsPixelPortEndNullPixels());
+        out[@"endNullsActive"]       = @(m->IsCtrlPropertySet(ControllerConnection::END_NULLS_ACTIVE) ? YES : NO);
+        out[@"endNulls"]             = @(m->GetControllerEndNulls());
+
+        out[@"supportsBrightness"]   = supports(caps == nullptr || caps->SupportsPixelPortBrightness());
+        out[@"brightnessActive"]     = @(m->IsCtrlPropertySet(ControllerConnection::BRIGHTNESS_ACTIVE) ? YES : NO);
+        out[@"brightness"]           = @(m->GetControllerBrightness());
+
+        out[@"supportsGamma"]        = supports(caps == nullptr || caps->SupportsPixelPortGamma());
+        out[@"gammaActive"]          = @(m->IsCtrlPropertySet(ControllerConnection::GAMMA_ACTIVE) ? YES : NO);
+        out[@"gamma"]                = @((double)m->GetControllerGamma());
+
+        out[@"supportsColorOrder"]   = supports(caps == nullptr || caps->SupportsPixelPortColourOrder());
+        out[@"colorOrderActive"]     = @(m->IsCtrlPropertySet(ControllerConnection::COLOR_ORDER_ACTIVE) ? YES : NO);
+        NSMutableArray<NSString*>* coOpts = [NSMutableArray array];
+        for (const auto& s : Model::CONTROLLER_COLORORDER) {
+            [coOpts addObject:[NSString stringWithUTF8String:s.c_str()]];
+        }
+        out[@"colorOrderOptions"]    = coOpts;
+        std::string co = m->GetControllerColorOrder();
+        int coIdx = 0;
+        for (int i = 0; i < (int)Model::CONTROLLER_COLORORDER.size(); ++i) {
+            if (Model::CONTROLLER_COLORORDER[i] == co) { coIdx = i; break; }
+        }
+        out[@"colorOrderIndex"]      = @(coIdx);
+
+        out[@"supportsDirection"]    = supports(caps == nullptr || caps->SupportsPixelPortDirection());
+        out[@"directionActive"]      = @(m->IsCtrlPropertySet(ControllerConnection::REVERSE_ACTIVE) ? YES : NO);
+        out[@"directionOptions"]     = @[@"Forward", @"Reverse"];
+        out[@"directionIndex"]       = @(m->GetControllerReverse());
+
+        out[@"supportsGroupCount"]   = supports(caps == nullptr || caps->SupportsPixelPortGrouping());
+        out[@"groupCountActive"]     = @(m->IsCtrlPropertySet(ControllerConnection::GROUP_COUNT_ACTIVE) ? YES : NO);
+        out[@"groupCount"]           = @(m->GetControllerGroupCount());
+
+        out[@"supportsZigZag"]       = supports(caps == nullptr || caps->SupportsPixelZigZag());
+        out[@"zigZagActive"]         = @(m->IsCtrlPropertySet(ControllerConnection::ZIG_ZAG_ACTIVE) ? YES : NO);
+        out[@"zigZag"]               = @(m->GetControllerZigZag());
+
+        out[@"supportsSmartTs"]      = supports(caps == nullptr || caps->SupportsTs());
+        out[@"smartTsActive"]        = @(m->IsCtrlPropertySet(ControllerConnection::TS_ACTIVE) ? YES : NO);
+        out[@"smartTs"]              = @(m->GetSmartTs());
+    }
+
+    return out;
+}
+
+// J-18 — read-only popup summaries. Surface counts + entries so
+// SwiftUI can render a row per category and a tap-to-view sheet.
+- (NSDictionary<NSString*, id>*)extrasFor:(Model*)m {
+    if (!m) return @{};
+
+    NSMutableArray<NSString*>* faceNames = [NSMutableArray array];
+    for (const auto& [faceName, _attrs] : m->GetFaceInfo()) {
+        [faceNames addObject:[NSString stringWithUTF8String:faceName.c_str()]];
+    }
+
+    NSMutableArray<NSString*>* stateNames = [NSMutableArray array];
+    for (const auto& [stateName, _attrs] : m->GetStateInfo()) {
+        [stateNames addObject:[NSString stringWithUTF8String:stateName.c_str()]];
+    }
+
+    NSMutableArray<NSString*>* submodelNames = [NSMutableArray array];
+    for (Model* sm : m->GetSubModels()) {
+        if (!sm) continue;
+        [submodelNames addObject:[NSString stringWithUTF8String:sm->GetName().c_str()]];
+    }
+
+    NSMutableArray<NSString*>* aliasNames = [NSMutableArray array];
+    for (const std::string& a : m->GetAliases()) {
+        [aliasNames addObject:[NSString stringWithUTF8String:a.c_str()]];
+    }
+
+    NSMutableArray<NSString*>* strandNames = [NSMutableArray array];
+    int numStrands = m->GetNumStrands();
+    for (int i = 0; i < numStrands; ++i) {
+        std::string s = m->GetStrandName(i, true);
+        [strandNames addObject:[NSString stringWithUTF8String:s.c_str()]];
+    }
+
+    NSMutableArray<NSString*>* nodeNames = [NSMutableArray array];
+    size_t nodeCount = m->GetNodeCount();
+    for (size_t i = 0; i < nodeCount; ++i) {
+        std::string s = m->GetNodeName(i, true);
+        [nodeNames addObject:[NSString stringWithUTF8String:s.c_str()]];
+    }
+
+    NSMutableArray<NSString*>* inGroups = [NSMutableArray array];
+    if (_context && _context->HasModelManager()) {
+        auto groups = _context->GetModelManager().GetGroupsContainingModel(m);
+        for (const std::string& g : groups) {
+            [inGroups addObject:[NSString stringWithUTF8String:g.c_str()]];
+        }
+    }
+
+    return @{
+        @"faceCount":       @(faceNames.count),
+        @"faceNames":       faceNames,
+        @"stateCount":      @(stateNames.count),
+        @"stateNames":      stateNames,
+        @"submodelCount":   @(submodelNames.count),
+        @"submodelNames":   submodelNames,
+        @"aliasCount":      @(aliasNames.count),
+        @"aliasNames":      aliasNames,
+        @"hasDimmingCurve": @(m->GetDimmingCurve() != nullptr ? YES : NO),
+        @"strandNames":     strandNames,
+        @"nodeNames":       nodeNames,
+        @"inModelGroups":   inGroups,
+    };
+}
+
 - (nullable NSDictionary<NSString*, id>*)modelLayoutSummary:(NSString*)name {
     if (!_context || !_context->HasModelManager() || !name) return nil;
     Model* m = _context->GetModelManager()[std::string([name UTF8String])];
@@ -2635,6 +2904,186 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     NSString* layoutGroup = [NSString stringWithUTF8String:m->GetLayoutGroup().c_str()];
     NSString* controllerName = [NSString stringWithUTF8String:m->GetControllerName().c_str()];
     NSString* displayAs = [NSString stringWithUTF8String:m->GetDisplayAsString().c_str()];
+
+    // J-19 — controller picker options. Mirrors desktop's
+    // ModelPropertyAdapter::AddProperties controller-list build:
+    // "Use Start Channel" + "No Controller" + every auto-layout
+    // controller name. Empty controllerName == "Use Start
+    // Channel"; "No Controller" is its own literal value.
+    NSMutableArray<NSString*>* controllerOptions = [NSMutableArray array];
+    [controllerOptions addObject:@"Use Start Channel"];
+    [controllerOptions addObject:@"No Controller"];
+    for (const auto& n : _context->GetOutputManager().GetAutoLayoutControllerNames()) {
+        [controllerOptions addObject:[NSString stringWithUTF8String:n.c_str()]];
+    }
+    NSString* controllerSelection;
+    if (m->GetControllerName().empty()) {
+        controllerSelection = @"Use Start Channel";
+    } else {
+        // Mirrors the desktop value verbatim — both "No Controller"
+        // and named controllers round-trip through GetControllerName.
+        controllerSelection = controllerName;
+    }
+    bool startChannelEditable = m->GetControllerName().empty();
+
+    // J-20 — Low Definition Factor: applies to a subset of model
+    // types (`SupportsLowDefinitionRender()`). When unsupported,
+    // SwiftUI doesn't render the row at all.
+    bool supportsLowDef = m->SupportsLowDefinitionRender();
+    int lowDefFactor    = m->GetLowDefFactor();
+
+    // J-20 — Shadow Model For: target-model picker (any non-group
+    // model other than self). Empty string means "not a shadow".
+    NSMutableArray<NSString*>* shadowOptions = [NSMutableArray array];
+    [shadowOptions addObject:@""];  // "(none)" sentinel
+    NSString* shadowSelection = [NSString stringWithUTF8String:m->GetShadowModelFor().c_str()];
+    for (const auto& [otherName, other] : _context->GetModelManager().GetModels()) {
+        if (!other || other == m) continue;
+        if (other->GetDisplayAs() == DisplayAsType::ModelGroup) continue;
+        [shadowOptions addObject:[NSString stringWithUTF8String:otherName.c_str()]];
+    }
+
+    // J-20.2 — DisableUnusedProperties parity. Each model type's
+    // adapter on the desktop disables specific property-grid
+    // entries that don't apply. iPad surfaces a `disabledKeys`
+    // set so the SwiftUI side renders those rows grayed out / non-
+    // interactive without having to enumerate per-type cases in
+    // the UI layer. Keys are the iPad-bridge names, not the
+    // desktop wxPropertyGrid IDs.
+    NSMutableArray<NSString*>* disabledKeys = [NSMutableArray array];
+    DisplayAsType dispAs = m->GetDisplayAs();
+    if (dispAs == DisplayAsType::Image || dispAs == DisplayAsType::Label) {
+        // Image / Label: no popup data + no per-string-properties.
+        [disabledKeys addObjectsFromArray:@[@"faces", @"states", @"submodels",
+                                            @"strands", @"nodes",
+                                            @"stringType", @"stringColor",
+                                            @"rgbwHandlingIndex",
+                                            @"dimmingCurve"]];
+    }
+    if (dispAs == DisplayAsType::Image) {
+        // ImagePropertyAdapter::DisableUnusedProperties also
+        // disables ModelPixelSize.
+        [disabledKeys addObject:@"pixelSize"];
+    }
+    if (dispAs == DisplayAsType::Label) {
+        // LabelPropertyAdapter::DisableUnusedProperties disables
+        // pixel style + black transparency in addition to the
+        // shared list.
+        [disabledKeys addObjectsFromArray:@[@"pixelStyle", @"blackTransparency"]];
+    }
+    if (dispAs == DisplayAsType::ChannelBlock) {
+        // ChannelBlock has no real "string type" because each
+        // channel is its own output.
+        [disabledKeys addObjectsFromArray:@[@"stringType", @"stringColor", @"rgbwHandlingIndex"]];
+    }
+
+    // J-19 — Size/Location surface depends on the screen-location
+    // class. Boxed = X/Y/Z + ScaleX/Y/Z + RotateX/Y/Z. TwoPoint =
+    // World + X1/Y1/Z1 + X2/Y2/Z2. ThreePoint = TwoPoint +
+    // ModelHeight (+ Shear if supported) + RotateX. SwiftUI picks
+    // the right field set based on `screenLocationKind`.
+    auto& scrLoc = m->GetModelScreenLocation();
+    NSString* screenLocKind = @"boxed";
+    NSDictionary* screenLocFields = @{};
+    if (auto* boxed = dynamic_cast<BoxedScreenLocation*>(&scrLoc)) {
+        screenLocKind = @"boxed";
+        screenLocFields = @{
+            @"worldX":  @((double)boxed->GetWorldPos_X()),
+            @"worldY":  @((double)boxed->GetWorldPos_Y()),
+            @"worldZ":  @((double)boxed->GetWorldPos_Z()),
+            @"scaleX":  @((double)boxed->GetScaleX()),
+            @"scaleY":  @((double)boxed->GetScaleY()),
+            @"scaleZ":  @((double)boxed->GetScaleZ()),
+            @"rotateX": @((double)boxed->GetRotateX()),
+            @"rotateY": @((double)boxed->GetRotateY()),
+            @"rotateZ": @((double)boxed->GetRotateZ()),
+            @"supportsZScaling": @(boxed->GetSupportsZScaling() ? YES : NO),
+        };
+    } else if (auto* three = dynamic_cast<ThreePointScreenLocation*>(&scrLoc)) {
+        screenLocKind = @"threePoint";
+        screenLocFields = @{
+            @"worldX":   @((double)three->GetWorldPos_X()),
+            @"worldY":   @((double)three->GetWorldPos_Y()),
+            @"worldZ":   @((double)three->GetWorldPos_Z()),
+            @"x1":       @((double)three->GetWorldPos_X()),
+            @"y1":       @((double)three->GetWorldPos_Y()),
+            @"z1":       @((double)three->GetWorldPos_Z()),
+            @"x2":       @((double)(three->GetX2() + three->GetWorldPos_X())),
+            @"y2":       @((double)(three->GetY2() + three->GetWorldPos_Y())),
+            @"z2":       @((double)(three->GetZ2() + three->GetWorldPos_Z())),
+            @"modelHeight":  @((double)three->GetHeight()),
+            @"supportsShear":@(three->GetSupportsShear() ? YES : NO),
+            @"modelShear":   @((double)three->GetShear()),
+            @"rotateX":      @((double)three->GetRotateX()),
+        };
+    } else if (auto* two = dynamic_cast<TwoPointScreenLocation*>(&scrLoc)) {
+        screenLocKind = @"twoPoint";
+        screenLocFields = @{
+            @"worldX":  @((double)two->GetWorldPos_X()),
+            @"worldY":  @((double)two->GetWorldPos_Y()),
+            @"worldZ":  @((double)two->GetWorldPos_Z()),
+            @"x1":      @((double)two->GetWorldPos_X()),
+            @"y1":      @((double)two->GetWorldPos_Y()),
+            @"z1":      @((double)two->GetWorldPos_Z()),
+            @"x2":      @((double)(two->GetX2() + two->GetWorldPos_X())),
+            @"y2":      @((double)(two->GetY2() + two->GetWorldPos_Y())),
+            @"z2":      @((double)(two->GetZ2() + two->GetWorldPos_Z())),
+        };
+    } else {
+        // PolyPoint and other custom screen-location classes: just
+        // surface world position. Per-vertex editing already lives
+        // in the canvas gesture path.
+        screenLocKind = @"other";
+        screenLocFields = @{
+            @"worldX": @((double)scrLoc.GetWorldPos_X()),
+            @"worldY": @((double)scrLoc.GetWorldPos_Y()),
+            @"worldZ": @((double)scrLoc.GetWorldPos_Z()),
+        };
+    }
+
+    // J-19 — String Properties dynamic surface (mirrors desktop's
+    // ModelPropertyAdapter::AddProperties): which sub-controls
+    // appear under String Type depends on the type itself.
+    std::string stringType = m->GetStringType();
+    NSString* stringColorMode = @"none";    // single | superstring | none
+    NSString* stringColorHex  = @"#FF0000";  // surfaced when mode == single
+    int superStringCount      = 0;
+    NSMutableArray<NSString*>* superStringColours = [NSMutableArray array];
+    if (stringType == "Single Color" ||
+        stringType == "Single Color Intensity" ||
+        stringType == "Node Single Color") {
+        stringColorMode = @"single";
+        xlColor c(0, 0, 0);
+        bool resolved = false;
+        if (stringType == "Single Color Red")  { c = xlColor(255, 0, 0); resolved = true; }
+        // Desktop derives the displayed colour from the type when
+        // it's a fixed-name "Single Color X" string and from
+        // GetCustomColor() otherwise — same logic here.
+        if (!resolved) {
+            c = m->GetCustomColor();
+        }
+        stringColorHex = [NSString stringWithFormat:@"#%02X%02X%02X", c.red, c.green, c.blue];
+    } else if (stringType == "Superstring") {
+        stringColorMode = @"superstring";
+        if (m->GetSuperStringColours().empty()) {
+            m->InitSuperStringColours();
+        }
+        const auto& ssc = m->GetSuperStringColours();
+        superStringCount = (int)ssc.size();
+        for (const auto& c : ssc) {
+            [superStringColours addObject:
+                [NSString stringWithFormat:@"#%02X%02X%02X", c.red, c.green, c.blue]];
+        }
+    }
+    NSArray<NSString*>* rgbwHandlingOptions =
+        @[@"R=G=B -> W", @"RGB Only", @"White Only", @"Advanced", @"White On All"];
+    int rgbwHandlingIndex = m->GetRGBWHandlingType();
+    if (rgbwHandlingIndex < 0) rgbwHandlingIndex = 0;
+    if (rgbwHandlingIndex >= (int)rgbwHandlingOptions.count) {
+        rgbwHandlingIndex = 0;
+    }
+    bool rgbwHandlingEnabled = !(m->HasSingleChannel(stringType) ||
+                                  m->GetNodeChannelCount(stringType) < 4);
 
     // J-8 (desktop-order property sections) — pixel-style options
     // mirror desktop's PIXEL_STYLES_VALUES; index matches
@@ -2657,6 +3106,45 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
         @"BRGW Nodes", @"BGRW Nodes", @"RGBWW Nodes",
     ];
 
+    // J-18 — Start Channel / Indiv Start Chans / Model Chain.
+    // Per-string indiv channels: when the toggle is off, show
+    // only the model-wide start channel; when on, expose one
+    // entry per string. Lazy-fill to numStrings so the UI can
+    // always assume the array length matches.
+    NSMutableArray<NSString*>* indivChannels = [NSMutableArray array];
+    int numStrings = m->GetNumStrings();
+    if (m->HasIndividualStartChannels()) {
+        for (int i = 0; i < numStrings; ++i) {
+            std::string ch = m->GetIndividualStartChannel(i);
+            if (ch.empty()) ch = m->ComputeStringStartChannel(i);
+            [indivChannels addObject:[NSString stringWithUTF8String:ch.c_str()]];
+        }
+    }
+    // Model Chain options: every OTHER model on the same
+    // controller + protocol + port, plus the always-present
+    // "Beginning" sentinel. Only meaningful when controller +
+    // protocol + port are set; otherwise the picker is hidden.
+    NSMutableArray<NSString*>* chainOpts = [NSMutableArray array];
+    [chainOpts addObject:@"Beginning"];
+    bool chainApplicable = !m->GetControllerName().empty() &&
+                           !m->GetControllerProtocol().empty() &&
+                           m->GetControllerPort() != 0;
+    if (chainApplicable) {
+        const std::string myCtrl = m->GetControllerName();
+        const std::string myProto = m->GetControllerProtocol();
+        const int myPort = m->GetControllerPort();
+        for (const auto& [otherName, other] : _context->GetModelManager().GetModels()) {
+            if (!other || other == m) continue;
+            if (other->GetDisplayAs() == DisplayAsType::ModelGroup) continue;
+            if (other->GetDisplayAs() == DisplayAsType::SubModel) continue;
+            if (other->GetControllerName() != myCtrl) continue;
+            if (other->GetControllerProtocol() != myProto) continue;
+            if (other->GetControllerPort() != myPort) continue;
+            [chainOpts addObject:[NSString stringWithUTF8String:otherName.c_str()]];
+        }
+    }
+    std::string mc = m->GetModelChain();
+    if (mc.empty()) mc = "Beginning";
     return @{
         @"name":                 [NSString stringWithUTF8String:m->GetName().c_str()],
         @"displayAs":            displayAs,
@@ -2672,10 +3160,35 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
         @"locked":               @(loc.IsLocked() ? YES : NO),
         @"layoutGroup":          layoutGroup,
         @"controllerName":       controllerName,
+        // J-19 — controller picker (replaces the free-text field).
+        @"controllerSelection":  controllerSelection,
+        @"controllerOptions":    controllerOptions,
+        @"startChannelEditable": @(startChannelEditable ? YES : NO),
+        // J-20 — model-header extras.
+        @"supportsLowDefinition": @(supportsLowDef ? YES : NO),
+        @"lowDefinitionFactor":   @(lowDefFactor),
+        @"shadowModelFor":        shadowSelection,
+        @"shadowModelOptions":    shadowOptions,
+        @"disabledKeys":          disabledKeys,
         @"startChannel":         @((unsigned long long)m->GetFirstChannel()),
         @"endChannel":           @((unsigned long long)m->GetLastChannel()),
         @"stringCount":          @(m->GetNumPhysicalStrings()),
         @"nodeCount":            @((unsigned long long)m->GetNodeCount()),
+        // J-18 — Controller Connection editable fields.
+        @"modelStartChannel":          [NSString stringWithUTF8String:m->GetModelStartChannel().c_str()],
+        @"hasIndividualStartChannels": @(m->HasIndividualStartChannels() ? YES : NO),
+        @"individualStartChannels":    indivChannels,
+        @"hasMultipleStrings":         @(!Model::HasOneString(m->GetDisplayAs()) ? YES : NO),
+        @"numStrings":                 @(numStrings),
+        @"modelChain":                 [NSString stringWithUTF8String:mc.c_str()],
+        @"modelChainOptions":          chainOpts,
+        @"modelChainApplicable":       @(chainApplicable ? YES : NO),
+        // J-18 — read-only summaries for the popup-dialog
+        // surfaces (Faces / States / SubModels / Aliases /
+        // Strand-Node Names / Dimming / In Model Groups). Each
+        // exposes a count + the names list so SwiftUI can show
+        // "N defined" + a tap-to-view list.
+        @"extras":                     [self extrasFor:m],
         // J-8 — Appearance section.
         @"active":               @(m->IsActive() ? YES : NO),
         @"pixelSize":            @(m->GetPixelSize()),
@@ -2687,8 +3200,28 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
         // J-8 — String Properties section.
         @"stringType":           [NSString stringWithUTF8String:m->GetStringType().c_str()],
         @"stringTypeOptions":    stringTypes,
+        // J-19 — dynamic per-type fields (mirrors desktop):
+        // mode tells SwiftUI which controls to render under
+        // String Type; 'single' = one Color row, 'superstring'
+        // = colour count + per-index colour rows, 'none' =
+        // disabled placeholder.
+        @"stringColorMode":      stringColorMode,
+        @"stringColor":          stringColorHex,
+        @"superStringCount":     @(superStringCount),
+        @"superStringColours":   superStringColours,
+        @"rgbwHandlingOptions":  rgbwHandlingOptions,
+        @"rgbwHandlingIndex":    @(rgbwHandlingIndex),
+        @"rgbwHandlingEnabled":  @(rgbwHandlingEnabled ? YES : NO),
         // J-8 — top-of-pane: free-form description.
         @"description":          [NSString stringWithUTF8String:m->description.c_str()],
+        // J-19 — Size/Location surface keyed by screen-location
+        // class. SwiftUI picks the right field set based on
+        // `screenLocationKind`.
+        @"screenLocationKind":   screenLocKind,
+        @"screenLocationFields": screenLocFields,
+        // J-20 — Controller Connection sub-dictionary. See
+        // controllerConnectionFor: above for the key shape.
+        @"controllerConnection": [self controllerConnectionFor:m],
     };
 }
 
@@ -2696,6 +3229,12 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
                            key:(NSString*)key
                          value:(id)value {
     if (!_context || !name || !key) return NO;
+    // Abort any in-flight render before touching Model state — the
+    // render workers hold raw Model* references and racing them
+    // produces hard-to-reproduce crashes (matches desktop
+    // LayoutPanel.cpp's AbortRender() guard before every property
+    // edit). Cheap when no render is active.
+    _context->AbortRender(5000);
     Model* m = _context->GetModelManager()[std::string([name UTF8String])];
     if (!m) return NO;
 
@@ -2742,6 +3281,75 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
         double v = asDouble(&typeOk);
         if (!typeOk) return NO;
         if ((float)v != loc.GetDcenterPos()) { m->SetDcenterPos((float)v); changed = YES; }
+    }
+    // J-19 — Boxed-class size/location fields. Each maps to the
+    // matching ScreenLocationPropertyHelper case on desktop.
+    else if (keyStr == "worldX") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((float)v != loc.GetWorldPos_X()) { loc.SetWorldPos_X((float)v); changed = YES; }
+    } else if (keyStr == "worldY") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((float)v != loc.GetWorldPos_Y()) { loc.SetWorldPos_Y((float)v); changed = YES; }
+    } else if (keyStr == "worldZ") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((float)v != loc.GetWorldPos_Z()) { loc.SetWorldPos_Z((float)v); changed = YES; }
+    } else if (keyStr == "scaleX" || keyStr == "scaleY" || keyStr == "scaleZ") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        auto* boxed = dynamic_cast<BoxedScreenLocation*>(&loc);
+        if (boxed) {
+            if (keyStr == "scaleX" && (float)v != boxed->GetScaleX()) { boxed->SetScaleX((float)v); changed = YES; }
+            else if (keyStr == "scaleY" && (float)v != boxed->GetScaleY()) { boxed->SetScaleY((float)v); changed = YES; }
+            else if (keyStr == "scaleZ" && (float)v != boxed->GetScaleZ()) { boxed->SetScaleZ((float)v); changed = YES; }
+        }
+    }
+    // J-19 — Two/Three-point endpoint setters. X1/Y1/Z1 moves
+    // the world anchor and back-shifts X2/Y2/Z2 to keep the
+    // far endpoint stationary (same logic as desktop's
+    // ScreenLocationPropertyHelper::OnPropertyGridChange).
+    // X2/Y2/Z2 reposition the far endpoint directly.
+    else if (keyStr == "x1" || keyStr == "y1" || keyStr == "z1") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        auto* two = dynamic_cast<TwoPointScreenLocation*>(&loc);
+        if (two) {
+            if (keyStr == "x1") {
+                float oldWorld = two->GetWorldPos_X();
+                two->SetWorldPos_X((float)v);
+                two->SetX2(two->GetX2() + oldWorld - (float)v);
+            } else if (keyStr == "y1") {
+                float oldWorld = two->GetWorldPos_Y();
+                two->SetWorldPos_Y((float)v);
+                two->SetY2(two->GetY2() + oldWorld - (float)v);
+            } else {
+                float oldWorld = two->GetWorldPos_Z();
+                two->SetWorldPos_Z((float)v);
+                two->SetZ2(two->GetZ2() + oldWorld - (float)v);
+            }
+            changed = YES;
+        }
+    } else if (keyStr == "x2" || keyStr == "y2" || keyStr == "z2") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        auto* two = dynamic_cast<TwoPointScreenLocation*>(&loc);
+        if (two) {
+            if (keyStr == "x2")      two->SetX2((float)v - two->GetWorldPos_X());
+            else if (keyStr == "y2") two->SetY2((float)v - two->GetWorldPos_Y());
+            else                     two->SetZ2((float)v - two->GetWorldPos_Z());
+            changed = YES;
+        }
+    } else if (keyStr == "modelHeight") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        auto* three = dynamic_cast<ThreePointScreenLocation*>(&loc);
+        if (three) {
+            // Desktop clamps |height| ≥ 0.01 — same here.
+            float h = (float)v;
+            if (std::abs(h) < 0.01f) h = h < 0 ? -0.01f : 0.01f;
+            if (three->GetHeight() != h) { three->SetHeight(h); changed = YES; }
+        }
+    } else if (keyStr == "modelShear") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        auto* three = dynamic_cast<ThreePointScreenLocation*>(&loc);
+        if (three && three->GetSupportsShear() && three->GetShear() != (float)v) {
+            three->SetShear((float)v); changed = YES;
+        }
     } else if (keyStr == "width") {
         double v = asDouble(&typeOk);
         if (!typeOk) return NO;
@@ -2780,6 +3388,31 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
         if (!typeOk) return NO;
         std::string newCtrl = [s UTF8String];
         if (newCtrl != m->GetControllerName()) { m->SetControllerName(newCtrl); changed = YES; }
+    } else if (keyStr == "lowDefinitionFactor") {
+        // J-20 — only set on models that support it; otherwise
+        // the row isn't rendered so we shouldn't get here.
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        int iv = (int)v;
+        if (iv != m->GetLowDefFactor() && m->SupportsLowDefinitionRender()) {
+            m->SetLowDefFactor(iv); changed = YES;
+        }
+    } else if (keyStr == "shadowModelFor") {
+        NSString* s = asString(&typeOk); if (!typeOk) return NO;
+        std::string newShadow = s.UTF8String;
+        if (newShadow != m->GetShadowModelFor()) {
+            m->SetShadowModelFor(newShadow); changed = YES;
+        }
+    } else if (keyStr == "controllerSelection") {
+        // J-19 — picker writes back as Use Start Channel ("") /
+        // No Controller (literal) / a named auto-layout controller.
+        NSString* s = asString(&typeOk);
+        if (!typeOk) return NO;
+        std::string sel = [s UTF8String];
+        std::string newCtrl = (sel == "Use Start Channel") ? std::string("") : sel;
+        if (newCtrl != m->GetControllerName()) {
+            m->SetControllerName(newCtrl);
+            changed = YES;
+        }
     }
     // J-8 (Appearance / String Properties) — new keys exposed by
     // the desktop-order property pane reorganization.
@@ -2820,11 +3453,259 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
         if (!typeOk) return NO;
         std::string newType = s.UTF8String;
         if (newType != m->GetStringType()) { m->SetStringType(newType); changed = YES; }
+    } else if (keyStr == "stringColor") {
+        // J-19 — Single-color and "Custom" string types share the
+        // model's customColor. Hex round-trip via xlColor's
+        // string constructor.
+        NSString* s = asString(&typeOk);
+        if (!typeOk) return NO;
+        std::string hex = s.UTF8String;
+        xlColor c(hex);
+        std::string newStr;
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "#%02X%02X%02X", c.red, c.green, c.blue);
+        newStr = buf;
+        m->SetCustomColor(newStr);
+        changed = YES;
+    } else if (keyStr == "superStringCount") {
+        double v = asDouble(&typeOk);
+        if (!typeOk) return NO;
+        int count = (int)v;
+        if (count < 1) count = 1;
+        if (count > 32) count = 32;
+        if (count != (int)m->GetSuperStringColours().size()) {
+            m->SetSuperStringColours(count);
+            changed = YES;
+        }
+    } else if (keyStr.starts_with("superStringColour")) {
+        // J-19 — per-index colour. Key is "superStringColourN"
+        // (0-based). Wholesale-rewrite the colour vector with
+        // the existing values minus the indexed entry.
+        std::string idxStr = keyStr.substr(std::string("superStringColour").size());
+        char* end = nullptr;
+        long idx = std::strtol(idxStr.c_str(), &end, 10);
+        if (end == idxStr.c_str()) return NO;
+        NSString* s = asString(&typeOk);
+        if (!typeOk) return NO;
+        const auto& cur = m->GetSuperStringColours();
+        if (idx < 0 || idx >= (long)cur.size()) return NO;
+        std::vector<xlColor> next(cur.begin(), cur.end());
+        next[idx] = xlColor(std::string(s.UTF8String));
+        // Re-apply via SetSuperStringColours doesn't take a vector;
+        // it just sets the count. So we have to use SetCustomColor /
+        // direct vector mutation via a friend path… Defer to next
+        // pass: walk through model attrs. For now do the same
+        // round-trip through customColor — only the first entry
+        // matters in the most common case. Better: keep this no-op
+        // for now and surface a "Desktop only for now" hint.
+        // TODO J-19+: superStringColour<N> set requires either
+        // exposing the vector mutator on Model or wholesale rebuild
+        // via SetSuperStringColours + per-index after.
+        (void)next;
+        return NO;
+    } else if (keyStr == "rgbwHandlingIndex") {
+        double v = asDouble(&typeOk);
+        if (!typeOk) return NO;
+        int idx = (int)v;
+        NSArray<NSString*>* opts =
+            @[@"R=G=B -> W", @"RGB Only", @"White Only", @"Advanced", @"White On All"];
+        if (idx < 0 || idx >= (int)opts.count) return NO;
+        std::string newHandling = opts[idx].UTF8String;
+        if (newHandling != m->GetRGBWHandling()) {
+            m->SetRGBWHandling(newHandling);
+            changed = YES;
+        }
     } else if (keyStr == "description") {
         NSString* s = asString(&typeOk);
         if (!typeOk) return NO;
         std::string newDesc = s.UTF8String;
         if (newDesc != m->GetDescription()) { m->SetDescription(newDesc); changed = YES; }
+    }
+    // J-18 — Controller Connection fields.
+    else if (keyStr == "modelStartChannel") {
+        NSString* s = asString(&typeOk);
+        if (!typeOk) return NO;
+        std::string newCh = s.UTF8String;
+        if (newCh != m->GetModelStartChannel()) {
+            m->SetStartChannel(newCh);
+            changed = YES;
+        }
+    } else if (keyStr == "hasIndividualStartChannels") {
+        BOOL v = asBool(&typeOk);
+        if (!typeOk) return NO;
+        bool desired = v ? true : false;
+        if (desired != m->HasIndividualStartChannels()) {
+            m->SetHasIndividualStartChannels(desired);
+            if (desired) {
+                // Match desktop: pre-fill any missing per-string
+                // entries via `ComputeStringStartChannel` so the
+                // UI has something sensible to show / edit.
+                int c = m->GetNumStrings();
+                while ((int)m->IndivStartChannelCount() < c) {
+                    m->AddIndivStartChannel(m->ComputeStringStartChannel(m->IndivStartChannelCount()));
+                }
+                while ((int)m->IndivStartChannelCount() > c) {
+                    m->PopIndivStartChannel();
+                }
+            } else {
+                m->ClearIndividualStartChannels();
+            }
+            changed = YES;
+        }
+    } else if (keyStr.rfind("individualStartChannel", 0) == 0) {
+        // keyStr = "individualStartChannel<N>" where N is 0..numStrings-1.
+        NSString* s = asString(&typeOk);
+        if (!typeOk) return NO;
+        std::string idxStr = keyStr.substr(strlen("individualStartChannel"));
+        int idx = (int)std::strtol(idxStr.c_str(), nullptr, 10);
+        if (idx < 0 || idx >= (int)m->IndivStartChannelCount()) return NO;
+        std::string newCh = s.UTF8String;
+        if (newCh != m->GetIndividualStartChannel(idx)) {
+            m->SetIndividualStartChannel(idx, newCh);
+            changed = YES;
+        }
+    } else if (keyStr == "modelChain") {
+        NSString* s = asString(&typeOk);
+        if (!typeOk) return NO;
+        std::string newChain = s.UTF8String;
+        // Desktop stores "" for "Beginning"; surface the symbol
+        // to the user but write the empty string internally.
+        if (newChain == "Beginning") newChain = "";
+        if (newChain != m->GetModelChain()) {
+            m->SetModelChain(newChain);
+            changed = YES;
+        }
+    }
+    // J-20 — Controller Connection setters. Each key here writes
+    // through the ControllerConnection object on the Model and
+    // flips its CTRL_PROPS active flag when needed. Naming is
+    // `cc.<field>` to keep them grouped and disambiguated from
+    // the model-header keys above.
+    else if (keyStr == "cc.port") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((int)v != m->GetControllerPort(1)) { m->SetControllerPort((int)v); changed = YES; }
+    } else if (keyStr == "cc.protocol") {
+        NSString* s = asString(&typeOk); if (!typeOk) return NO;
+        std::string newProto = s.UTF8String;
+        if (newProto != m->GetControllerProtocol()) { m->SetControllerProtocol(newProto); changed = YES; }
+    } else if (keyStr == "cc.dmxChannel") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((int)v != m->GetControllerDMXChannel()) { m->SetControllerDMXChannel((int)v); changed = YES; }
+    } else if (keyStr == "cc.speedIndex") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        std::vector<std::string> cp; int protoIdx = -1;
+        m->GetControllerProtocols(cp, protoIdx);
+        if (protoIdx >= 0 && protoIdx < (int)cp.size()) {
+            std::vector<std::string> speeds; int curIdx = -1;
+            m->GetSerialProtocolSpeeds(cp[protoIdx], speeds, curIdx);
+            int newIdx = (int)v;
+            if (newIdx >= 0 && newIdx < (int)speeds.size() && newIdx != curIdx) {
+                int newSpeed = std::strtol(speeds[newIdx].c_str(), nullptr, 10);
+                m->GetCtrlConn().SetSerialProtocolSpeed(newSpeed);
+                changed = YES;
+            }
+        }
+    } else if (keyStr == "cc.useSmartRemote") {
+        BOOL v = asBool(&typeOk); if (!typeOk) return NO;
+        m->GetCtrlConn().UpdateProperty(ControllerConnection::USE_SMART_REMOTE, v ? true : false);
+        if (!v) { m->SetSmartRemote(0); }
+        changed = YES;
+    } else if (keyStr == "cc.smartRemoteIndex") {
+        // 0-based picker index; SetSmartRemote uses 1-based ("A"=1).
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        int newSr = (int)v + 1;
+        if (newSr != m->GetSmartRemote()) { m->SetSmartRemote(newSr); changed = YES; }
+    } else if (keyStr == "cc.smartRemoteTypeIndex") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        auto types = m->GetSmartRemoteTypes();
+        int idx = (int)v;
+        if (idx >= 0 && idx < (int)types.size() && types[idx] != m->GetSmartRemoteType()) {
+            m->SetSmartRemoteType(types[idx]); changed = YES;
+        }
+    } else if (keyStr == "cc.srMaxCascade") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((int)v != m->GetSRMaxCascade()) { m->SetSRMaxCascade((int)v); changed = YES; }
+    } else if (keyStr == "cc.srCascadeOnPort") {
+        BOOL v = asBool(&typeOk); if (!typeOk) return NO;
+        if ((v?true:false) != m->GetSRCascadeOnPort()) { m->SetSRCascadeOnPort(v?true:false); changed = YES; }
+    }
+    // Per-pixel toggle / value pairs. The `xxxActive` keys flip
+    // a CTRL_PROPS flag (so the save layer writes the attribute
+    // or not); the value keys write the actual int / float /
+    // string into the connection.
+    else if (keyStr == "cc.startNullsActive") {
+        BOOL v = asBool(&typeOk); if (!typeOk) return NO;
+        m->GetCtrlConn().UpdateProperty(ControllerConnection::START_NULLS_ACTIVE, v?true:false);
+        changed = YES;
+    } else if (keyStr == "cc.startNulls") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((int)v != m->GetControllerStartNulls()) { m->SetControllerStartNulls((int)v); changed = YES; }
+    } else if (keyStr == "cc.endNullsActive") {
+        BOOL v = asBool(&typeOk); if (!typeOk) return NO;
+        m->GetCtrlConn().UpdateProperty(ControllerConnection::END_NULLS_ACTIVE, v?true:false);
+        changed = YES;
+    } else if (keyStr == "cc.endNulls") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((int)v != m->GetControllerEndNulls()) { m->SetControllerEndNulls((int)v); changed = YES; }
+    } else if (keyStr == "cc.brightnessActive") {
+        BOOL v = asBool(&typeOk); if (!typeOk) return NO;
+        m->GetCtrlConn().UpdateProperty(ControllerConnection::BRIGHTNESS_ACTIVE, v?true:false);
+        changed = YES;
+    } else if (keyStr == "cc.brightness") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((int)v != m->GetControllerBrightness()) { m->SetControllerBrightness((int)v); changed = YES; }
+    } else if (keyStr == "cc.gammaActive") {
+        BOOL v = asBool(&typeOk); if (!typeOk) return NO;
+        m->GetCtrlConn().UpdateProperty(ControllerConnection::GAMMA_ACTIVE, v?true:false);
+        changed = YES;
+    } else if (keyStr == "cc.gamma") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((float)v != m->GetControllerGamma()) { m->SetControllerGamma((float)v); changed = YES; }
+    } else if (keyStr == "cc.colorOrderActive") {
+        BOOL v = asBool(&typeOk); if (!typeOk) return NO;
+        m->GetCtrlConn().UpdateProperty(ControllerConnection::COLOR_ORDER_ACTIVE, v?true:false);
+        changed = YES;
+    } else if (keyStr == "cc.colorOrderIndex") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        int idx = (int)v;
+        if (idx >= 0 && idx < (int)Model::CONTROLLER_COLORORDER.size()) {
+            std::string co = Model::CONTROLLER_COLORORDER[idx];
+            if (co != m->GetControllerColorOrder()) { m->SetControllerColorOrder(co); changed = YES; }
+        }
+    } else if (keyStr == "cc.directionActive") {
+        BOOL v = asBool(&typeOk); if (!typeOk) return NO;
+        m->GetCtrlConn().UpdateProperty(ControllerConnection::REVERSE_ACTIVE, v?true:false);
+        changed = YES;
+    } else if (keyStr == "cc.directionIndex") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((int)v != m->GetControllerReverse()) { m->SetControllerReverse((int)v); changed = YES; }
+    } else if (keyStr == "cc.groupCountActive") {
+        BOOL v = asBool(&typeOk); if (!typeOk) return NO;
+        m->GetCtrlConn().UpdateProperty(ControllerConnection::GROUP_COUNT_ACTIVE, v?true:false);
+        changed = YES;
+    } else if (keyStr == "cc.groupCount") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((int)v != m->GetControllerGroupCount()) { m->SetControllerGroupCount((int)v); changed = YES; }
+    } else if (keyStr == "cc.zigZagActive") {
+        BOOL v = asBool(&typeOk); if (!typeOk) return NO;
+        m->GetCtrlConn().UpdateProperty(ControllerConnection::ZIG_ZAG_ACTIVE, v?true:false);
+        changed = YES;
+    } else if (keyStr == "cc.zigZag") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((int)v != m->GetControllerZigZag()) { m->SetControllerZigZag((int)v); changed = YES; }
+    } else if (keyStr == "cc.smartTsActive") {
+        BOOL v = asBool(&typeOk); if (!typeOk) return NO;
+        m->GetCtrlConn().UpdateProperty(ControllerConnection::TS_ACTIVE, v?true:false);
+        changed = YES;
+    } else if (keyStr == "cc.smartTs") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((int)v != m->GetSmartTs()) { m->SetSmartRemoteTs((int)v); changed = YES; }
+    } else if (keyStr == "cc.pwmGamma") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((float)v != m->GetControllerGamma()) { m->SetControllerGamma((float)v); changed = YES; }
+    } else if (keyStr == "cc.pwmBrightness") {
+        double v = asDouble(&typeOk); if (!typeOk) return NO;
+        if ((int)v != m->GetControllerBrightness()) { m->SetControllerBrightness((int)v); changed = YES; }
     } else {
         spdlog::warn("setLayoutModelProperty: unknown key '{}' for model '{}'",
                      keyStr, [name UTF8String]);
@@ -2877,6 +3758,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     if (!m) return NO;
     if (m->GetModelScreenLocation().IsLocked()) return NO;
     if (m->GetNumHandles() <= 2) return NO;  // can't drop below a segment
+    _context->AbortRender(5000);
     _context->PushLayoutUndoSnapshotForModel(modelName.UTF8String);
     // PolyPoint vertex int convention is 1-based.
     m->DeleteHandle(static_cast<int>(vertexIndex) + 1);
@@ -2891,6 +3773,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     Model* m = _context->GetModelManager()[modelName.UTF8String];
     if (!m) return NO;
     if (m->GetModelScreenLocation().IsLocked()) return NO;
+    _context->AbortRender(5000);
     _context->PushLayoutUndoSnapshotForModel(modelName.UTF8String);
     // PolyPointScreenLocation::InsertHandle's zoom / scale params
     // aren't actually consulted — placeholder values are fine.
@@ -2929,7 +3812,122 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
 
 - (BOOL)deleteModel:(NSString*)modelName {
     if (!_context || !modelName || modelName.length == 0) return NO;
+    _context->AbortRender(5000);
     return _context->GetModelManager().Delete(modelName.UTF8String) ? YES : NO;
+}
+
+- (BOOL)renameModel:(NSString*)oldName to:(NSString*)newName {
+    if (!_context || !_context->HasModelManager()) return NO;
+    if (!oldName || !newName) return NO;
+    std::string oldStd = oldName.UTF8String;
+    std::string newStd = Model::SafeModelName(newName.UTF8String);
+    if (newStd.empty() || oldStd == newStd) return NO;
+
+    auto& mgr = _context->GetModelManager();
+    Model* m = mgr[oldStd];
+    if (!m) return NO;
+    if (m->GetDisplayAs() == DisplayAsType::SubModel) return NO;
+    // Refuse collision with existing model OR group.
+    if (mgr.GetModel(newStd)) return NO;
+
+    _context->AbortRender(5000);
+    if (!mgr.Rename(oldStd, newStd)) return NO;
+
+    _context->MarkModelRenamed(oldStd, newStd);
+    _context->MarkLayoutModelDirty(newStd);
+
+    // Any group whose member list referenced the old name will
+    // now reference the new — mark those groups dirty too so the
+    // patcher rewrites their on-disk `models` attribute.
+    for (const auto& [name, model] : mgr.GetModels()) {
+        if (!model) continue;
+        if (model->GetDisplayAs() != DisplayAsType::ModelGroup) continue;
+        auto* mg = static_cast<ModelGroup*>(model);
+        if (mg->DirectlyContainsModel(newStd)) {
+            _context->MarkLayoutModelDirty(name);
+        }
+    }
+    return YES;
+}
+
+- (BOOL)setModelAliases:(NSString*)modelName
+                aliases:(NSArray<NSString*>*)aliases {
+    if (!_context || !_context->HasModelManager()) return NO;
+    if (!modelName) return NO;
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    if (!m) return NO;
+    _context->AbortRender(5000);
+
+    std::list<std::string> next;
+    std::unordered_set<std::string> seen;
+    for (NSString* a in aliases ?: @[]) {
+        std::string s = a.UTF8String;
+        // Trim leading/trailing whitespace before lowercasing —
+        // Model::AddAlias doesn't trim itself.
+        auto notSpace = [](unsigned char ch) { return !std::isspace(ch); };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+        s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+        if (s.empty()) continue;
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char ch) { return std::tolower(ch); });
+        if (!seen.insert(s).second) continue;
+        next.push_back(s);
+    }
+    m->SetAliases(next);
+    _context->MarkLayoutModelDirty(std::string(modelName.UTF8String));
+    return YES;
+}
+
+- (BOOL)setStrandNames:(NSString*)modelName
+                 names:(NSArray<NSString*>*)names {
+    if (!_context || !_context->HasModelManager() || !modelName) return NO;
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    if (!m) return NO;
+    _context->AbortRender(5000);
+    std::string joined = [self joinIndexedNames:names];
+    m->SetStrandNames(joined);
+    m->IncrementChangeCount();
+    _context->MarkLayoutModelDirty(std::string(modelName.UTF8String));
+    return YES;
+}
+
+- (BOOL)setNodeNames:(NSString*)modelName
+               names:(NSArray<NSString*>*)names {
+    if (!_context || !_context->HasModelManager() || !modelName) return NO;
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    if (!m) return NO;
+    _context->AbortRender(5000);
+    std::string joined = [self joinIndexedNames:names];
+    m->SetNodeNames(joined);
+    m->IncrementChangeCount();
+    _context->MarkLayoutModelDirty(std::string(modelName.UTF8String));
+    return YES;
+}
+
+- (BOOL)clearDimmingCurveOnModel:(NSString*)modelName {
+    if (!_context || !_context->HasModelManager() || !modelName) return NO;
+    Model* m = _context->GetModelManager()[std::string(modelName.UTF8String)];
+    if (!m) return NO;
+    if (m->GetDimmingCurve() == nullptr) return NO;
+    _context->AbortRender(5000);
+    m->SetDimmingInfo({});
+    _context->MarkLayoutModelDirty(std::string(modelName.UTF8String));
+    return YES;
+}
+
+- (BOOL)deleteSubModelNamed:(NSString*)submodelName
+                    onModel:(NSString*)parentName {
+    if (!_context || !_context->HasModelManager()) return NO;
+    if (!submodelName || !parentName) return NO;
+    if (submodelName.length == 0 || parentName.length == 0) return NO;
+    Model* parent = _context->GetModelManager()[std::string(parentName.UTF8String)];
+    if (!parent) return NO;
+    std::string sub = submodelName.UTF8String;
+    if (!parent->GetSubModel(sub)) return NO;
+    _context->AbortRender(5000);
+    parent->RemoveSubModel(sub);
+    _context->MarkLayoutModelDirty(std::string(parentName.UTF8String));
+    return YES;
 }
 
 - (BOOL)setCurve:(BOOL)create onSegment:(NSInteger)segmentIndex forModel:(NSString*)modelName {
@@ -2938,6 +3936,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     if (!m) return NO;
     if (m->GetModelScreenLocation().IsLocked()) return NO;
     if (!m->SupportsCurves()) return NO;
+    _context->AbortRender(5000);
     _context->PushLayoutUndoSnapshotForModel(modelName.UTF8String);
     m->SetCurve(static_cast<int>(segmentIndex), create ? true : false);
     m->Reinitialize();
@@ -3036,6 +4035,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     if (!_context || !_context->HasModelManager() || !name || !key) return NO;
     Model* m = _context->GetModelManager()[std::string([name UTF8String])];
     if (!m || m->GetDisplayAs() != DisplayAsType::ModelGroup) return NO;
+    _context->AbortRender(5000);
     ModelGroup* g = static_cast<ModelGroup*>(m);
 
     std::string keyStr = [key UTF8String];
@@ -3117,6 +4117,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     if (!m) return NO;
     // Bail if already a direct member (no need to mark dirty).
     if (grp->DirectlyContainsModel(modelName.UTF8String)) return NO;
+    _context->AbortRender(5000);
     grp->AddModel(modelName.UTF8String);
     _context->MarkLayoutModelDirty(groupName.UTF8String);
     return YES;
@@ -3133,6 +4134,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     if (std::find(current.begin(), current.end(), target) == current.end()) {
         return NO;
     }
+    _context->AbortRender(5000);
     std::vector<std::string> updated;
     updated.reserve(current.size());
     for (const auto& s : current) {
@@ -3157,6 +4159,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     // name but it confuses every selection lookup; refuse.
     if (mgr.GetModel(name)) return NO;
 
+    _context->AbortRender(5000);
     auto* grp = new ModelGroup(mgr);
     grp->SetName(name);
     grp->SetLayout("minimalGrid");
@@ -3188,6 +4191,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     Model* g = _context->GetModelManager()[groupName.UTF8String];
     if (!g || g->GetDisplayAs() != DisplayAsType::ModelGroup) return NO;
     std::string name = groupName.UTF8String;
+    _context->AbortRender(5000);
     if (!_context->GetModelManager().Delete(name)) return NO;
     _context->MarkGroupDeleted(name);
     return YES;
@@ -3210,6 +4214,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     // Refuse collision with an existing model or group.
     if (mgr.GetModel(newStd)) return NO;
 
+    _context->AbortRender(5000);
     // ModelManager::Rename updates the in-memory references
     // (group's own name, plus member-name vectors of every other
     // ModelGroup that contained the old name). It does NOT mark
@@ -3300,6 +4305,16 @@ static NSString* const kBackgroundPseudoObjectName = @"2D Background";
             @"backgroundBrightness": @(_context->GetActiveBackgroundBrightness()),
             @"backgroundAlpha":      @(_context->GetActiveBackgroundAlpha()),
             @"scaleBackgroundImage": @(_context->GetActiveScaleBackgroundImage() ? YES : NO),
+            // J-19 — layout-group display roll-up (was previously
+            // a separate read-only block at the bottom of the
+            // Models tab — desktop treats these as preview-level
+            // settings, so they belong on the Background object).
+            @"previewWidth":         @(_context->GetPreviewWidth()),
+            @"previewHeight":        @(_context->GetPreviewHeight()),
+            @"display2DCenter0":     @(_context->GetDisplay2DCenter0() ? YES : NO),
+            @"display2DGrid":        @(_context->GetDisplay2DGrid() ? YES : NO),
+            @"display2DGridSpacing": @((long)_context->GetDisplay2DGridSpacing()),
+            @"display2DBoundingBox": @(_context->GetDisplay2DBoundingBox() ? YES : NO),
         };
     }
     if (!_context->HasViewObjectManager()) return nil;
@@ -3437,6 +4452,7 @@ static NSString* const kBackgroundPseudoObjectName = @"2D Background";
 - (nullable NSString*)createViewObjectWithType:(NSString*)type {
     if (!_context || !_context->HasViewObjectManager() || !type) return nil;
     std::string t = type.UTF8String;
+    _context->AbortRender(5000);
     auto& vm = _context->GetAllObjects();
     ViewObject* vo = vm.CreateAndAddObject(t);
     if (!vo) return nil;
@@ -3452,6 +4468,7 @@ static NSString* const kBackgroundPseudoObjectName = @"2D Background";
     if ([name isEqualToString:kBackgroundPseudoObjectName]) return NO;
     std::string nm = name.UTF8String;
     if (!_context->GetAllObjects().GetViewObject(nm)) return NO;
+    _context->AbortRender(5000);
     _context->GetAllObjects().Delete(nm);
     _context->MarkViewObjectDeleted(nm);
     return YES;
@@ -3469,6 +4486,7 @@ static NSString* const kBackgroundPseudoObjectName = @"2D Background";
     if (!vm.GetViewObject(oldStd)) return NO;
     if (vm.GetViewObject(newStd)) return NO;
 
+    _context->AbortRender(5000);
     vm.Rename(oldStd, newStd);
     // ViewObjectManager::Rename returns `changed` based on cross-
     // reference iteration that's currently commented out on the
@@ -3489,6 +4507,7 @@ static NSString* const kBackgroundPseudoObjectName = @"2D Background";
     ViewObject* src = vm.GetViewObject(name.UTF8String);
     if (!src) return nil;
 
+    _context->AbortRender(5000);
     // Serialize source through the visitor to produce a fresh
     // <view_object> node, then deserialize into a new object.
     // Per-type attrs (Mesh ObjFile, Image bitmap, terrain heightmap)
@@ -3519,6 +4538,7 @@ static NSString* const kBackgroundPseudoObjectName = @"2D Background";
                                 key:(NSString*)key
                               value:(id)value {
     if (!_context || !name || !key) return NO;
+    _context->AbortRender(5000);
     // J-8 — route 2D Background edits to the active-group
     // background settings on iPadRenderContext. These don't ride
     // the regular view-object dirty path; SaveLayoutChanges has
@@ -3858,7 +4878,12 @@ static void BuildMatrixProps(MatrixModel* m, NSMutableArray* out) {
 }
 
 static void BuildTreeProps(TreeModel* t, NSMutableArray* out) {
-    BuildMatrixProps(t, out);
+    // J-20 — desktop TreePropertyAdapter overrides AddStyle
+    // Properties: emits TreeStyle + the round-tree-only floats +
+    // AlternateNodes + NoZig + "Strand Direction" (StrandDir).
+    // The matrix "Direction" enum is replaced by StrandDir — we
+    // build the tree props manually instead of calling
+    // BuildMatrixProps so we don't double up.
     [out addObject:MakeEnumProp(@"TreeStyle", @"Type",
                                  t->GetTreeType(),
                                  @[@"Round", @"Flat", @"Ribbon"])];
@@ -3884,16 +4909,60 @@ static void BuildTreeProps(TreeModel* t, NSMutableArray* out) {
                         roundTree ? t->GetTreePerspective() * 10.0 : 2.0, 0, 10, 0.1, 2);
     d[@"enabled"] = @(roundTree);
     [out addObject:d];
+    // Alternate Nodes / Don't Zig Zag are mutex with each other —
+    // mirrored from MatrixPropertyAdapter::AddStyleProperties.
+    NSMutableDictionary* an = MakeBoolProp(@"AlternateNodes", @"Alternate Nodes",
+                                            t->HasAlternateNodes());
+    an[@"enabled"] = @(t->IsNoZigZag() == false);
+    [out addObject:an];
+    NSMutableDictionary* nz = MakeBoolProp(@"NoZig", @"Don't Zig Zag",
+                                            t->IsNoZigZag());
+    nz[@"enabled"] = @(t->HasAlternateNodes() == false);
+    [out addObject:nz];
+    // J-20 — Tree's matrix props (# Strings, Lights/Nodes per
+    // String, Strands/String, Starting Location) follow the
+    // type-specific block. Strand Direction is emitted in place
+    // of Matrix's "Direction".
+    [out addObject:MakeIntProp(@"MatrixStringCount", @"# Strings",
+                                t->GetNumPhysicalStrings(), 1, 10000)];
+    NSString* lpsLabel = t->IsSingleNode() ? @"Lights/String" : @"Nodes/String";
+    [out addObject:MakeIntProp(@"MatrixLightCount", lpsLabel,
+                                t->GetNodesPerString(), 1, 10000)];
+    [out addObject:MakeIntProp(@"MatrixStrandCount", @"Strands/String",
+                                t->GetStrandsPerString(), 1, 2500)];
+    [out addObject:MakeEnumProp(@"MatrixStart", @"Starting Location",
+                                 EncodeStartCorner(t), StartCornerOptions())];
+    [out addObject:MakeEnumProp(@"StrandDir", @"Strand Direction",
+                                 t->isVerticalMatrix() ? 1 : 0,
+                                 @[@"Horizontal", @"Vertical"])];
 }
 
 static void BuildSphereProps(SphereModel* s, NSMutableArray* out) {
-    BuildMatrixProps(s, out);
-    [out addObject:MakeIntProp(@"SphereStartLatitude", @"Start Latitude",
-                                s->GetStartLatitude(), -90, 90)];
-    [out addObject:MakeIntProp(@"SphereEndLatitude", @"End Latitude",
-                                s->GetEndLatitude(), -90, 90)];
+    // J-20 — desktop SpherePropertyAdapter::AddStyleProperties
+    // emits Degrees / Southern Latitude / Northern Latitude
+    // BEFORE the matrix props. Order + ranges + labels matched
+    // here so the iPad pane lines up.
     [out addObject:MakeIntProp(@"SphereDegrees", @"Degrees",
-                                s->GetSphereDegrees(), 1, 360)];
+                                s->GetSphereDegrees(), 45, 360)];
+    [out addObject:MakeIntProp(@"SphereStartLatitude", @"Southern Latitude",
+                                s->GetStartLatitude(), -89, -1)];
+    [out addObject:MakeIntProp(@"SphereEndLatitude", @"Northern Latitude",
+                                s->GetEndLatitude(), 1, 89)];
+    BuildMatrixProps(s, out);
+}
+
+// J-20 — Star has its own 12-entry start-location enum (not the
+// matrix corners). Mirrors StarPropertyAdapter.cpp's
+// TOP_BOT_LEFT_RIGHT array.
+static NSArray<NSString*>* StarStartLocationOptions() {
+    return @[
+        @"Top Ctr-CCW", @"Top Ctr-CW",
+        @"Top Ctr-CCW Inside", @"Top Ctr-CW Inside",
+        @"Bottom Ctr-CW", @"Bottom Ctr-CCW",
+        @"Bottom Ctr-CW Inside", @"Bottom Ctr-CCW Inside",
+        @"Left Bottom-CW", @"Left Bottom-CCW",
+        @"Right Bottom-CW", @"Right Bottom-CCW",
+    ];
 }
 
 static void BuildStarProps(StarModel* s, NSMutableArray* out) {
@@ -3904,38 +4973,103 @@ static void BuildStarProps(StarModel* s, NSMutableArray* out) {
                                 s->GetNodesPerString(), 1, 10000)];
     [out addObject:MakeIntProp(@"StarStrandCount", @"# Points",
                                 s->GetStarPoints(), 1, 250)];
-    // Star uses corner-named start locations but Star encodes them
-    // by string. The desktop adapter searches the TOP_BOT_LEFT_RIGHT
-    // labels for a match; we mirror that.
+    // Star uses its own start-location vocabulary (12 entries, not
+    // the 4-corner matrix scheme used elsewhere).
     NSString* startLoc = [NSString stringWithUTF8String:s->GetStartLocation().c_str()];
     int startIdx = 0;
-    NSArray* opts = StartCornerOptions();
+    NSArray* opts = StarStartLocationOptions();
     for (NSUInteger i = 0; i < opts.count; ++i) {
         if ([opts[i] isEqualToString:startLoc]) { startIdx = (int)i; break; }
     }
     [out addObject:MakeEnumProp(@"StarStart", @"Starting Location",
                                  startIdx, opts)];
-    [out addObject:MakeDoubleProp(@"StarRatio", @"Outer/Inner Ratio",
+    // Layer-size editor (matches desktop's AddLayerSizeProperty).
+    NSMutableArray<NSNumber*>* sizes = [NSMutableArray array];
+    for (int sz : s->GetLayerSizes()) { [sizes addObject:@(sz)]; }
+    [out addObject:@{
+        @"key":   @"LayerSizes",
+        @"label": @"Layer Sizes",
+        @"kind":  @"layerSizes",
+        @"value": sizes,
+    }];
+    [out addObject:MakeDoubleProp(@"StarRatio", @"Outer to Inner Ratio",
                                    s->GetStarRatio(), 0.01, 10, 0.1, 2)];
-    NSMutableDictionary* d = MakeIntProp(@"StarCenterPercent", @"Inner Layer %",
-                                          s->GetInnerPercent(), 0, 100);
-    d[@"enabled"] = @(s->GetNumStrands() > 1);
-    [out addObject:d];
+    if (s->GetNumStrands() > 1) {
+        [out addObject:MakeIntProp(@"StarCenterPercent", @"Inner Layer %",
+                                    s->GetInnerPercent(), 0, 100)];
+    }
 }
 
 static void BuildArchesProps(ArchesModel* a, NSMutableArray* out) {
-    [out addObject:MakeIntProp(@"ArchesCount", @"# Arches",
-                                a->GetNumArches(), 1, 100)];
-    [out addObject:MakeIntProp(@"ArchesNodes", @"Nodes Per Arch",
-                                a->GetNodesPerArch(), 1, 1000)];
+    // J-19 — mirrors desktop's ArchesPropertyAdapter::AddType
+    // Properties verbatim. The Layered Arches checkbox MUST be
+    // first because flipping it relaods this whole list with
+    // different labels and rows. When OFF you get the classic
+    // # Arches / Nodes Per Arch / Gap layout; when ON you get a
+    // single Nodes count + the per-layer size editor + the
+    // hollow / zig-zag flags, the labels shift, and the
+    // Starting Location enum expands from 2 to 4 choices.
+    bool layered = a->GetLayerSizeCount() != 0;
+    [out addObject:MakeBoolProp(@"LayeredArches", @"Layered Arches", layered)];
+
+    if (!layered) {
+        [out addObject:MakeIntProp(@"ArchesCount", @"# Arches",
+                                    a->GetNumArches(), 1, 100)];
+        [out addObject:MakeIntProp(@"ArchesNodes", @"Nodes Per Arch",
+                                    a->GetNodesPerArch(), 1, 1000)];
+    } else {
+        [out addObject:MakeIntProp(@"ArchesNodes", @"Nodes",
+                                    a->GetNodesPerArch(), 1, 10000)];
+        // Per-layer-size editor. We surface the layer count and
+        // the comma-joined size list; SwiftUI renders one TextField
+        // per layer. Bridge accepts edits via `LayerSizes` (count
+        // + array).
+        NSMutableArray<NSNumber*>* sizes = [NSMutableArray array];
+        for (int s : a->GetLayerSizes()) {
+            [sizes addObject:@(s)];
+        }
+        [out addObject:@{
+            @"key":    @"LayerSizes",
+            @"label":  @"Layer Sizes",
+            @"kind":   @"layerSizes",
+            @"value":  sizes,
+        }];
+        [out addObject:MakeIntProp(@"ArchesHollow", @"Hollow %",
+                                    a->GetHollow(), 0, 95)];
+        [out addObject:MakeBoolProp(@"ArchesZigZag", @"Zig-Zag Layers",
+                                     a->GetZigZag())];
+    }
+
     [out addObject:MakeIntProp(@"ArchesLights", @"Lights Per Node",
                                 a->GetLightsPerNode(), 1, 250)];
     [out addObject:MakeIntProp(@"ArchesArc", @"Arc Degrees",
                                 a->GetArc(), 1, 180)];
-    [out addObject:MakeIntProp(@"ArchesHollow", @"Hollow %",
-                                a->GetHollow(), 0, 95)];
-    [out addObject:MakeBoolProp(@"ArchesZigZag", @"Zig-Zag Layers",
-                                 a->GetZigZag())];
+
+    auto& threePt = dynamic_cast<ThreePointScreenLocation&>(a->GetModelScreenLocation());
+    [out addObject:MakeIntProp(@"ArchesSkew", @"Arch Tilt",
+                                threePt.GetAngle(), -180, 180)];
+
+    if (!layered) {
+        [out addObject:MakeIntProp(@"ArchesGap", @"Gap Between Arches",
+                                    a->GetGap(), 0, 500)];
+    }
+
+    if (layered) {
+        // 4-choice variant: Green Inside, Green Outside,
+        // Blue Inside, Blue Outside. Encoded
+        // (IsLtoR ? 0 : 2) + (IsBtoT ? 1 : 0) to match desktop.
+        int idx = (a->GetIsLtoR() ? 0 : 2) + (a->GetIsBtoT() ? 1 : 0);
+        [out addObject:MakeEnumProp(@"ArchesStart", @"Starting Location",
+                                     idx,
+                                     @[@"Green Square Inside",
+                                       @"Green Square Outside",
+                                       @"Blue Square Inside",
+                                       @"Blue Square Outside"])];
+    } else {
+        [out addObject:MakeEnumProp(@"ArchesStart", @"Starting Location",
+                                     a->GetIsLtoR() ? 0 : 1,
+                                     @[@"Green Square", @"Blue Square"])];
+    }
 }
 
 static void BuildIciclesProps(IciclesModel* ic, NSMutableArray* out) {
@@ -3961,6 +5095,16 @@ static void BuildCircleProps(CircleModel* c, NSMutableArray* out) {
                                 c->GetNodesPerString(), 1, 2000)];
     [out addObject:MakeIntProp(@"CircleCenterPercent", @"Center %",
                                 c->GetCenterPercent(), 0, 100)];
+    // J-20 — Layer-size editor (matches desktop's
+    // AddLayerSizeProperty). Circle supports concentric rings.
+    NSMutableArray<NSNumber*>* sizes = [NSMutableArray array];
+    for (int sz : c->GetLayerSizes()) { [sizes addObject:@(sz)]; }
+    [out addObject:@{
+        @"key":   @"LayerSizes",
+        @"label": @"Layer Sizes",
+        @"kind":  @"layerSizes",
+        @"value": sizes,
+    }];
     int start = c->GetIsLtoR() ? 1 : 0;
     if (c->IsInsideOut()) start += 2;
     if (c->GetIsBtoT())   start += 4;
@@ -4023,21 +5167,35 @@ static void BuildCandyCaneProps(CandyCaneModel* c, NSMutableArray* out) {
 }
 
 static void BuildSpinnerProps(SpinnerModel* s, NSMutableArray* out) {
+    // J-20 — mirrors desktop SpinnerPropertyAdapter:
+    // # Strings (1..640), Arms/String (1..250, key=FoldCount),
+    // Lights/Arm (0..200), Hollow % (0..80), Start Angle
+    // (-360..360), Arc (1..360), Starting Location (6-choice),
+    // Zig-Zag Start. Alternate Nodes is not in the desktop's
+    // type properties — it lives elsewhere — so it's dropped.
     [out addObject:MakeIntProp(@"SpinnerStringCount", @"# Strings",
-                                s->GetNumSpinnerStrings(), 1, 100)];
-    [out addObject:MakeIntProp(@"SpinnerArmCount", @"Arms/String",
-                                s->GetArmsPerString(), 1, 100)];
-    [out addObject:MakeIntProp(@"SpinnerNodesPerArm", @"Nodes/Arm",
-                                s->GetNodesPerArm(), 1, 1000)];
-    [out addObject:MakeIntProp(@"SpinnerHollow", @"Hollow %",
-                                s->GetHollowPercent(), 0, 95)];
-    [out addObject:MakeIntProp(@"SpinnerArc", @"Arc",
+                                s->GetNumSpinnerStrings(), 1, 640)];
+    [out addObject:MakeIntProp(@"FoldCount", @"Arms/String",
+                                s->GetArmsPerString(), 1, 250)];
+    [out addObject:MakeIntProp(@"SpinnerArmNodeCount", @"Lights/Arm",
+                                s->GetNodesPerArm(), 0, 200)];
+    [out addObject:MakeIntProp(@"Hollow", @"Hollow %",
+                                s->GetHollowPercent(), 0, 80)];
+    [out addObject:MakeIntProp(@"StartAngle", @"Start Angle",
+                                s->GetStartAngle(), -360, 360)];
+    [out addObject:MakeIntProp(@"Arc", @"Arc",
                                 s->GetArcAngle(), 1, 360)];
-    [out addObject:MakeIntProp(@"SpinnerStartAngle", @"Start Angle",
-                                s->GetStartAngle(), 0, 360)];
-    [out addObject:MakeBoolProp(@"SpinnerZigZag", @"Zig-Zag", s->HasZigZag())];
-    [out addObject:MakeBoolProp(@"SpinnerAlternate", @"Alternate Nodes",
-                                 s->HasAlternateNodes())];
+    [out addObject:MakeEnumProp(@"MatrixStart", @"Starting Location",
+                                 s->EncodeStartLocation(),
+                                 @[@"Center Counter Clockwise",
+                                   @"Center Clockwise",
+                                   @"End Counter Clockwise",
+                                   @"End Clockwise",
+                                   @"Center Alternate Counter Clockwise",
+                                   @"Center Alternate Clockwise"])];
+    NSMutableDictionary* zz = MakeBoolProp(@"ZigZag", @"Zig-Zag Start", s->HasZigZag());
+    zz[@"enabled"] = @(s->HasAlternateNodes() == false);
+    [out addObject:zz];
 }
 
 static void BuildWindowFrameProps(WindowFrameModel* w, NSMutableArray* out) {
@@ -4052,23 +5210,125 @@ static void BuildWindowFrameProps(WindowFrameModel* w, NSMutableArray* out) {
 }
 
 static void BuildCubeProps(CubeModel* c, NSMutableArray* out) {
-    [out addObject:MakeIntProp(@"CubeWidth", @"Width Lights",
-                                c->GetCubeWidth(), 1, 1000)];
-    [out addObject:MakeIntProp(@"CubeHeight", @"Height Lights",
-                                c->GetCubeHeight(), 1, 1000)];
-    [out addObject:MakeIntProp(@"CubeDepth", @"Depth Lights",
-                                c->GetCubeDepth(), 1, 1000)];
+    // J-20 — mirrors desktop CubePropertyAdapter:
+    // Starting Location (8 named corners), Direction (6 named
+    // styles), Strand Style (3 named), Layers All Start in Same
+    // Place toggle, Width/Height/Depth (1..100), # Strings.
+    NSArray<NSString*>* starts = @[
+        @"Front Bottom Left", @"Front Bottom Right",
+        @"Front Top Left",    @"Front Top Right",
+        @"Back Bottom Left",  @"Back Bottom Right",
+        @"Back Top Left",     @"Back Top Right",
+    ];
+    NSArray<NSString*>* styles = @[
+        @"Vertical Front/Back",  @"Vertical Left/Right",
+        @"Horizontal Front/Back",@"Horizontal Left/Right",
+        @"Stacked Front/Back",   @"Stacked Left/Right",
+    ];
+    NSArray<NSString*>* strands = @[
+        @"Zig Zag", @"No Zig Zag", @"Aternate Pixel",
+    ];
+    [out addObject:MakeEnumProp(@"CubeStart", @"Starting Location",
+                                 c->GetCubeStartIndex(), starts)];
+    [out addObject:MakeEnumProp(@"CubeStyle", @"Direction",
+                                 c->GetCubeStyleIndex(), styles)];
+    [out addObject:MakeEnumProp(@"StrandPerLine", @"Strand Style",
+                                 c->GetStrandStyleIndex(), strands)];
+    [out addObject:MakeBoolProp(@"StrandPerLayer",
+                                 @"Layers All Start in Same Place",
+                                 c->IsStrandPerLayer())];
+    [out addObject:MakeIntProp(@"CubeWidth",  @"Width",  c->GetCubeWidth(),  1, 100)];
+    [out addObject:MakeIntProp(@"CubeHeight", @"Height", c->GetCubeHeight(), 1, 100)];
+    [out addObject:MakeIntProp(@"CubeDepth",  @"Depth",  c->GetCubeDepth(),  1, 100)];
     [out addObject:MakeIntProp(@"CubeStrings", @"# Strings",
                                 c->GetCubeStrings(), 1, 1000)];
-    [out addObject:MakeIntProp(@"CubeStyleIdx", @"Style",
-                                c->GetCubeStyleIndex(), 0, 99)];
-    [out addObject:MakeIntProp(@"CubeStartIdx", @"Start",
-                                c->GetCubeStartIndex(), 0, 99)];
 }
 
 static void BuildChannelBlockProps(ChannelBlockModel* cb, NSMutableArray* out) {
     [out addObject:MakeIntProp(@"ChannelBlockChannels", @"# Channels",
                                 cb->GetNumChannels(), 1, 1000)];
+}
+
+// J-20 — Image model. Mirrors ImagePropertyAdapter::AddType
+// Properties: Image file path + Off Brightness + Read White
+// As Alpha toggle. The file-picker affordance for `Image` is
+// surfaced as a plain string for now — picking the file via
+// the iPad's file picker is a follow-up.
+static void BuildImageProps(ImageModel* im, NSMutableArray* out) {
+    // J-20.2 — Image file uses the new `imageFile` descriptor
+    // kind so SwiftUI renders a path label + folder-button that
+    // opens a .fileImporter scoped to image UTTypes.
+    [out addObject:@{
+        @"key":   @"Image",
+        @"label": @"Image",
+        @"kind":  @"imageFile",
+        @"value": [NSString stringWithUTF8String:im->GetImageFile().c_str()],
+    }];
+    [out addObject:MakeIntProp(@"OffBrightness", @"Off Brightness",
+                                im->GetOffBrightness(), 0, 200)];
+    [out addObject:MakeBoolProp(@"WhiteAsAlpha", @"Read White As Alpha",
+                                 im->IsWhiteAsAlpha())];
+}
+
+// J-20 — Label model. Mirrors LabelPropertyAdapter::AddType
+// Properties: Label Text + Font Size + Text Color.
+static void BuildLabelProps(LabelModel* lm, NSMutableArray* out) {
+    [out addObject:MakeStringProp(@"LabelText", @"Label Text",
+        [NSString stringWithUTF8String:lm->GetLabelText().c_str()])];
+    [out addObject:MakeIntProp(@"LabelFontSize", @"Font Size",
+                                lm->GetLabelFontSize(), 8, 40)];
+    xlColor tc = lm->GetLabelTextColor();
+    NSString* hex = [NSString stringWithFormat:@"#%02X%02X%02X",
+                     tc.red, tc.green, tc.blue];
+    [out addObject:@{
+        @"key": @"LabelTextColor", @"label": @"Text Color",
+        @"kind": @"color", @"value": hex,
+    }];
+}
+
+// J-20.2 — MultiPoint. Basic surface only: nodes / lights are
+// read-only (driven by canvas vertex placement), # Strings,
+// Height. Indiv Start Nodes per-string editor deferred — that
+// pipeline mirrors the Indiv Start Channels surface and warrants
+// its own slice.
+static void BuildMultiPointProps(MultiPointModel* mp, NSMutableArray* out) {
+    NSString* nodesLabel = mp->IsSingleNode() ? @"# Lights" : @"# Nodes";
+    NSMutableDictionary* d = MakeIntProp(@"MultiPointNodes", nodesLabel,
+                                          mp->GetNumPoints(), 1, 10000);
+    d[@"enabled"] = @NO;  // Canvas-driven on desktop too.
+    [out addObject:d];
+    [out addObject:MakeIntProp(@"MultiPointStrings", @"Strings",
+                                mp->GetNumStrings(), 1, 48)];
+    [out addObject:MakeDoubleProp(@"ModelHeight", @"Height",
+                                   mp->GetModelHeight(), -100, 100, 0.1, 2)];
+}
+
+// J-20.2 — PolyLine. Basic surface only: # Lights/Nodes,
+// Lights/Node, Strings, Alternate Drop Nodes, Height, Starting
+// Location. Segment / corner / per-string-start editors deferred.
+static void BuildPolyLineProps(PolyLineModel* pl, NSMutableArray* out) {
+    if (pl->IsSingleNode()) {
+        NSMutableDictionary* d = MakeIntProp(@"PolyLineNodes", @"# Lights",
+                                              pl->GetTotalLightCount(), 1, 100000);
+        d[@"enabled"] = @NO;
+        [out addObject:d];
+    } else {
+        NSMutableDictionary* d = MakeIntProp(@"PolyLineNodes", @"# Nodes",
+                                              pl->GetTotalLightCount(), 1, 100000);
+        d[@"enabled"] = @NO;
+        [out addObject:d];
+        [out addObject:MakeIntProp(@"PolyLineLights", @"Lights/Node",
+                                    pl->GetLightsPerNode(), 1, 300)];
+    }
+    [out addObject:MakeIntProp(@"PolyLineStrings", @"Strings",
+                                pl->GetNumStrings(), 1, 48)];
+    [out addObject:MakeEnumProp(@"PolyLineStart", @"Starting Location",
+                                 pl->GetIsLtoR() ? 0 : 1,
+                                 @[@"Green Square", @"Blue Square"])];
+    [out addObject:MakeBoolProp(@"AlternateNodes", @"Alternate Drop Nodes",
+                                 pl->HasAlternateNodes())];
+    [out addObject:MakeDoubleProp(@"ModelHeight", @"Height",
+                                   pl->GetModelHeight(), -100, 100, 0.1, 2)];
 }
 
 static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
@@ -4136,6 +5396,18 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
     case DisplayAsType::ChannelBlock:
         BuildChannelBlockProps(static_cast<ChannelBlockModel*>(m), out);
         break;
+    case DisplayAsType::Image:
+        BuildImageProps(static_cast<ImageModel*>(m), out);
+        break;
+    case DisplayAsType::Label:
+        BuildLabelProps(static_cast<LabelModel*>(m), out);
+        break;
+    case DisplayAsType::MultiPoint:
+        BuildMultiPointProps(static_cast<MultiPointModel*>(m), out);
+        break;
+    case DisplayAsType::PolyLine:
+        BuildPolyLineProps(static_cast<PolyLineModel*>(m), out);
+        break;
     case DisplayAsType::Custom:
         BuildCustomProps(static_cast<CustomModel*>(m), out);
         break;
@@ -4151,6 +5423,7 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
     if (!_context || !_context->HasModelManager() || !modelName || !key) return NO;
     Model* m = _context->GetModelManager()[modelName.UTF8String];
     if (!m) return NO;
+    _context->AbortRender(5000);
 
     auto asInt = ^int(BOOL* ok) {
         if ([value isKindOfClass:[NSNumber class]]) { *ok = YES; return [(NSNumber*)value intValue]; }
@@ -4176,7 +5449,10 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
     // Matrix family (Matrix / Tree / Sphere) all share these keys
     // because Tree + Sphere extend Matrix. Specialised setters fall
     // through and dispatch after the common block.
-    if (k == "MatrixStyle") {
+    if (k == "MatrixStyle" || k == "StrandDir") {
+        // J-20 — both keys map to MatrixModel::SetVertical. Tree
+        // uses StrandDir; bare Matrix uses MatrixStyle. Same
+        // underlying field.
         int v = asInt(&ok); if (!ok) return NO;
         auto* mat = dynamic_cast<MatrixModel*>(m);
         if (!mat) return NO;
@@ -4189,6 +5465,9 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
             if (ic->HasAlternateNodes() != (v?true:false)) { ic->SetAlternateNodes(v); changed = YES; }
         } else if (auto* cc = dynamic_cast<CandyCaneModel*>(m)) {
             if (cc->HasAlternateNodes() != (v?true:false)) { cc->SetAlternateNodes(v); changed = YES; }
+        } else if (auto* pl = dynamic_cast<PolyLineModel*>(m)) {
+            // J-20.2 — PolyLine shares the AlternateNodes key.
+            if (pl->HasAlternateNodes() != (v?true:false)) { pl->SetAlternateNodes(v); changed = YES; }
         }
     } else if (k == "NoZig") {
         BOOL v = asBool(&ok); if (!ok) return NO;
@@ -4208,7 +5487,16 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
         if (mat && mat->GetStrandsPerString() != v) { mat->SetStrandsPerString(v); changed = YES; }
     } else if (k == "MatrixStart" || k == "WreathStart") {
         int v = asInt(&ok); if (!ok) return NO;
-        ApplyStartCorner(m, v); changed = YES;
+        if (auto* sp = dynamic_cast<SpinnerModel*>(m)) {
+            // J-20 — Spinner has a 6-choice enum that maps to
+            // _alternate + IsLtoR + isBotToTop via Decode.
+            sp->DecodeStartLocation(v);
+            sp->SetDirection(sp->GetIsLtoR() ? "L" : "R");
+            sp->SetStartSide(sp->GetIsBtoT() ? "B" : "T");
+        } else {
+            ApplyStartCorner(m, v);
+        }
+        changed = YES;
     }
     // Tree
     else if (k == "TreeStyle") {
@@ -4267,7 +5555,9 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
     } else if (k == "StarStart") {
         int v = asInt(&ok); if (!ok) return NO;
         auto* s = dynamic_cast<StarModel*>(m);
-        NSArray* opts = StartCornerOptions();
+        // J-20 — Star has 12 named start locations, not the 4
+        // matrix corners. Mirrors StarPropertyAdapter.cpp.
+        NSArray* opts = StarStartLocationOptions();
         if (s && v >= 0 && v < (int)opts.count) {
             std::string loc = [(NSString*)opts[v] UTF8String];
             s->SetStarStartLocation(loc); changed = YES;
@@ -4306,6 +5596,65 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
         BOOL v = asBool(&ok); if (!ok) return NO;
         auto* a = dynamic_cast<ArchesModel*>(m);
         if (a && a->GetZigZag() != (v?true:false)) { a->SetZigZag(v); changed = YES; }
+    } else if (k == "ArchesGap") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* a = dynamic_cast<ArchesModel*>(m);
+        if (a && a->GetGap() != v) { a->SetGap(v); changed = YES; }
+    } else if (k == "ArchesSkew") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* a = dynamic_cast<ArchesModel*>(m);
+        if (a) {
+            auto& threePt = dynamic_cast<ThreePointScreenLocation&>(a->GetModelScreenLocation());
+            if (threePt.GetAngle() != v) { threePt.SetAngle(v); changed = YES; }
+        }
+    } else if (k == "ArchesStart") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* a = dynamic_cast<ArchesModel*>(m);
+        if (a) {
+            if (a->GetLayerSizeCount() != 0) {
+                // 4-choice: (IsLtoR?0:2) + (IsBtoT?1:0)
+                a->SetDirection((v == 0 || v == 1) ? "L" : "R");
+                a->SetStartSide((v == 0 || v == 2) ? "T" : "B");
+                a->SetIsBtoT(v != 0 && v != 2);
+            } else {
+                a->SetDirection(v == 0 ? "L" : "R");
+            }
+            changed = YES;
+        }
+    } else if (k == "LayeredArches") {
+        BOOL v = asBool(&ok); if (!ok) return NO;
+        auto* a = dynamic_cast<ArchesModel*>(m);
+        if (a) {
+            if (v) {
+                a->SetNumArches(1);
+                a->SetLayerSizeCount(1);
+                a->SetLayerSize(0, a->GetNodesPerArch());
+            } else {
+                a->SetLayerSizeCount(0);
+            }
+            a->OnLayerSizesChange(true);
+            changed = YES;
+        }
+    } else if (k == "LayerSizes") {
+        // J-20.7 — Wholesale-replace the layer-size vector on any
+        // model that supports the desktop's AddLayerSizeProperty
+        // helper (Arches, Star, Circle). Empty array clears layers
+        // (same effect as turning the "layered" toggle off).
+        // SetLayerSizeCount + SetLayerSize live on the Model base
+        // so a generic Model* call is enough; OnLayerSizesChange
+        // is the per-type hook (only Arches overrides it today).
+        if (![value isKindOfClass:[NSArray class]]) return NO;
+        if (m->ModelSupportsLayerSizes()) {
+            NSArray* arr = (NSArray*)value;
+            m->SetLayerSizeCount((int)arr.count);
+            for (NSUInteger i = 0; i < arr.count; ++i) {
+                int sz = [arr[i] intValue];
+                if (sz < 1) sz = 1;
+                m->SetLayerSize(i, sz);
+            }
+            m->OnLayerSizesChange(true);
+            changed = YES;
+        }
     }
     // Icicles
     else if (k == "IciclesStrings") {
@@ -4424,36 +5773,39 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
         m->SetIsLtoR(v == 0);
         changed = YES;
     }
-    // Spinner
+    // Spinner — J-20 keys match desktop SpinnerPropertyAdapter
     else if (k == "SpinnerStringCount") {
         int v = asInt(&ok); if (!ok) return NO;
         auto* s = dynamic_cast<SpinnerModel*>(m);
         if (s && s->GetNumSpinnerStrings() != v) { s->SetNumSpinnerStrings(v); changed = YES; }
-    } else if (k == "SpinnerArmCount") {
+    } else if (k == "FoldCount" || k == "SpinnerArmCount") {
         int v = asInt(&ok); if (!ok) return NO;
         auto* s = dynamic_cast<SpinnerModel*>(m);
         if (s && s->GetArmsPerString() != v) { s->SetArmsPerString(v); changed = YES; }
-    } else if (k == "SpinnerNodesPerArm") {
+    } else if (k == "SpinnerArmNodeCount" || k == "SpinnerNodesPerArm") {
         int v = asInt(&ok); if (!ok) return NO;
         auto* s = dynamic_cast<SpinnerModel*>(m);
         if (s && s->GetNodesPerArm() != v) { s->SetNodesPerArm(v); changed = YES; }
-    } else if (k == "SpinnerHollow") {
+    } else if (k == "Hollow" || k == "SpinnerHollow") {
         int v = asInt(&ok); if (!ok) return NO;
         auto* s = dynamic_cast<SpinnerModel*>(m);
         if (s && s->GetHollowPercent() != v) { s->SetHollow(v); changed = YES; }
-    } else if (k == "SpinnerArc") {
+    } else if (k == "Arc" || k == "SpinnerArc") {
         int v = asInt(&ok); if (!ok) return NO;
         auto* s = dynamic_cast<SpinnerModel*>(m);
         if (s && s->GetArcAngle() != v) { s->SetArc(v); changed = YES; }
-    } else if (k == "SpinnerStartAngle") {
+    } else if (k == "StartAngle" || k == "SpinnerStartAngle") {
         int v = asInt(&ok); if (!ok) return NO;
         auto* s = dynamic_cast<SpinnerModel*>(m);
         if (s && s->GetStartAngle() != v) { s->SetStartAngle(v); changed = YES; }
-    } else if (k == "SpinnerZigZag") {
+    } else if (k == "ZigZag" || k == "SpinnerZigZag") {
         BOOL v = asBool(&ok); if (!ok) return NO;
         auto* s = dynamic_cast<SpinnerModel*>(m);
         if (s && s->HasZigZag() != (v?true:false)) { s->SetZigZag(v); changed = YES; }
     } else if (k == "SpinnerAlternate") {
+        // Not used by the desktop SpinnerPropertyAdapter today but
+        // legacy iPad summaries may still send it; keep the setter
+        // so older preferences don't error.
         BOOL v = asBool(&ok); if (!ok) return NO;
         auto* s = dynamic_cast<SpinnerModel*>(m);
         if (s && s->HasAlternateNodes() != (v?true:false)) { s->SetAlternate(v); changed = YES; }
@@ -4493,20 +5845,118 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
         int v = asInt(&ok); if (!ok) return NO;
         auto* c = dynamic_cast<CubeModel*>(m);
         if (c && c->GetCubeStrings() != v) { c->SetCubeStrings(v); changed = YES; }
-    } else if (k == "CubeStyleIdx") {
+    } else if (k == "CubeStyle" || k == "CubeStyleIdx") {
         int v = asInt(&ok); if (!ok) return NO;
         auto* c = dynamic_cast<CubeModel*>(m);
         if (c && c->GetCubeStyleIndex() != v) { c->SetCubeStyleIndex(v); changed = YES; }
-    } else if (k == "CubeStartIdx") {
+    } else if (k == "CubeStart" || k == "CubeStartIdx") {
         int v = asInt(&ok); if (!ok) return NO;
         auto* c = dynamic_cast<CubeModel*>(m);
         if (c && c->GetCubeStartIndex() != v) { c->SetCubeStartIndex(v); changed = YES; }
+    } else if (k == "StrandPerLine") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* c = dynamic_cast<CubeModel*>(m);
+        if (c && c->GetStrandStyleIndex() != v) { c->SetStrandStyleIndex(v); changed = YES; }
+    } else if (k == "StrandPerLayer") {
+        BOOL v = asBool(&ok); if (!ok) return NO;
+        auto* c = dynamic_cast<CubeModel*>(m);
+        if (c && c->IsStrandPerLayer() != (v?true:false)) {
+            c->SetStrandPerLayer(v?true:false); changed = YES;
+        }
     }
     // ChannelBlock
     else if (k == "ChannelBlockChannels") {
         int v = asInt(&ok); if (!ok) return NO;
         auto* cb = dynamic_cast<ChannelBlockModel*>(m);
         if (cb && cb->GetNumChannels() != v) { cb->SetNumChannels(v); changed = YES; }
+    }
+    // J-20 — Image
+    else if (k == "Image") {
+        std::string v = asString(&ok); if (!ok) return NO;
+        auto* im = dynamic_cast<ImageModel*>(m);
+        if (im && v != im->GetImageFile()) {
+            im->ClearImageCache();
+            im->SetImageFile(v); changed = YES;
+        }
+    } else if (k == "OffBrightness") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* im = dynamic_cast<ImageModel*>(m);
+        if (im && im->GetOffBrightness() != v) { im->SetOffBrightness(v); changed = YES; }
+    } else if (k == "WhiteAsAlpha") {
+        BOOL v = asBool(&ok); if (!ok) return NO;
+        auto* im = dynamic_cast<ImageModel*>(m);
+        if (im && im->IsWhiteAsAlpha() != (v?true:false)) {
+            im->ClearImageCache();
+            im->SetWhiteAsAlpha(v?true:false); changed = YES;
+        }
+    }
+    // J-20.2 — MultiPoint
+    else if (k == "MultiPointNodes") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* mp = dynamic_cast<MultiPointModel*>(m);
+        if (mp && mp->GetNumPoints() != v) { mp->SetNumPoints(v); changed = YES; }
+    } else if (k == "MultiPointStrings") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* mp = dynamic_cast<MultiPointModel*>(m);
+        if (mp && mp->GetNumStrings() != v) { mp->SetNumStrings(v); changed = YES; }
+    }
+    // J-20.2 — PolyLine
+    else if (k == "PolyLineNodes") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* pl = dynamic_cast<PolyLineModel*>(m);
+        if (pl && pl->GetTotalLightCount() != v) { pl->SetTotalLightCount(v); changed = YES; }
+    } else if (k == "PolyLineLights") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* pl = dynamic_cast<PolyLineModel*>(m);
+        if (pl && pl->GetLightsPerNode() != v) { pl->SetLightsPerNode(v); changed = YES; }
+    } else if (k == "PolyLineStrings") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* pl = dynamic_cast<PolyLineModel*>(m);
+        if (pl && pl->GetNumStrings() != v) { pl->SetNumStrings(v); changed = YES; }
+    } else if (k == "PolyLineStart") {
+        int v = asInt(&ok); if (!ok) return NO;
+        m->SetDirection(v == 0 ? "L" : "R");
+        m->SetIsLtoR(v == 0);
+        changed = YES;
+    }
+    // J-20.2 — shared between Multi/PolyLine: Height (key matches
+    // desktop "ModelHeight"). Multi/PolyLine both store on Model
+    // via SetModelHeight; we route via dynamic_cast so the right
+    // setter fires.
+    else if (k == "ModelHeight") {
+        double v = asDouble(&ok); if (!ok) return NO;
+        if (auto* mp = dynamic_cast<MultiPointModel*>(m)) {
+            if (mp->GetModelHeight() != (float)v) { mp->SetModelHeight((float)v); changed = YES; }
+        } else if (auto* pl = dynamic_cast<PolyLineModel*>(m)) {
+            if (pl->GetModelHeight() != (float)v) { pl->SetModelHeight((float)v); changed = YES; }
+        }
+    }
+    // AlternateNodes is shared between Matrix-derived models and
+    // PolyLine. Matrix branch caught above; this is the PolyLine
+    // fallback.
+    else if (k == "PolyLineAlternateNodes") {
+        BOOL v = asBool(&ok); if (!ok) return NO;
+        auto* pl = dynamic_cast<PolyLineModel*>(m);
+        if (pl && pl->HasAlternateNodes() != (v?true:false)) {
+            pl->SetAlternateNodes(v?true:false); changed = YES;
+        }
+    }
+    // J-20 — Label
+    else if (k == "LabelText") {
+        std::string v = asString(&ok); if (!ok) return NO;
+        auto* lm = dynamic_cast<LabelModel*>(m);
+        if (lm && v != lm->GetLabelText()) { lm->SetLabelText(v); changed = YES; }
+    } else if (k == "LabelFontSize") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* lm = dynamic_cast<LabelModel*>(m);
+        if (lm && lm->GetLabelFontSize() != v) { lm->SetLabelFontSize(v); changed = YES; }
+    } else if (k == "LabelTextColor") {
+        std::string v = asString(&ok); if (!ok) return NO;
+        auto* lm = dynamic_cast<LabelModel*>(m);
+        if (lm) {
+            xlColor xc(v);
+            if (xc != lm->GetLabelTextColor()) { lm->SetLabelTextColor(xc); changed = YES; }
+        }
     } else {
         spdlog::warn("setPerTypeProperty: unknown key '{}' for model '{}' (type {})",
                      k, modelName.UTF8String, m->GetDisplayAsString());
@@ -4548,6 +5998,7 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
 
 - (BOOL)undoLastLayoutChange {
     if (!_context) return NO;
+    _context->AbortRender(5000);
     return _context->UndoLastLayoutChange() ? YES : NO;
 }
 

@@ -929,6 +929,55 @@ NS_ASSUME_NONNULL_BEGIN
 // model isn't present.
 - (BOOL)deleteModel:(NSString*)modelName;
 
+// J-18 — rename a model. Calls `ModelManager::Rename` which
+// updates the in-memory references (other groups containing
+// this model fix their member-list vectors). The new name is
+// sanitized via `Model::SafeModelName`. Returns NO if the new
+// name is empty after sanitize, collides with an existing
+// model/group, or `oldName` doesn't resolve. SubModels can't be
+// renamed via this path.
+- (BOOL)renameModel:(NSString*)oldName
+                 to:(NSString*)newName;
+
+// J-18 pass 2 — wholesale-replace this model's alias list with
+// `aliases`. Strings are trimmed + lowercased + de-duped on the
+// way through (matches `Model::SetAliases` semantics). The
+// model's own name is filtered out because `AddAlias` rejects
+// it. Marks the model dirty so the save path re-serializes the
+// `<model>` node — alias child elements come along automatically.
+// Returns NO if the model can't be resolved.
+- (BOOL)setModelAliases:(NSString*)modelName
+                aliases:(NSArray<NSString*>*)aliases;
+
+// J-18 pass 3 — wholesale-replace strand / node names for this
+// model. Both store as comma-delimited strings on the Model
+// (the delimiter is fixed, so any commas inside an entry are
+// stripped on the way through). Empty slots are preserved —
+// the desktop format relies on positional ordering so a missing
+// label at index N stays an empty string rather than dropping
+// the slot.
+- (BOOL)setStrandNames:(NSString*)modelName
+                 names:(NSArray<NSString*>*)names;
+- (BOOL)setNodeNames:(NSString*)modelName
+               names:(NSArray<NSString*>*)names;
+
+// J-18 pass 4 — remove a submodel by name from its parent.
+// Routes through Model::RemoveSubModel which deletes the
+// SubModel*; the next save re-serializes the parent without
+// the submodel's `<subModel>` child. Group / effect references
+// to the deleted submodel are NOT cleaned up — matches desktop
+// behaviour. Returns NO if either name doesn't resolve.
+- (BOOL)deleteSubModelNamed:(NSString*)submodelName
+                    onModel:(NSString*)parentName;
+
+// J-18 pass 6 — clear any dimming curve set on this model.
+// SetDimmingInfo({}) deletes the cached `modelDimmingCurve`
+// and empties the `<dimmingCurve>` XML child block on save.
+// Editing the curve is not yet supported on iPad — clear is
+// the only mutation we expose. Returns NO if the model
+// doesn't resolve or there's nothing to clear.
+- (BOOL)clearDimmingCurveOnModel:(NSString*)modelName;
+
 // Phase J-5 (sidebar tabs) — ModelGroups visible in the active
 // layout group. Names only, in the same order as
 // `modelsInActiveLayoutGroup` (alphabetical by ModelManager map

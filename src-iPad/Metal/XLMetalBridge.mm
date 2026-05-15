@@ -1132,6 +1132,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     if (!rctx) return NO;
     Model* leaderModel = rctx->GetModelManager()[leader.UTF8String];
     if (!leaderModel) return NO;
+    rctx->AbortRender(5000);
     const std::string edgeStr = edge.UTF8String;
     const float target = ReadAlignReference(leaderModel, edgeStr);
     BOOL anyMoved = NO;
@@ -1156,6 +1157,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     if (!doc || names.count < 3 || axis.length == 0) return NO;
     iPadRenderContext* rctx = ContextFromDoc(doc);
     if (!rctx) return NO;
+    rctx->AbortRender(5000);
     const std::string axisStr = axis.UTF8String;
     enum class A { H, V, D } which;
     if      (axisStr == "horizontal") which = A::H;
@@ -1215,6 +1217,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     if (!rctx) return NO;
     Model* leaderModel = rctx->GetModelManager()[leader.UTF8String];
     if (!leaderModel) return NO;
+    rctx->AbortRender(5000);
     auto& leaderLoc = leaderModel->GetModelScreenLocation();
     const float tw = leaderLoc.GetMWidth();
     const float th = leaderLoc.GetMHeight();
@@ -1252,6 +1255,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     if (!doc || names.count == 0 || axis.length == 0) return NO;
     iPadRenderContext* rctx = ContextFromDoc(doc);
     if (!rctx || !rctx->HasModelManager()) return NO;
+    rctx->AbortRender(5000);
     const std::string axisStr = axis.UTF8String;
     const bool horizontal = (axisStr == "horizontal");
     const bool vertical   = (axisStr == "vertical");
@@ -1280,6 +1284,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     if (!doc || names.count == 0) return out;
     iPadRenderContext* rctx = ContextFromDoc(doc);
     if (!rctx || !rctx->HasModelManager()) return out;
+    rctx->AbortRender(5000);
     auto& mgr = rctx->GetModelManager();
 
     for (NSString* n in names) {
@@ -1325,6 +1330,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
 
 - (void)endHandleDragForDocument:(XLSequenceDocument*)doc {
     _handleDragNeedsLatch = NO;
+    if (iPadRenderContext* abortCtx = ContextFromDoc(doc)) abortCtx->AbortRender(5000);
 
     // If a descriptor session is active, commit + drop. Maps
     // DirtyField bits onto the dirty layout-models set so save
@@ -1393,6 +1399,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
         viewSize:(CGSize)viewSize
      forDocument:(XLSequenceDocument*)doc {
     if (!_preview || !doc) return NO;
+    if (iPadRenderContext* abortCtx = ContextFromDoc(doc)) abortCtx->AbortRender(5000);
 
     // if a new-API session is active, route through it.
     // Ignores `handleIndex` (the new path identifies the handle
@@ -1595,6 +1602,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     auto& loc = vo->GetObjectScreenLocation();
     if (loc.IsLocked() || vo->IsFromBase()) return NO;
 
+    rctx->AbortRender(5000);
     int canvasW = _canvas->getWidth();
     int canvasH = _canvas->getHeight();
     if (canvasW <= 0 || canvasH <= 0) return NO;
@@ -1652,6 +1660,8 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     auto* terrain = dynamic_cast<TerrainObject*>(vo);
     if (!terrain) return NO;
     if (terrain->GetBaseObjectScreenLocation().IsLocked() || terrain->IsFromBase()) return NO;
+
+    rctx->AbortRender(5000);
 
     // Unproject the touch into world XY. Terrain lives on the
     // ground plane in 2D mode (XZ in 3D, but we treat it the same
@@ -1792,6 +1802,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     auto& loc = m->GetModelScreenLocation();
     if (loc.IsLocked()) return NO;
 
+    rctx->AbortRender(5000);
     int canvasW = _canvas->getWidth();
     int canvasH = _canvas->getHeight();
     if (canvasW <= 0 || canvasH <= 0) return NO;
@@ -1905,6 +1916,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     if (!_bodyDrag3DActive || !_preview || !doc) return NO;
     iPadRenderContext* rctx = ContextFromDoc(doc);
     if (!rctx) return NO;
+    rctx->AbortRender(5000);
     // J-15 — branch by target. ModelScreenLocation is the base;
     // we just need a reference to the right one.
     ModelScreenLocation* locPtr = nullptr;
@@ -2097,6 +2109,12 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     iPadRenderContext* rctx = ContextFromDoc(doc);
     if (!rctx) return nil;
 
+    // J-18.5 — abort any in-flight render before adding a new
+    // Model to the manager; render workers hold raw Model*
+    // references and racing them produces hard-to-reproduce
+    // crashes. Mirrors the desktop's AbortRender() guard in
+    // LayoutPanel before model creation.
+    rctx->AbortRender(5000);
     Model* m = rctx->GetModelManager().CreateDefaultModel(type.UTF8String, "1");
     if (!m) return nil;
 
@@ -2169,6 +2187,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     pugi::xml_node root = xdoc.document_element();
     if (!root) return nil;
 
+    rctx->AbortRender(5000);
     // CreateDefaultModelFromSavedModelNode wants a baseline Model*
     // to mutate / replace. Use "Custom" — the import path swaps it
     // out for the deserialized type anyway, so the placeholder
@@ -2489,6 +2508,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     if (!_pinchScaleActive || !doc || _pinchScaleModelName.empty()) return NO;
     iPadRenderContext* rctx = ContextFromDoc(doc);
     if (!rctx) return NO;
+    rctx->AbortRender(5000);
     ModelScreenLocation* locPtr = nullptr;
     if (_pinchScaleTargetIsVO) {
         if (!rctx->HasViewObjectManager()) return NO;
@@ -2536,6 +2556,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     if (!_twistRotateActive || !doc || _twistRotateModelName.empty()) return NO;
     iPadRenderContext* rctx = ContextFromDoc(doc);
     if (!rctx) return NO;
+    rctx->AbortRender(5000);
     ModelScreenLocation* locPtr = nullptr;
     if (_twistRotateTargetIsVO) {
         if (!rctx->HasViewObjectManager()) return NO;

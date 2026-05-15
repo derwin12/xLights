@@ -138,6 +138,10 @@ struct LayoutEditorView: View {
 
     /// J-8 — file picker for the 2D Background image.
     @State private var backgroundImagePickerVisible: Bool = false
+    // J-20.2 — Image model file picker.
+    @State private var imageFilePickerVisible: Bool = false
+    @State private var pendingImagePickKey: String = ""
+    @State private var pendingImagePickModel: String = ""
 
     /// J-12 — generic view-object file picker (Mesh `.obj`,
     /// Image bitmap, Terrain image). `pendingObjectFilePickKey`
@@ -155,6 +159,10 @@ struct LayoutEditorView: View {
     /// J-17 (view object rename) — rename sheet visibility + target.
     @State private var renameObjectSheetVisible: Bool = false
     @State private var pendingRenameObjectOldName: String? = nil
+
+    /// J-18 (model rename) — rename sheet visibility + target.
+    @State private var renameModelSheetVisible: Bool = false
+    @State private var pendingRenameModelOldName: String? = nil
 
     /// J-4 (import) — UTTypes the .fileImporter accepts. Declared
     /// as a static so the SwiftUI type-checker can resolve the
@@ -178,6 +186,19 @@ struct LayoutEditorView: View {
         NotificationCenter.default.post(name: .layoutEditorModelMoved,
                                          object: "LayoutEditor",
                                          userInfo: ["model": name])
+    }
+
+    /// J-18 — model rename sheet "Rename" callback. Re-points
+    /// the sidebar selection to the new name on success so the
+    /// property pane reopens on the renamed model.
+    private func handleRenameModel(_ oldName: String, _ newName: String) {
+        guard viewModel.document.renameModel(oldName, to: newName) else { return }
+        if viewModel.layoutEditorSelectedModel == oldName {
+            viewModel.layoutSelectSingle(newName)
+        }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        refreshModelList()
     }
 
     /// J-17 — view-object rename sheet "Rename" callback.
@@ -256,6 +277,28 @@ struct LayoutEditorView: View {
             commitObjectProperty(objectName: "2D Background",
                                  key: "backgroundImage",
                                  value: path as NSString)
+        case .failure(let err):
+            saveErrorMessage = err.localizedDescription
+        }
+    }
+
+    /// J-20.2 — Image-model file picker completion. The key was
+    /// captured when the user tapped the folder button on the
+    /// `imageFile` descriptor row; `pendingImagePickModel` is
+    /// set so we can route the per-type commit to the right
+    /// model even if selection drifts before the picker returns.
+    private func handleImageFilePick(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first,
+                  let modelName = viewModel.layoutEditorSelectedModel else { return }
+            let granted = url.startAccessingSecurityScopedResource()
+            let path = url.path
+            _ = XLSequenceDocument.obtainAccess(toPath: path, enforceWritable: false)
+            if granted { url.stopAccessingSecurityScopedResource() }
+            commitPerTypeProperty(modelName: modelName,
+                                   key: pendingImagePickKey,
+                                   value: path as NSString)
         case .failure(let err):
             saveErrorMessage = err.localizedDescription
         }
@@ -461,6 +504,37 @@ struct LayoutEditorView: View {
                       allowedContentTypes: [.png, .jpeg, .tiff, .bmp, .gif, .image],
                       allowsMultipleSelection: false,
                       onCompletion: handleBackgroundImagePick)
+        // J-20.2 — Image-model file picker. Same security-scoped
+        // dance as the background importer; on success, route
+        // through the per-type commit so the descriptor pipeline
+        // picks up the new path.
+        .fileImporter(isPresented: $imageFilePickerVisible,
+                      allowedContentTypes: [.png, .jpeg, .tiff, .bmp, .gif, .image],
+                      allowsMultipleSelection: false,
+                      onCompletion: handleImageFilePick)
+        .sheet(isPresented: $renameModelSheetVisible) {
+            if let oldName = pendingRenameModelOldName {
+                RenameGroupSheet(
+                    oldName: oldName,
+                    existingNames: Set(
+                        (modelNames + groupNames + objectNames).filter { $0 != oldName }
+                    ),
+                    onRename: { newName in
+                        handleRenameModel(oldName, newName)
+                        renameModelSheetVisible = false
+                        pendingRenameModelOldName = nil
+                    },
+                    onCancel: {
+                        renameModelSheetVisible = false
+                        pendingRenameModelOldName = nil
+                    },
+                    sanitize: { raw in
+                        viewModel.document.sanitizedModelName(raw)
+                    },
+                    kindLabel: "Model"
+                )
+            }
+        }
         .modifier(ViewObjectCrudModifiers(
             objectFilePickerVisible: $objectFilePickerVisible,
             objectFilePickerTypes: objectFilePickerTypes,
@@ -803,17 +877,38 @@ struct LayoutEditorView: View {
                     },
                     typeCommit: { key, value in
                         commitPerTypeProperty(modelName: name, key: key, value: value)
+                    },
+                    onRenameRequest: {
+                        pendingRenameModelOldName = name
+                        renameModelSheetVisible = true
+                    },
+                    onCommitAliases: { aliases in
+                        commitAliases(modelName: name, aliases: aliases)
+                    },
+                    onCommitIndexedNames: { kind, names in
+                        commitIndexedNames(modelName: name, kind: kind, names: names)
+                    },
+                    onDeleteSubModel: { submodelName in
+                        deleteSubModel(modelName: name, submodelName: submodelName)
+                    },
+                    onNavigateToGroup: { groupName in
+                        sidebarTab = .groups
+                        viewModel.layoutEditorSelectedGroup = groupName
+                        viewModel.layoutEditorSelectedModel = nil
+                    },
+                    onClearDimmingCurve: {
+                        clearDimmingCurve(modelName: name)
+                    },
+                    onPickImageFile: { key in
+                        pendingImagePickKey = key
+                        imageFilePickerVisible = true
                     }
                 )
-                Divider().padding(.vertical, 8)
-                displaySection
             } else {
                 emptyPropertyHint(
                     title: "Pick a model",
                     body: "Tap a model in the list above to edit its position, size, rotation, layout group, and controller mapping."
                 )
-                Divider().padding(.vertical, 8)
-                displaySection
             }
         case .groups:
             if let name = viewModel.layoutEditorSelectedGroup,
@@ -1625,6 +1720,62 @@ struct LayoutEditorView: View {
         }
     }
 
+    /// J-18 pass 2 — wholesale-replace this model's alias list.
+    /// Separate path from `commitProperty` because aliases are a
+    /// collection (not a scalar prop) and round-trip through the
+    /// dedicated `setModelAliases:aliases:` bridge method.
+    private func commitAliases(modelName: String, aliases: [String]) {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
+        guard viewModel.document.setModelAliases(modelName, aliases: aliases) else { return }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        canUndo = viewModel.document.canUndoLayoutChange()
+    }
+
+    /// J-18 pass 6 — clear the dimming curve on a model. Curve
+    /// editing isn't on iPad yet; clear is the only mutation.
+    private func clearDimmingCurve(modelName: String) {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
+        guard viewModel.document.clearDimmingCurve(onModel: modelName) else { return }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        canUndo = viewModel.document.canUndoLayoutChange()
+    }
+
+    /// J-18 pass 4 — delete one submodel from its parent. Bridge
+    /// call is per-submodel rather than wholesale-replace because
+    /// SubModels carry per-instance geometry (range/lines), and
+    /// rebuilding them from the iPad isn't in scope yet — delete
+    /// is the only edit operation we expose.
+    private func deleteSubModel(modelName: String, submodelName: String) {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
+        guard viewModel.document.deleteSubModelNamed(submodelName,
+                                                    onModel: modelName) else { return }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        canUndo = viewModel.document.canUndoLayoutChange()
+    }
+
+    /// J-18 pass 3 — wholesale-replace strand or node names.
+    /// Empty trailing slots are kept so positional indexing is
+    /// preserved on the bridge side (comma-join puts blanks
+    /// between commas).
+    private func commitIndexedNames(modelName: String,
+                                     kind: ModelDataKind,
+                                     names: [String]) {
+        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
+        let ok: Bool
+        switch kind {
+        case .strands: ok = viewModel.document.setStrandNames(modelName, names: names)
+        case .nodes:   ok = viewModel.document.setNodeNames(modelName, names: names)
+        default:       return
+        }
+        guard ok else { return }
+        summaryToken &+= 1
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        canUndo = viewModel.document.canUndoLayoutChange()
+    }
+
     private func commitProperty(modelName: String, key: String, value: Any) {
         // Capture undo BEFORE the edit so the snapshot reflects the
         // pre-edit state. Pushed unconditionally — even no-op edits
@@ -1935,19 +2086,62 @@ private struct LayoutEditorPropertiesView: View {
     let token: Int
     let commit: (_ key: String, _ value: Any) -> Void
     let typeCommit: (_ key: String, _ value: Any) -> Void
+    let onRenameRequest: () -> Void
+    let onCommitAliases: (_ aliases: [String]) -> Void
+    let onCommitIndexedNames: (_ kind: ModelDataKind, _ names: [String]) -> Void
+    let onDeleteSubModel: (_ submodelName: String) -> Void
+    let onNavigateToGroup: (_ groupName: String) -> Void
+    let onClearDimmingCurve: () -> Void
+    let onPickImageFile: (_ key: String) -> Void
 
     @State private var expandedTypeProps: Bool = true
     @State private var expandedController: Bool = false
+    @State private var expandedControllerConnection: Bool = false
     @State private var expandedStringProps: Bool = false
+    @State private var expandedModelData: Bool = false
     @State private var expandedAppearance: Bool = false
     @State private var expandedDimensions: Bool = false
     @State private var expandedSizeLocation: Bool = false
+    // J-18 — which read-only popup viewer (Faces / States /
+    // SubModels / etc) is currently presented. nil = none.
+    @State private var modelDataViewer: ModelDataKind? = nil
+    @State private var pendingClearDimmingCurve: Bool = false
+    // J-19 — Layered Arches layer-size editor.
+    // J-20.7 — Switched to `.sheet(item:)` so the sheet is bound
+    // to the data's identity rather than a separate boolean flag.
+    // The old `.sheet(isPresented:)` + `pendingLayerSizes` pattern
+    // had a race where the sheet's @State sometimes initialised
+    // from a stale capture of `pendingLayerSizes`.
+    @State private var layerSizesEditorPayload: LayerSizesPayload? = nil
+    // J-20 — Start Channel structured editor. Initial value /
+    // commit key are captured at open time so the sheet doesn't
+    // need to know about per-string vs. model-wide routing.
+    @State private var startChannelEditorVisible: Bool = false
+    @State private var pendingStartChannelKey: String = ""
+    @State private var pendingStartChannelInitial: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             // 1. Header — non-collapsible identity block.
-            row("Name") { Text(modelName).truncationMode(.middle) }
+            row("Name") {
+                HStack(spacing: 6) {
+                    Text(modelName)
+                        .truncationMode(.middle)
+                    Button {
+                        onRenameRequest()
+                    } label: {
+                        Image(systemName: "pencil")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Rename model")
+                }
+            }
             row("Type") { Text(summary["displayAs"] as? String ?? "—") }
+            // J-19 — Description belongs in the model-header block
+            // (matching desktop), not under Appearance.
+            row("Description") { descriptionField }
 
             // 2. Model Properties (per-type). Title carries the
             // model's `displayAs` for parity with desktop's
@@ -1961,25 +2155,147 @@ private struct LayoutEditorPropertiesView: View {
                 }
             }
 
-            // 3. Controller Connection.
-            section($expandedController, title: "Controller Connection") {
+            // J-19/J-20 — model-header block (between Type and the
+            // real Controller Connection): Preview, Controller
+            // picker, Start Channel + indiv per-string,
+            // Model Chain, channel range. Desktop has these as
+            // un-categorised rows above the Controller Connection
+            // section; iPad gives them their own collapsible to
+            // keep the property pane tidy.
+            section($expandedController, title: "Model") {
                 row("Preview") { layoutGroupPicker }
                 row("Controller") { controllerField }
+                // J-20 — Low Definition Factor is only meaningful
+                // on models whose render path supports it (matrix
+                // and image types). Hidden otherwise.
+                if (summary["supportsLowDefinition"] as? Bool) ?? false {
+                    row("Low Def Factor") { lowDefFactorField }
+                }
+                row("Shadow Model For") { shadowModelPicker }
+                let hasMulti = (summary["hasMultipleStrings"] as? Bool) ?? false
+                let hasIndiv = (summary["hasIndividualStartChannels"] as? Bool) ?? false
+                if hasMulti {
+                    row("Indiv Start Chans") {
+                        Toggle("", isOn: Binding(
+                            get: { hasIndiv },
+                            set: { commit("hasIndividualStartChannels", NSNumber(value: $0)) }
+                        ))
+                        .labelsHidden()
+                        .controlSize(.mini)
+                    }
+                    if hasIndiv {
+                        let chans = (summary["individualStartChannels"] as? [String]) ?? []
+                        ForEach(Array(chans.enumerated()), id: \.offset) { idx, ch in
+                            row("String \(idx + 1)") {
+                                startChannelField(key: "individualStartChannel\(idx)",
+                                                   initial: ch)
+                            }
+                        }
+                    } else {
+                        row("Start Channel") { modelStartChannelField }
+                    }
+                } else {
+                    row("Start Channel") { modelStartChannelField }
+                }
+                if (summary["modelChainApplicable"] as? Bool) ?? false {
+                    row("Model Chain") { modelChainPicker }
+                }
                 row("Channel range") {
                     Text("\(uintVal("startChannel"))..\(uintVal("endChannel"))")
                         .foregroundStyle(.secondary)
                 }
             }
 
-            // 4. String Properties.
+            // J-20 — real Controller Connection section. Mirrors
+            // desktop ModelPropertyAdapter::AddControllerProperties:
+            // port (gated max by protocol), protocol enum, smart
+            // remote subsection (pixel + caps>0), serial-only
+            // DMX channel + Speed, PWM gamma/brightness, per-pixel
+            // toggles for null pixels / brightness / gamma / color
+            // order / direction / group count / zig-zag / smart Ts
+            // — each row only shown when the controller caps say
+            // it's supported.
+            // J-20.5 — Model Data section moved here so it sits
+            // between the model-header (Model) and the real
+            // Controller Connection — matches desktop's ordering
+            // where the popup-dialog properties appear under the
+            // header block, above the controller-connection
+            // category.
+            section($expandedModelData, title: "Model Data") {
+                modelDataRow(kind: .submodels)
+                modelDataRow(kind: .faces)
+                modelDataRow(kind: .states)
+                modelDataRow(kind: .aliases)
+                modelDataRow(kind: .strands)
+                modelDataRow(kind: .nodes)
+                modelDataRow(kind: .groups)
+                row("Dimming Curve") {
+                    HStack(spacing: 6) {
+                        Text(hasDimmingCurve ? "Set" : "—")
+                            .foregroundStyle(.secondary)
+                        if hasDimmingCurve && !isDisabled("dimmingCurve") {
+                            Button {
+                                pendingClearDimmingCurve = true
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Clear dimming curve")
+                        }
+                    }
+                }
+                .opacity(isDisabled("dimmingCurve") ? 0.45 : 1.0)
+            }
+            .alert("Clear dimming curve?",
+                   isPresented: $pendingClearDimmingCurve) {
+                Button("Cancel", role: .cancel) {}
+                Button("Clear", role: .destructive) {
+                    onClearDimmingCurve()
+                }
+            } message: {
+                Text("Removes the dimming curve from \(modelName). Editing curves isn't yet available on iPad — you'll need the desktop to add one back.")
+            }
+
+            section($expandedControllerConnection, title: "Controller Connection") {
+                controllerConnectionFields
+            }
+
+            // J-20.5 — String Properties. Strips the bogus
+            // "Strings" + "Nodes" rows that weren't in desktop's
+            // section. Only String Type + dynamic colour controls
+            // + RGBW Handling, matching desktop verbatim.
             section($expandedStringProps, title: "String Properties") {
                 row("String Type") { stringTypePicker }
-                row("Strings") {
-                    Text("\(intVal("stringCount"))").foregroundStyle(.secondary)
+                    .opacity(isDisabled("stringType") ? 0.45 : 1.0)
+                    .disabled(isDisabled("stringType"))
+                let mode = summary["stringColorMode"] as? String ?? "none"
+                if mode == "single" {
+                    row("Color") { stringColorRow }
+                } else if mode == "superstring" {
+                    row("Colours") {
+                        LayoutEditorIntSpin(
+                            id: "\(modelName).superStringCount.\(token)",
+                            initial: (summary["superStringCount"] as? NSNumber)?.intValue ?? 1,
+                            range: 1...32,
+                            commit: { commit("superStringCount", NSNumber(value: $0)) }
+                        )
+                        .frame(maxWidth: 140, alignment: .trailing)
+                    }
+                    let colours = (summary["superStringColours"] as? [String]) ?? []
+                    ForEach(Array(colours.enumerated()), id: \.offset) { idx, hex in
+                        row("Colour \(idx + 1)") {
+                            Text(hex).foregroundStyle(.secondary)
+                                .font(.caption.monospaced())
+                        }
+                    }
+                } else {
+                    row("Color") {
+                        Text("—").foregroundStyle(.tertiary)
+                    }
                 }
-                row("Nodes") {
-                    Text("\(uintVal("nodeCount"))").foregroundStyle(.secondary)
-                }
+                row("RGBW Handling") { rgbwHandlingPicker }
             }
 
             // 5. Appearance.
@@ -1990,13 +2306,18 @@ private struct LayoutEditorPropertiesView: View {
                         .controlSize(.mini)
                 }
                 row("Pixel Size") { intField(key: "pixelSize", min: 1, max: 100) }
+                    .opacity(isDisabled("pixelSize") ? 0.45 : 1.0)
+                    .disabled(isDisabled("pixelSize"))
                 row("Pixel Style") { pixelStylePicker }
+                    .opacity(isDisabled("pixelStyle") ? 0.45 : 1.0)
+                    .disabled(isDisabled("pixelStyle"))
                 row("Transparency") { intField(key: "transparency", min: 0, max: 100) }
                 row("Black Transparency") {
                     intField(key: "blackTransparency", min: 0, max: 100)
                 }
+                    .opacity(isDisabled("blackTransparency") ? 0.45 : 1.0)
+                    .disabled(isDisabled("blackTransparency"))
                 row("Tag Color") { tagColorPicker }
-                row("Description") { descriptionField }
             }
 
             // 6. Dimensions.
@@ -2006,22 +2327,72 @@ private struct LayoutEditorPropertiesView: View {
                 row("Depth")  { numberField(key: "depth",  min: 0) }
             }
 
-            // 7. Size/Location.
+            // 7. Size/Location. J-19 — branch by screen-location
+            // class so Arches / two-point / three-point models see
+            // their actual endpoints (X1..Z2 + Height) and Boxed
+            // models see World + Scale + Rotate. Mirrors desktop's
+            // ScreenLocationPropertyHelper.
             section($expandedSizeLocation, title: "Size/Location") {
-                row("Centre X") { numberField(key: "centerX") }
-                row("Centre Y") { numberField(key: "centerY") }
-                row("Centre Z") { numberField(key: "centerZ") }
-                row("Rotate X") { numberField(key: "rotateX") }
-                row("Rotate Y") { numberField(key: "rotateY") }
-                row("Rotate Z") { numberField(key: "rotateZ") }
                 row("Locked") {
                     Toggle("", isOn: lockedBinding)
                         .labelsHidden()
                         .controlSize(.mini)
                 }
+                sizeLocationFields
             }
         }
         .font(.caption.monospacedDigit())
+        .sheet(item: $layerSizesEditorPayload) { payload in
+            LayerSizesEditorSheet(initial: payload.sizes,
+                                  commit: { sizes in
+                                      typeCommit("LayerSizes",
+                                                  sizes.map { NSNumber(value: $0) } as NSArray)
+                                  })
+        }
+        .sheet(isPresented: $startChannelEditorVisible) {
+            StartChannelEditorSheet(
+                initial: pendingStartChannelInitial,
+                modelOptions: (summary["controllerOptions"] as? [String]) ?? [],
+                controllerOptions: ((summary["controllerOptions"] as? [String]) ?? [])
+                    .filter { $0 != "Use Start Channel" && $0 != "No Controller" },
+                otherModelOptions: otherModelNames,
+                commit: { newValue in
+                    commit(pendingStartChannelKey, newValue as NSString)
+                })
+        }
+        .sheet(item: $modelDataViewer) { kind in
+            if kind == .aliases {
+                AliasEditorSheet(modelName: modelName,
+                                 initial: entries(for: kind),
+                                 commit: onCommitAliases)
+            } else if kind == .strands || kind == .nodes {
+                IndexedNamesEditorSheet(
+                    modelName: modelName,
+                    title: kind.title,
+                    placeholderFor: { idx in
+                        kind == .strands ? "Strand \(idx + 1)" : "Node \(idx + 1)"
+                    },
+                    initial: entries(for: kind),
+                    commit: { names in
+                        onCommitIndexedNames(kind, names)
+                    })
+            } else if kind == .submodels {
+                SubModelListSheet(
+                    modelName: modelName,
+                    initial: entries(for: kind),
+                    delete: onDeleteSubModel)
+            } else if kind == .groups {
+                GroupRefListSheet(modelName: modelName,
+                                  groups: entries(for: kind),
+                                  onTap: { name in
+                                      modelDataViewer = nil
+                                      onNavigateToGroup(name)
+                                  })
+            } else {
+                ModelDataViewerSheet(title: kind.title,
+                                     entries: entries(for: kind))
+            }
+        }
     }
 
     // MARK: - Section header
@@ -2070,26 +2441,41 @@ private struct LayoutEditorPropertiesView: View {
 
     // MARK: - Editors
 
-    private func numberField(key: String, min: Double? = nil) -> some View {
-        LayoutEditorDoubleField(
+    /// J-20.7 — Numeric field for layout properties (positions,
+    /// dimensions, appearance ints). Always renders as a spin
+    /// widget (editable TextField + ± Stepper) so the user can
+    /// type a value AND nudge by a small step. Caller passes
+    /// `min` / `max` / `step` to gate the ± range; missing
+    /// bounds fall back to ±1e9 so the Stepper still works for
+    /// unbounded world coordinates.
+    private func numberField(key: String,
+                              min: Double? = nil,
+                              max: Double? = nil,
+                              step: Double = 1.0,
+                              precision: Int = 2) -> some View {
+        let lo = min ?? -1_000_000_000
+        let hi = max ??  1_000_000_000
+        return LayoutEditorDoubleSpin(
             id: "\(modelName).\(key).\(token)",
             initial: doubleVal(key),
-            min: min,
+            range: lo...hi,
+            step: step,
+            precision: precision,
             commit: { newValue in commit(key, NSNumber(value: newValue)) }
         )
-        .frame(maxWidth: 110, alignment: .trailing)
+        .frame(maxWidth: 160, alignment: .trailing)
     }
 
     private func intField(key: String, min: Double?, max: Double?) -> some View {
-        LayoutEditorDoubleField(
+        let lo = Int((min ?? -1_000_000).rounded())
+        let hi = Int((max ??  1_000_000).rounded())
+        return LayoutEditorIntSpin(
             id: "\(modelName).\(key).\(token)",
-            initial: Double(intVal(key)),
-            min: min,
-            max: max,
-            precision: 0,
-            commit: { newValue in commit(key, NSNumber(value: Int(newValue))) }
+            initial: intVal(key),
+            range: lo...hi,
+            commit: { newValue in commit(key, NSNumber(value: newValue)) }
         )
-        .frame(maxWidth: 90, alignment: .trailing)
+        .frame(maxWidth: 140, alignment: .trailing)
     }
 
     private var layoutGroupPicker: some View {
@@ -2214,13 +2600,699 @@ private struct LayoutEditorPropertiesView: View {
         )
     }
 
-    private var controllerField: some View {
-        LayoutEditorStringField(
-            id: "\(modelName).controllerName.\(token)",
-            initial: summary["controllerName"] as? String ?? "",
-            commit: { commit("controllerName", $0 as NSString) }
+    /// J-20 — Controller Connection body. Reads everything from
+    /// the `controllerConnection` sub-dictionary the bridge
+    /// builds — pixel/serial/PWM branching is decided there based
+    /// on the model's current protocol + caps.
+    @ViewBuilder
+    private var controllerConnectionFields: some View {
+        let cc = (summary["controllerConnection"] as? [String: Any]) ?? [:]
+        if cc.isEmpty {
+            Text("No controller selected.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        } else {
+            ccPortRow(cc)
+            ccProtocolRow(cc)
+            // Smart-Remote subsection appears above the per-pixel
+            // toggles when the protocol supports it.
+            if ((cc["smartRemoteCount"] as? NSNumber)?.intValue ?? 0) > 0 {
+                ccSmartRemoteRows(cc)
+            }
+            // Serial-only DMX channel + Speed.
+            if (cc["isSerialProtocol"] as? Bool) ?? false {
+                let dmxMax = (cc["dmxChannelMax"] as? NSNumber)?.intValue ?? 512
+                row("DMX Channel") {
+                    ccIntField("cc.dmxChannel", value: cc["dmxChannel"], minV: 1, maxV: Double(dmxMax))
+                }
+                if let speeds = cc["speedOptions"] as? [String], !speeds.isEmpty {
+                    let idx = (cc["speedIndex"] as? NSNumber)?.intValue ?? 0
+                    row("Speed") { ccEnumPicker(key: "cc.speedIndex", index: idx, options: speeds) }
+                }
+            }
+            // PWM-only gamma + brightness (no toggles).
+            if (cc["isPWMProtocol"] as? Bool) ?? false {
+                row("Gamma")      { ccDoubleField("cc.pwmGamma", value: cc["pwmGamma"], minV: 0.1, maxV: 5.0, step: 0.1, precision: 1) }
+                row("Brightness") { ccIntField("cc.pwmBrightness", value: cc["pwmBrightness"], minV: 0, maxV: 100) }
+            }
+            // Pixel per-pixel toggles. Each row only renders when
+            // the caps flag is on; toggling the Active checkbox
+            // flips the corresponding CTRL_PROPS flag in the
+            // bridge.
+            if (cc["isPixelProtocol"] as? Bool) ?? false {
+                ccPixelToggleRow(cc, label: "Start Null Pixels",
+                                  activeKey: "cc.startNullsActive", activeFlag: "startNullsActive",
+                                  valueKey: "cc.startNulls", value: cc["startNulls"],
+                                  minV: 0, maxV: 100, supportsFlag: "supportsStartNulls")
+                ccPixelToggleRow(cc, label: "End Null Pixels",
+                                  activeKey: "cc.endNullsActive", activeFlag: "endNullsActive",
+                                  valueKey: "cc.endNulls", value: cc["endNulls"],
+                                  minV: 0, maxV: 100, supportsFlag: "supportsEndNulls")
+                ccPixelToggleRow(cc, label: "Brightness",
+                                  activeKey: "cc.brightnessActive", activeFlag: "brightnessActive",
+                                  valueKey: "cc.brightness", value: cc["brightness"],
+                                  minV: 0, maxV: 100, supportsFlag: "supportsBrightness")
+                ccPixelToggleRow(cc, label: "Gamma",
+                                  activeKey: "cc.gammaActive", activeFlag: "gammaActive",
+                                  valueKey: "cc.gamma", value: cc["gamma"],
+                                  minV: 0.1, maxV: 5.0, supportsFlag: "supportsGamma",
+                                  precision: 1, step: 0.1)
+                ccPixelEnumToggleRow(cc, label: "Color Order",
+                                      activeKey: "cc.colorOrderActive", activeFlag: "colorOrderActive",
+                                      valueKey: "cc.colorOrderIndex", indexFlag: "colorOrderIndex",
+                                      optionsFlag: "colorOrderOptions", supportsFlag: "supportsColorOrder")
+                ccPixelEnumToggleRow(cc, label: "Direction",
+                                      activeKey: "cc.directionActive", activeFlag: "directionActive",
+                                      valueKey: "cc.directionIndex", indexFlag: "directionIndex",
+                                      optionsFlag: "directionOptions", supportsFlag: "supportsDirection")
+                ccPixelToggleRow(cc, label: "Group Count",
+                                  activeKey: "cc.groupCountActive", activeFlag: "groupCountActive",
+                                  valueKey: "cc.groupCount", value: cc["groupCount"],
+                                  minV: 1, maxV: 500, supportsFlag: "supportsGroupCount")
+                ccPixelToggleRow(cc, label: "Zig Zag",
+                                  activeKey: "cc.zigZagActive", activeFlag: "zigZagActive",
+                                  valueKey: "cc.zigZag", value: cc["zigZag"],
+                                  minV: 0, maxV: 1000, supportsFlag: "supportsZigZag")
+                ccPixelToggleRow(cc, label: "Smart Ts",
+                                  activeKey: "cc.smartTsActive", activeFlag: "smartTsActive",
+                                  valueKey: "cc.smartTs", value: cc["smartTs"],
+                                  minV: 0, maxV: 20, supportsFlag: "supportsSmartTs")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func ccPortRow(_ cc: [String: Any]) -> some View {
+        let maxV = (cc["portMax"] as? NSNumber)?.intValue ?? 128
+        row("Port") {
+            ccIntField("cc.port", value: cc["port"], minV: 0, maxV: Double(maxV))
+        }
+    }
+
+    @ViewBuilder
+    private func ccProtocolRow(_ cc: [String: Any]) -> some View {
+        let opts = (cc["protocolOptions"] as? [String]) ?? []
+        let idx  = (cc["protocolIndex"] as? NSNumber)?.intValue ?? -1
+        if !opts.isEmpty {
+            row("Protocol") {
+                Menu {
+                    ForEach(Array(opts.enumerated()), id: \.offset) { i, name in
+                        Button {
+                            commit("cc.protocol", name as NSString)
+                        } label: {
+                            HStack {
+                                Text(name)
+                                if i == idx {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Text(idx >= 0 && idx < opts.count ? opts[idx] : "—")
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 160, alignment: .trailing)
+                }
+                .menuStyle(.button)
+                .controlSize(.mini)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func ccSmartRemoteRows(_ cc: [String: Any]) -> some View {
+        let useSR = (cc["useSmartRemote"] as? Bool) ?? false
+        row("Use Smart Remote") {
+            Toggle("", isOn: Binding(
+                get: { useSR },
+                set: { commit("cc.useSmartRemote", NSNumber(value: $0)) }
+            ))
+            .labelsHidden().controlSize(.mini)
+        }
+        if useSR {
+            if let typeOpts = cc["smartRemoteTypeOptions"] as? [String], !typeOpts.isEmpty {
+                let i = (cc["smartRemoteTypeIndex"] as? NSNumber)?.intValue ?? 0
+                row("Smart Remote Type") { ccEnumPicker(key: "cc.smartRemoteTypeIndex", index: i, options: typeOpts) }
+            } else if let typeText = cc["smartRemoteType"] as? String, !typeText.isEmpty {
+                row("Smart Remote Type") {
+                    Text(typeText).foregroundStyle(.secondary)
+                }
+            }
+            let srOpts = (cc["smartRemoteOptions"] as? [String]) ?? []
+            let srIdx  = (cc["smartRemoteIndex"] as? NSNumber)?.intValue ?? 0
+            row("Smart Remote") { ccEnumPicker(key: "cc.smartRemoteIndex", index: srIdx, options: srOpts) }
+            if let _ = cc["srMaxCascade"] {
+                let mx = (cc["srMaxCascadeMax"] as? NSNumber)?.intValue ?? 15
+                row("Max Cascade Remotes") {
+                    ccIntField("cc.srMaxCascade", value: cc["srMaxCascade"], minV: 1, maxV: Double(mx))
+                }
+                row("Cascade On Port") {
+                    Toggle("", isOn: Binding(
+                        get: { (cc["srCascadeOnPort"] as? Bool) ?? false },
+                        set: { commit("cc.srCascadeOnPort", NSNumber(value: $0)) }
+                    ))
+                    .labelsHidden().controlSize(.mini)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func ccPixelToggleRow(_ cc: [String: Any],
+                                    label: String,
+                                    activeKey: String,
+                                    activeFlag: String,
+                                    valueKey: String,
+                                    value: Any?,
+                                    minV: Double, maxV: Double,
+                                    supportsFlag: String,
+                                    precision: Int = 0,
+                                    step: Double = 1.0) -> some View {
+        let supported = (cc[supportsFlag] as? Bool) ?? true
+        if supported {
+            let active = (cc[activeFlag] as? Bool) ?? false
+            row(label) {
+                HStack(spacing: 8) {
+                    Toggle("", isOn: Binding(
+                        get: { active },
+                        set: { commit(activeKey, NSNumber(value: $0)) }
+                    ))
+                    .labelsHidden().controlSize(.mini)
+                    if active {
+                        if precision > 0 {
+                            ccDoubleField(valueKey, value: value, minV: minV, maxV: maxV, step: step, precision: precision)
+                        } else {
+                            ccIntField(valueKey, value: value, minV: minV, maxV: maxV)
+                        }
+                    } else {
+                        Text("—").foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func ccPixelEnumToggleRow(_ cc: [String: Any],
+                                        label: String,
+                                        activeKey: String,
+                                        activeFlag: String,
+                                        valueKey: String,
+                                        indexFlag: String,
+                                        optionsFlag: String,
+                                        supportsFlag: String) -> some View {
+        let supported = (cc[supportsFlag] as? Bool) ?? true
+        if supported {
+            let active = (cc[activeFlag] as? Bool) ?? false
+            let opts = (cc[optionsFlag] as? [String]) ?? []
+            let idx  = (cc[indexFlag] as? NSNumber)?.intValue ?? 0
+            row(label) {
+                HStack(spacing: 8) {
+                    Toggle("", isOn: Binding(
+                        get: { active },
+                        set: { commit(activeKey, NSNumber(value: $0)) }
+                    ))
+                    .labelsHidden().controlSize(.mini)
+                    if active {
+                        ccEnumPicker(key: valueKey, index: idx, options: opts)
+                    } else {
+                        Text("—").foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func ccIntField(_ key: String, value: Any?, minV: Double, maxV: Double) -> some View {
+        let v = (value as? NSNumber)?.intValue ?? 0
+        let lo = Int(minV.rounded()), hi = Int(maxV.rounded())
+        // J-20.5 — always spin widget for ints. Range is bounded
+        // by the controller-cap so no unbounded fallback needed.
+        LayoutEditorIntSpin(
+            id: "\(modelName).\(key).\(token)",
+            initial: v, range: lo...hi,
+            commit: { commit(key, NSNumber(value: $0)) }
         )
         .frame(maxWidth: 140, alignment: .trailing)
+    }
+
+    @ViewBuilder
+    private func ccDoubleField(_ key: String, value: Any?,
+                                 minV: Double, maxV: Double,
+                                 step: Double = 0.1, precision: Int = 2) -> some View {
+        let v = (value as? NSNumber)?.doubleValue ?? 0
+        // J-20.5 — always spin widget for doubles given a step.
+        LayoutEditorDoubleSpin(
+            id: "\(modelName).\(key).\(token)",
+            initial: v, range: minV...maxV,
+            step: step, precision: precision,
+            commit: { commit(key, NSNumber(value: $0)) }
+        )
+        .frame(maxWidth: 160, alignment: .trailing)
+    }
+
+    private func ccEnumPicker(key: String, index: Int, options: [String]) -> some View {
+        Menu {
+            ForEach(Array(options.enumerated()), id: \.offset) { i, label in
+                Button {
+                    commit(key, NSNumber(value: i))
+                } label: {
+                    HStack {
+                        Text(label)
+                        if i == index {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(index >= 0 && index < options.count ? options[index] : "—")
+                .truncationMode(.middle)
+                .frame(maxWidth: 140, alignment: .trailing)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+    }
+
+    /// J-19 — Size/Location body keyed off
+    /// `screenLocationKind`. Boxed → X/Y/Z + Scale + Rotate;
+    /// two/three-point → World + X1/Y1/Z1 + X2/Y2/Z2 (+ Height/
+    /// Shear/RotateX for three-point); other → fallback World.
+    @ViewBuilder
+    private var sizeLocationFields: some View {
+        let kind = summary["screenLocationKind"] as? String ?? "boxed"
+        let fields = (summary["screenLocationFields"] as? [String: Any]) ?? [:]
+        switch kind {
+        case "twoPoint":
+            row("World X") { screenLocField("worldX", fields: fields) }
+            row("World Y") { screenLocField("worldY", fields: fields) }
+            row("World Z") { screenLocField("worldZ", fields: fields) }
+            row("X1") { screenLocField("x1", fields: fields) }
+            row("Y1") { screenLocField("y1", fields: fields) }
+            row("Z1") { screenLocField("z1", fields: fields) }
+            row("X2") { screenLocField("x2", fields: fields) }
+            row("Y2") { screenLocField("y2", fields: fields) }
+            row("Z2") { screenLocField("z2", fields: fields) }
+        case "threePoint":
+            row("World X") { screenLocField("worldX", fields: fields) }
+            row("World Y") { screenLocField("worldY", fields: fields) }
+            row("World Z") { screenLocField("worldZ", fields: fields) }
+            row("X1") { screenLocField("x1", fields: fields) }
+            row("Y1") { screenLocField("y1", fields: fields) }
+            row("Z1") { screenLocField("z1", fields: fields) }
+            row("X2") { screenLocField("x2", fields: fields) }
+            row("Y2") { screenLocField("y2", fields: fields) }
+            row("Z2") { screenLocField("z2", fields: fields) }
+            row("Height") { screenLocField("modelHeight", fields: fields, precision: 2) }
+            if (fields["supportsShear"] as? Bool) ?? false {
+                row("Shear") { screenLocField("modelShear", fields: fields, precision: 2) }
+            }
+            row("Rotate X") { screenLocField("rotateX", fields: fields, min: -180, max: 180) }
+        case "boxed":
+            row("X") { screenLocField("worldX", fields: fields) }
+            row("Y") { screenLocField("worldY", fields: fields) }
+            row("Z") { screenLocField("worldZ", fields: fields) }
+            row("Scale X") { screenLocField("scaleX", fields: fields, precision: 3) }
+            row("Scale Y") { screenLocField("scaleY", fields: fields, precision: 3) }
+            if (fields["supportsZScaling"] as? Bool) ?? false {
+                row("Scale Z") { screenLocField("scaleZ", fields: fields, precision: 3) }
+            }
+            row("Rotate X") { screenLocField("rotateX", fields: fields, min: -180, max: 180) }
+            row("Rotate Y") { screenLocField("rotateY", fields: fields, min: -180, max: 180) }
+            row("Rotate Z") { screenLocField("rotateZ", fields: fields, min: -180, max: 180) }
+        default:
+            row("World X") { screenLocField("worldX", fields: fields) }
+            row("World Y") { screenLocField("worldY", fields: fields) }
+            row("World Z") { screenLocField("worldZ", fields: fields) }
+            Text("Position editing for this model type happens via canvas handles.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// J-20.7 — Size/Location spin-widget field. Bounded by min/
+    /// max where caller supplies them (e.g. RotateX = -180..180);
+    /// world / scale coords get a wide ±1e9 fallback so the
+    /// Stepper still works while the editable TextField is the
+    /// primary input.
+    private func screenLocField(_ key: String,
+                                  fields: [String: Any],
+                                  min: Double? = nil,
+                                  max: Double? = nil,
+                                  precision: Int = 2,
+                                  step: Double = 0.5) -> some View {
+        let v = (fields[key] as? NSNumber)?.doubleValue ?? 0.0
+        let lo = min ?? -1_000_000_000
+        let hi = max ??  1_000_000_000
+        return LayoutEditorDoubleSpin(
+            id: "\(modelName).\(key).\(token)",
+            initial: v,
+            range: lo...hi,
+            step: step,
+            precision: precision,
+            commit: { newValue in commit(key, NSNumber(value: newValue)) }
+        )
+        .frame(maxWidth: 160, alignment: .trailing)
+    }
+
+    /// J-20.3 — Low Definition Factor as an editable spin button
+    /// (TextField + Stepper). Range 1..100 mirrors the desktop's
+    /// wxUIntProperty bounds.
+    private var lowDefFactorField: some View {
+        let v = (summary["lowDefinitionFactor"] as? NSNumber)?.intValue ?? 1
+        return LayoutEditorIntSpin(
+            id: "\(modelName).lowDefinitionFactor.\(token)",
+            initial: v,
+            range: 1...100,
+            commit: { commit("lowDefinitionFactor", NSNumber(value: $0)) }
+        )
+        .frame(maxWidth: 150, alignment: .trailing)
+    }
+
+    /// J-20 — Shadow Model For. The empty-string sentinel means
+    /// "not a shadow"; show it as "(none)" so the picker reads
+    /// cleanly.
+    private var shadowModelPicker: some View {
+        let opts = (summary["shadowModelOptions"] as? [String]) ?? [""]
+        let current = summary["shadowModelFor"] as? String ?? ""
+        return Menu {
+            ForEach(opts, id: \.self) { name in
+                Button {
+                    commit("shadowModelFor", name as NSString)
+                } label: {
+                    HStack {
+                        Text(name.isEmpty ? "(none)" : name)
+                        if name == current {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(current.isEmpty ? "(none)" : current)
+                .truncationMode(.middle)
+                .frame(maxWidth: 180, alignment: .trailing)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+    }
+
+    /// J-19 — String color for single-color string types. Uses a
+    /// SwiftUI ColorPicker that round-trips through the bridge's
+    /// hex setter.
+    private var stringColorRow: some View {
+        let hex = summary["stringColor"] as? String ?? "#FF0000"
+        return ColorPicker("",
+                            selection: Binding(
+                                get: { hexColor(hex) },
+                                set: { commit("stringColor", hexFromColor($0) as NSString) }
+                            ),
+                            supportsOpacity: false)
+            .labelsHidden()
+            .frame(width: 40, height: 24)
+    }
+
+    /// J-19 — RGBW Color Handling. Enabled only when the string
+    /// type carries ≥4 channels (matches desktop's gate).
+    private var rgbwHandlingPicker: some View {
+        let opts = (summary["rgbwHandlingOptions"] as? [String]) ?? []
+        let idx = (summary["rgbwHandlingIndex"] as? NSNumber)?.intValue ?? 0
+        let enabled = (summary["rgbwHandlingEnabled"] as? Bool) ?? false
+        return Menu {
+            ForEach(Array(opts.enumerated()), id: \.offset) { i, label in
+                Button {
+                    commit("rgbwHandlingIndex", NSNumber(value: i))
+                } label: {
+                    HStack {
+                        Text(label)
+                        if i == idx {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(idx >= 0 && idx < opts.count ? opts[idx] : "—")
+                .truncationMode(.middle)
+                .frame(maxWidth: 160, alignment: .trailing)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+        .disabled(!enabled)
+        .opacity(enabled ? 1.0 : 0.5)
+    }
+
+    /// J-19 — Hex ↔ Color round-trip must use sRGB explicitly,
+    /// NOT the device color space. iOS color pickers default to
+    /// the device (extended-range Display P3 on modern iPads),
+    /// which mangles RGB values the user typed as exact sRGB hex
+    /// — e.g. #FF0000 round-trips as something slightly redder.
+    /// Pinning to `Color(.sRGB, ...)` and reading the same way
+    /// keeps the bits the user entered intact.
+    private func hexColor(_ hex: String) -> Color {
+        var s = hex
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard let v = UInt32(s, radix: 16), s.count == 6 else {
+            return Color(.sRGB, red: 1, green: 0, blue: 0, opacity: 1)
+        }
+        let r = Double((v >> 16) & 0xff) / 255.0
+        let g = Double((v >> 8)  & 0xff) / 255.0
+        let b = Double(v & 0xff) / 255.0
+        return Color(.sRGB, red: r, green: g, blue: b, opacity: 1)
+    }
+    private func hexFromColor(_ c: Color) -> String {
+        // Pull components in the sRGB color space explicitly —
+        // UIColor(c).getRed in the device space distorts the hex.
+        let cg = c.resolve(in: EnvironmentValues()).cgColor
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let conv = cg.converted(to: srgb,
+                                       intent: .defaultIntent,
+                                       options: nil),
+              let comps = conv.components,
+              comps.count >= 3 else {
+            return "#FF0000"
+        }
+        let ri = Int(round(comps[0] * 255))
+        let gi = Int(round(comps[1] * 255))
+        let bi = Int(round(comps[2] * 255))
+        return String(format: "#%02X%02X%02X",
+                      max(0, min(255, ri)),
+                      max(0, min(255, gi)),
+                      max(0, min(255, bi)))
+    }
+
+    /// J-19 — Controller picker. Mirrors the desktop's enum: the
+    /// two sentinels ("Use Start Channel", "No Controller") sit
+    /// at the top of the list, followed by every auto-layout
+    /// controller name. Selecting "Use Start Channel" clears the
+    /// model's controllerName (writes ""); the others round-trip
+    /// verbatim.
+    private var controllerField: some View {
+        let opts = (summary["controllerOptions"] as? [String])
+            ?? ["Use Start Channel", "No Controller"]
+        let current = summary["controllerSelection"] as? String ?? "Use Start Channel"
+        return Menu {
+            ForEach(opts, id: \.self) { name in
+                Button {
+                    commit("controllerSelection", name as NSString)
+                } label: {
+                    HStack {
+                        Text(name)
+                        if name == current {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(current)
+                .truncationMode(.middle)
+                .frame(maxWidth: 180, alignment: .trailing)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+    }
+
+    /// J-18 — model-wide Start Channel field. Accepts the same
+    /// notation desktop does ("1", ">Model1:1", "@ip:univ:ch",
+    /// etc.). J-19 — read-only when the Controller picker is set
+    /// to anything other than "Use Start Channel". J-20 — pencil
+    /// button opens the structured `StartChannelEditorSheet`
+    /// (the iPad equivalent of desktop's StartChannelDialog) so
+    /// the user doesn't have to memorise the wire format.
+    private var modelStartChannelField: some View {
+        let editable = (summary["startChannelEditable"] as? Bool) ?? true
+        let current = summary["modelStartChannel"] as? String ?? ""
+        return HStack(spacing: 6) {
+            if editable {
+                LayoutEditorStringField(
+                    id: "\(modelName).modelStartChannel.\(token)",
+                    initial: current,
+                    commit: { commit("modelStartChannel", $0 as NSString) }
+                )
+                .frame(maxWidth: 110, alignment: .trailing)
+                Button {
+                    pendingStartChannelKey = "modelStartChannel"
+                    pendingStartChannelInitial = current
+                    startChannelEditorVisible = true
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Pick start channel format")
+            } else {
+                Text(current.isEmpty ? "—" : current)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 140, alignment: .trailing)
+            }
+        }
+    }
+
+    /// J-18 — Per-string start channel. Re-used by ForEach when
+    /// Indiv Start Chans is ON. The `key` carries the string
+    /// index so the bridge can route to the right slot. Read-only
+    /// when the controller drives the assignment (same gate as the
+    /// model-wide Start Channel).
+    private func startChannelField(key: String, initial: String) -> some View {
+        let editable = (summary["startChannelEditable"] as? Bool) ?? true
+        return Group {
+            if editable {
+                LayoutEditorStringField(
+                    id: "\(modelName).\(key).\(token)",
+                    initial: initial,
+                    commit: { commit(key, $0 as NSString) }
+                )
+                .frame(maxWidth: 140, alignment: .trailing)
+            } else {
+                Text(initial.isEmpty ? "—" : initial)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 140, alignment: .trailing)
+            }
+        }
+    }
+
+    /// J-18 — Model Chain picker. Lists other models on the same
+    /// controller + protocol + port, plus the "Beginning"
+    /// sentinel. Hidden when the controller isn't fully set up.
+    private var modelChainPicker: some View {
+        let opts = (summary["modelChainOptions"] as? [String]) ?? ["Beginning"]
+        let current = summary["modelChain"] as? String ?? "Beginning"
+        return Menu {
+            ForEach(opts, id: \.self) { name in
+                Button {
+                    commit("modelChain", name as NSString)
+                } label: {
+                    HStack {
+                        Text(name)
+                        if name == current {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(current)
+                .truncationMode(.middle)
+                .frame(maxWidth: 160, alignment: .trailing)
+        }
+        .menuStyle(.button)
+        .controlSize(.mini)
+    }
+
+    // MARK: - Model Data (read-only popup summaries)
+
+    private var extras: [String: Any] {
+        summary["extras"] as? [String: Any] ?? [:]
+    }
+    private var hasDimmingCurve: Bool {
+        (extras["hasDimmingCurve"] as? Bool) ?? false
+    }
+
+    /// J-20.2 — list of iPad-bridge keys the current model type's
+    /// adapter wants disabled. SwiftUI renders the matching rows
+    /// grayed-out / non-interactive. Matches desktop's
+    /// DisableUnusedProperties.
+    private var disabledKeys: Set<String> {
+        Set((summary["disabledKeys"] as? [String]) ?? [])
+    }
+    private func isDisabled(_ key: String) -> Bool { disabledKeys.contains(key) }
+    private func isDisabled(_ kind: ModelDataKind) -> Bool {
+        switch kind {
+        case .submodels: return disabledKeys.contains("submodels")
+        case .faces:     return disabledKeys.contains("faces")
+        case .states:    return disabledKeys.contains("states")
+        case .strands:   return disabledKeys.contains("strands")
+        case .nodes:     return disabledKeys.contains("nodes")
+        default:         return false
+        }
+    }
+
+    @ViewBuilder
+    private func modelDataRow(kind: ModelDataKind) -> some View {
+        let list = entries(for: kind)
+        // Editable categories show a pencil even when empty so the
+        // user can add the first entry. Read-only categories only
+        // expose the bullet icon when there's something to view.
+        let editable = kind.isEditable
+        let disabled = isDisabled(kind)
+        row(kind.title) {
+            HStack(spacing: 6) {
+                Text(list.isEmpty ? "—" : "\(list.count)")
+                    .foregroundStyle(.secondary)
+                if !disabled && (editable || !list.isEmpty) {
+                    Button {
+                        modelDataViewer = kind
+                    } label: {
+                        Image(systemName: editable ? "pencil" : "list.bullet")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("\(editable ? "Edit" : "View") \(kind.title)")
+                }
+            }
+        }
+        .opacity(disabled ? 0.45 : 1.0)
+    }
+
+    /// J-20 — Start-channel picker's "From Model" / "@Model"
+    /// options. Pulled from the modelChainOptions list (every
+    /// other model on the same controller chain) plus any model
+    /// from the per-summary `allModelNames` slot if exposed.
+    /// Today we use modelChainOptions as the proxy; it filters out
+    /// the current model and ModelGroups, which is what desktop's
+    /// StartChannelDialog does too.
+    private var otherModelNames: [String] {
+        if let chain = summary["modelChainOptions"] as? [String], chain.count > 1 {
+            return chain.filter { $0 != "Beginning" }
+        }
+        return []
+    }
+
+    private func entries(for kind: ModelDataKind) -> [String] {
+        switch kind {
+        case .submodels: return (extras["submodelNames"] as? [String]) ?? []
+        case .faces:     return (extras["faceNames"]     as? [String]) ?? []
+        case .states:    return (extras["stateNames"]    as? [String]) ?? []
+        case .aliases:   return (extras["aliasNames"]    as? [String]) ?? []
+        case .strands:   return (extras["strandNames"]   as? [String]) ?? []
+        case .nodes:     return (extras["nodeNames"]     as? [String]) ?? []
+        case .groups:    return (extras["inModelGroups"] as? [String]) ?? []
+        }
     }
 
     // MARK: - Per-type row dispatcher
@@ -2250,23 +3322,46 @@ private struct LayoutEditorPropertiesView: View {
             let v = (d["value"] as? NSNumber)?.doubleValue ?? 0
             let minV = (d["min"] as? NSNumber)?.doubleValue
             let maxV = (d["max"] as? NSNumber)?.doubleValue
-            LayoutEditorDoubleField(
+            // J-20.5 — always use the spin widget for ints. The
+            // text field handles big jumps (Nodes/String can be
+            // 1..10000, user types the value); the +/- buttons
+            // handle small nudges. Mirrors desktop's universal
+            // wxSpinCtrl on `wxUIntProperty`.
+            let lo = Int((minV ?? 0).rounded())
+            let hi = Int((maxV ?? Double(Int32.max)).rounded())
+            LayoutEditorIntSpin(
                 id: "\(modelName).\(key).\(token)",
-                initial: v, min: minV, max: maxV, precision: 0,
-                commit: { newValue in typeCommit(key, NSNumber(value: Int(newValue))) }
+                initial: Int(v.rounded()),
+                range: lo...hi,
+                commit: { typeCommit(key, NSNumber(value: $0)) }
             )
-            .frame(maxWidth: 110, alignment: .trailing)
+            .frame(maxWidth: 150, alignment: .trailing)
         case "double":
             let v = (d["value"] as? NSNumber)?.doubleValue ?? 0
             let minV = (d["min"] as? NSNumber)?.doubleValue
             let maxV = (d["max"] as? NSNumber)?.doubleValue
+            let stepV = (d["step"] as? NSNumber)?.doubleValue ?? 0.1
             let precision = (d["precision"] as? NSNumber)?.intValue ?? 2
-            LayoutEditorDoubleField(
-                id: "\(modelName).\(key).\(token)",
-                initial: v, min: minV, max: maxV, precision: precision,
-                commit: { newValue in typeCommit(key, NSNumber(value: newValue)) }
-            )
-            .frame(maxWidth: 110, alignment: .trailing)
+            // J-20.5 — always use the spin widget for doubles
+            // when the descriptor provides a finite range.
+            // Without a range we fall back to a plain numeric
+            // field so the SwiftUI Stepper doesn't choke on
+            // unbounded inputs.
+            if let lo = minV, let hi = maxV, stepV > 0 {
+                LayoutEditorDoubleSpin(
+                    id: "\(modelName).\(key).\(token)",
+                    initial: v, range: lo...hi, step: stepV, precision: precision,
+                    commit: { typeCommit(key, NSNumber(value: $0)) }
+                )
+                .frame(maxWidth: 160, alignment: .trailing)
+            } else {
+                LayoutEditorDoubleField(
+                    id: "\(modelName).\(key).\(token)",
+                    initial: v, min: minV, max: maxV, precision: precision,
+                    commit: { newValue in typeCommit(key, NSNumber(value: newValue)) }
+                )
+                .frame(maxWidth: 110, alignment: .trailing)
+            }
         case "bool":
             let v = (d["value"] as? Bool) ?? false
             Toggle("", isOn: Binding(
@@ -2307,9 +3402,94 @@ private struct LayoutEditorPropertiesView: View {
                 commit: { typeCommit(key, $0 as NSString) }
             )
             .frame(maxWidth: 160, alignment: .trailing)
+        case "color":
+            // J-20 — per-type Color row. Mirrors stringColorRow's
+            // sRGB-pinned round-trip so the user's hex stays
+            // bit-exact through the picker.
+            let hex = d["value"] as? String ?? "#FFFFFF"
+            ColorPicker("",
+                         selection: Binding(
+                            get: { hexColor(hex) },
+                            set: { typeCommit(key, hexFromColor($0) as NSString) }
+                         ),
+                         supportsOpacity: false)
+                .labelsHidden()
+                .frame(width: 40, height: 24)
+        case "imageFile":
+            // J-20.2 — path label + folder button. Tapping the
+            // button opens a .fileImporter scoped to image UTTypes
+            // and bubbles the picked path up to the parent so the
+            // shared file-picker plumbing handles security scope.
+            let path = d["value"] as? String ?? ""
+            let display = path.isEmpty ? "—" : (path as NSString).lastPathComponent
+            HStack(spacing: 6) {
+                Text(display)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 110, alignment: .trailing)
+                Button {
+                    onPickImageFile(key)
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Pick image file")
+                if !path.isEmpty {
+                    Button(role: .destructive) {
+                        typeCommit(key, "" as NSString)
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Clear image")
+                }
+            }
+        case "layerSizes":
+            // J-20.4/7 — NSArray<NSNumber*> bridging is unreliable
+            // when the value comes through `[String: Any]`; route
+            // via NSArray + compactMap. Sheet uses .sheet(item:)
+            // so the payload is captured at present time and the
+            // sheet's @State always initialises from the right
+            // data.
+            let sizes = layerSizesFromDescriptor(d)
+            HStack(spacing: 6) {
+                Text(layerSizesLabel(sizes))
+                    .foregroundStyle(.secondary)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 130, alignment: .trailing)
+                Button {
+                    layerSizesEditorPayload = LayerSizesPayload(sizes: sizes)
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Edit layer sizes")
+            }
         default:
             Text("?").foregroundStyle(.tertiary)
         }
+    }
+
+    private func layerSizesFromDescriptor(_ d: [String: Any]) -> [Int] {
+        if let arr = d["value"] as? NSArray {
+            return arr.compactMap { ($0 as? NSNumber)?.intValue }
+        }
+        if let arr = d["value"] as? [Any] {
+            return arr.compactMap { ($0 as? NSNumber)?.intValue ?? ($0 as? Int) }
+        }
+        return []
+    }
+
+    private func layerSizesLabel(_ sizes: [Int]) -> String {
+        if sizes.isEmpty { return "—" }
+        return sizes.map { "\($0)" }.joined(separator: ", ")
     }
 
     // MARK: - Lookups
@@ -2324,6 +3504,606 @@ private struct LayoutEditorPropertiesView: View {
 
     private func uintVal(_ key: String) -> UInt64 {
         (summary[key] as? NSNumber)?.uint64Value ?? 0
+    }
+}
+
+/// J-18 — read-only popup category. Each case identifies one of
+/// desktop's popup-button categories (Faces, States, …) so a
+/// single sheet can render whichever list the user tapped.
+private enum ModelDataKind: String, Identifiable {
+    case submodels, faces, states, aliases, strands, nodes, groups
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .submodels: return "SubModels"
+        case .faces:     return "Faces"
+        case .states:    return "States"
+        case .aliases:   return "Aliases"
+        case .strands:   return "Strand Names"
+        case .nodes:     return "Node Names"
+        case .groups:    return "In Model Groups"
+        }
+    }
+    /// J-18 pass 2/3/4 — only categories with a dedicated
+    /// bridge writer are editable. Everything else opens the
+    /// read-only viewer.
+    var isEditable: Bool {
+        switch self {
+        case .aliases, .strands, .nodes, .submodels: return true
+        default:                                      return false
+        }
+    }
+}
+
+/// J-18 — generic read-only list sheet for popup-style model
+/// data. Editing comes in a later pass; the sheet only needs to
+/// render the strings and offer a Done button.
+private struct ModelDataViewerSheet: View {
+    let title: String
+    let entries: [String]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if entries.isEmpty {
+                    ContentUnavailableView("Nothing defined",
+                        systemImage: "list.bullet",
+                        description: Text("This model has no \(title.lowercased()) yet."))
+                } else {
+                    List {
+                        ForEach(Array(entries.enumerated()), id: \.offset) { _, e in
+                            Text(e).font(.body.monospaced())
+                        }
+                    }
+                }
+            }
+            .navigationTitle(title)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+/// J-18 pass 2 — edit a model's alias list. Aliases are alternate
+/// names a model also responds to during sequence import. Stored
+/// lowercase; the bridge re-applies that normalization on Save,
+/// so what the user types is just a hint.
+private struct AliasEditorSheet: View {
+    let modelName: String
+    let initial: [String]
+    let commit: (_ aliases: [String]) -> Void
+
+    @State private var aliases: [String] = []
+    @State private var draft: String = ""
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Add alias") {
+                    HStack {
+                        TextField("e.g. snowflake-top-left", text: $draft)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                            .submitLabel(.done)
+                            .onSubmit(addDraft)
+                        Button("Add", action: addDraft)
+                            .disabled(normalizedDraft.isEmpty || isDuplicate(normalizedDraft))
+                    }
+                    if !draft.isEmpty {
+                        Text("Will save as '\(normalizedDraft)'")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Section(aliases.isEmpty ? "No aliases yet" : "Aliases (\(aliases.count))") {
+                    if aliases.isEmpty {
+                        Text("This model has no aliases.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(aliases, id: \.self) { a in
+                            Text(a).font(.body.monospaced())
+                        }
+                        .onDelete { idx in
+                            aliases.remove(atOffsets: idx)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Aliases — \(modelName)")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        commit(aliases)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .onAppear {
+            aliases = initial
+        }
+    }
+
+    private var normalizedDraft: String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func isDuplicate(_ candidate: String) -> Bool {
+        // A model can't alias to its own (lowercased) name —
+        // matches the AddAlias guard.
+        if candidate == modelName.lowercased() { return true }
+        return aliases.contains(candidate)
+    }
+
+    private func addDraft() {
+        let n = normalizedDraft
+        guard !n.isEmpty, !isDuplicate(n) else { return }
+        aliases.append(n)
+        draft = ""
+    }
+}
+
+/// J-18 pass 3 — edit per-index strand or node names. Slot count
+/// is fixed (= GetNumStrands or GetNodeCount on the source model)
+/// so this is a renamer, not a list manager. Empty slots are
+/// kept; commas are stripped by the bridge before joining.
+private struct IndexedNamesEditorSheet: View {
+    let modelName: String
+    let title: String
+    let placeholderFor: (Int) -> String
+    let initial: [String]
+    let commit: (_ names: [String]) -> Void
+
+    @State private var names: [String] = []
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if names.isEmpty {
+                    ContentUnavailableView("Nothing to name",
+                        systemImage: "list.number",
+                        description: Text("This model has no \(title.lowercased())."))
+                } else {
+                    List {
+                        ForEach(Array(names.enumerated()), id: \.offset) { idx, _ in
+                            HStack {
+                                Text("\(idx + 1)")
+                                    .frame(minWidth: 28, alignment: .trailing)
+                                    .foregroundStyle(.secondary)
+                                    .font(.caption.monospacedDigit())
+                                TextField(placeholderFor(idx),
+                                          text: Binding(
+                                            get: { names[idx] },
+                                            set: { names[idx] = $0 }
+                                          ))
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled(true)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("\(title) — \(modelName)")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        commit(names)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .onAppear {
+            names = initial
+        }
+    }
+}
+
+/// J-18 pass 4 — list this model's submodels with swipe-to-delete.
+/// Add / rename / geometry editing are not in scope (each one
+/// needs its own slice — submodels carry per-instance range or
+/// line geometry that the iPad has no UI for yet).
+private struct SubModelListSheet: View {
+    let modelName: String
+    let initial: [String]
+    let delete: (_ submodelName: String) -> Void
+
+    @State private var names: [String] = []
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if names.isEmpty {
+                    ContentUnavailableView("No submodels",
+                        systemImage: "list.bullet.indent",
+                        description: Text("This model has no submodels."))
+                } else {
+                    List {
+                        Section(footer: Text("Swipe to delete. Geometry editing is not yet available on iPad — delete clears the submodel; you'll need the desktop to rebuild it.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)) {
+                            ForEach(names, id: \.self) { sub in
+                                Text(sub).font(.body.monospaced())
+                            }
+                            .onDelete { idx in
+                                for i in idx {
+                                    let sub = names[i]
+                                    delete(sub)
+                                }
+                                names.remove(atOffsets: idx)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("SubModels — \(modelName)")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .onAppear {
+            names = initial
+        }
+    }
+}
+
+/// J-20 — structured Start Channel editor. Equivalent of
+/// desktop's StartChannelDialog. Parses the existing value into
+/// a `Mode + fields` representation; recomposes on save. Modes:
+///   - .none      → raw channel number, e.g. "100"
+///   - .universe  → "#<universe>:<channel>" or "#<ip>:<univ>:<ch>"
+///   - .fromModel → ">ModelName:N" (chained relative to a model)
+///   - .startOf   → "@ModelName:N" (from start of a model)
+///   - .controller→ "!ControllerName:N"
+private struct StartChannelEditorSheet: View {
+    let initial: String
+    let modelOptions: [String]            // unused — kept for future fanout
+    let controllerOptions: [String]
+    let otherModelOptions: [String]
+    let commit: (_ value: String) -> Void
+
+    enum Mode: String, CaseIterable, Identifiable {
+        case noneFmt = "Channel #"
+        case universe = "Universe"
+        case fromModel = "From Model"
+        case startOf = "Start Of Model"
+        case controller = "Controller"
+        var id: String { rawValue }
+    }
+
+    @State private var mode: Mode = .noneFmt
+    @State private var channel: Int = 1
+    @State private var universe: Int = 1
+    @State private var ip: String = "ANY"
+    @State private var pickedModel: String = ""
+    @State private var pickedController: String = ""
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Format") {
+                    Picker("Mode", selection: $mode) {
+                        ForEach(Mode.allCases) { m in
+                            Text(m.rawValue).tag(m)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
+                Section("Channel") {
+                    HStack {
+                        Text("Channel")
+                        Spacer()
+                        // J-20.3 — spin-button so the user can both
+                        // type a value and bump it ±1. Wide range
+                        // (1..1e8) keeps the field-style display
+                        // but the +/- is still useful for fine
+                        // adjustments.
+                        LayoutEditorIntSpin(
+                            id: "sc.channel",
+                            initial: channel,
+                            range: 1...100_000_000,
+                            commit: { channel = $0 }
+                        )
+                        .frame(maxWidth: 160, alignment: .trailing)
+                    }
+                }
+                switch mode {
+                case .universe:
+                    Section("Universe") {
+                        HStack {
+                            Text("Universe")
+                            Spacer()
+                            LayoutEditorIntSpin(
+                                id: "sc.universe",
+                                initial: universe,
+                                range: 1...64_000,
+                                commit: { universe = $0 }
+                            )
+                            .frame(maxWidth: 160, alignment: .trailing)
+                        }
+                        TextField("IP (ANY for any)", text: $ip)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                    }
+                case .fromModel, .startOf:
+                    Section(mode == .fromModel ? "Reference model" : "Start of model") {
+                        if otherModelOptions.isEmpty {
+                            Text("No other models on the same controller chain.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Picker("Model", selection: $pickedModel) {
+                                ForEach(otherModelOptions, id: \.self) { Text($0).tag($0) }
+                            }
+                            .pickerStyle(.menu)
+                        }
+                    }
+                case .controller:
+                    Section("Controller") {
+                        if controllerOptions.isEmpty {
+                            Text("No auto-layout controllers configured.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Picker("Controller", selection: $pickedController) {
+                                ForEach(controllerOptions, id: \.self) { Text($0).tag($0) }
+                            }
+                            .pickerStyle(.menu)
+                        }
+                    }
+                case .noneFmt:
+                    EmptyView()
+                }
+                Section("Preview") {
+                    Text(composedValue.isEmpty ? "—" : composedValue)
+                        .font(.body.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Start Channel")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        commit(composedValue)
+                        dismiss()
+                    }
+                    .disabled(composedValue.isEmpty)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .onAppear { parseInitial() }
+    }
+
+    private var composedValue: String {
+        switch mode {
+        case .noneFmt:
+            return "\(channel)"
+        case .universe:
+            let trimmedIP = ip.trimmingCharacters(in: .whitespaces)
+            if trimmedIP.isEmpty || trimmedIP.uppercased() == "ANY" {
+                return "#\(universe):\(channel)"
+            }
+            return "#\(trimmedIP):\(universe):\(channel)"
+        case .fromModel:
+            return pickedModel.isEmpty ? "" : ">\(pickedModel):\(channel)"
+        case .startOf:
+            return pickedModel.isEmpty ? "" : "@\(pickedModel):\(channel)"
+        case .controller:
+            return pickedController.isEmpty ? "" : "!\(pickedController):\(channel)"
+        }
+    }
+
+    private func parseInitial() {
+        let s = initial.trimmingCharacters(in: .whitespaces)
+        if s.isEmpty {
+            mode = .noneFmt
+            return
+        }
+        if s.hasPrefix("#") {
+            mode = .universe
+            let body = String(s.dropFirst())
+            let parts = body.split(separator: ":").map(String.init)
+            if parts.count == 2 {
+                universe = Int(parts[0]) ?? 1
+                channel  = Int(parts[1]) ?? 1
+                ip = "ANY"
+            } else if parts.count == 3 {
+                ip = parts[0]
+                universe = Int(parts[1]) ?? 1
+                channel  = Int(parts[2]) ?? 1
+            }
+            return
+        }
+        if s.hasPrefix(">") || s.hasPrefix("@") {
+            mode = s.hasPrefix(">") ? .fromModel : .startOf
+            let body = String(s.dropFirst())
+            // Split on the LAST colon — model names can contain
+            // colons (legal in submodel paths).
+            if let i = body.lastIndex(of: ":") {
+                pickedModel = String(body[..<i])
+                channel     = Int(body[body.index(after: i)...]) ?? 1
+            } else {
+                pickedModel = body
+                channel = 1
+            }
+            return
+        }
+        if s.hasPrefix("!") {
+            mode = .controller
+            let body = String(s.dropFirst())
+            if let i = body.lastIndex(of: ":") {
+                pickedController = String(body[..<i])
+                channel          = Int(body[body.index(after: i)...]) ?? 1
+            } else {
+                pickedController = body
+                channel = 1
+            }
+            return
+        }
+        // Plain integer (None mode)
+        if let v = Int(s) {
+            mode = .noneFmt
+            channel = v
+        }
+    }
+}
+
+/// J-19 — per-layer size editor for Layered Arches (and any
+/// other model that uses the same wholesale-replace LayerSizes
+/// pipeline in the future). Slot count is variable — Add adds a
+/// new size-1 layer, swipe-to-delete removes a layer. Each row
+/// has an int field for the layer's node count.
+/// J-20.7 — Identifiable payload for the layer-sizes editor.
+/// `.sheet(item:)` recreates the sheet whenever the item changes,
+/// so the sheet's @State always initialises from the right sizes.
+private struct LayerSizesPayload: Identifiable {
+    let id = UUID()
+    let sizes: [Int]
+}
+
+private struct LayerSizesEditorSheet: View {
+    let commit: (_ sizes: [Int]) -> Void
+
+    @State private var sizes: [Int]
+    @Environment(\.dismiss) private var dismiss
+
+    // J-20.7 — initialise `sizes` from `initial` at construction
+    // time. Previous version used `@State private var sizes: [Int] = []`
+    // + .onAppear copy, which lost the data when SwiftUI cached
+    // the view across re-presentations.
+    init(initial: [Int], commit: @escaping (_ sizes: [Int]) -> Void) {
+        self.commit = commit
+        self._sizes = State(initialValue: initial.isEmpty ? [1] : initial)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section(footer: Text("Each layer's node count. The Layered Arches Nodes property is the sum across layers — desktop's behaviour.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)) {
+                    ForEach(Array(sizes.enumerated()), id: \.offset) { idx, _ in
+                        HStack {
+                            Text("Layer \(idx + 1)")
+                                .frame(minWidth: 70, alignment: .leading)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            // J-20.4 — spin button so each layer's
+                            // size is editable + nudge-able with
+                            // the +/- buttons.
+                            LayoutEditorIntSpin(
+                                id: "layerSize.\(idx)",
+                                initial: sizes[idx],
+                                range: 1...10_000,
+                                commit: { sizes[idx] = $0 }
+                            )
+                            .frame(maxWidth: 160, alignment: .trailing)
+                        }
+                    }
+                    .onDelete { idx in
+                        sizes.remove(atOffsets: idx)
+                    }
+                }
+                Section {
+                    Button {
+                        sizes.append(1)
+                    } label: {
+                        Label("Add layer", systemImage: "plus")
+                    }
+                }
+            }
+            .navigationTitle("Layer Sizes")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        commit(sizes)
+                        dismiss()
+                    }
+                    .disabled(sizes.isEmpty)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+/// J-18 pass 5 — read-only list of groups containing this model,
+/// with tap-to-navigate. Tapping a row closes the sheet and
+/// switches the sidebar to Groups with that group preselected.
+/// Editing membership stays on the Groups tab — this is just a
+/// shortcut to get there.
+private struct GroupRefListSheet: View {
+    let modelName: String
+    let groups: [String]
+    let onTap: (_ groupName: String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if groups.isEmpty {
+                    ContentUnavailableView("No groups",
+                        systemImage: "rectangle.3.group",
+                        description: Text("This model isn't in any groups."))
+                } else {
+                    List {
+                        Section(footer: Text("Tap a group to open it in the Groups tab.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)) {
+                            ForEach(groups, id: \.self) { g in
+                                Button {
+                                    onTap(g)
+                                } label: {
+                                    HStack {
+                                        Text(g).font(.body.monospaced())
+                                            .foregroundStyle(.primary)
+                                        Spacer()
+                                        Image(systemName: "chevron.right")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("In Model Groups — \(modelName)")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 
@@ -2528,6 +4308,14 @@ private struct SidebarSelectionMutex: ViewModifier {
                     }
                     viewModel.layoutEditorSelectedGroup = nil
                 }
+                // J-20.6 — mirror tab state to the view model so
+                // the canvas can gate VO picks (don't snag the
+                // House mesh when the user clicks off a model on
+                // the Models tab).
+                viewModel.layoutEditorActiveTab = newTab.rawValue
+            }
+            .onAppear {
+                viewModel.layoutEditorActiveTab = sidebarTab.rawValue
             }
     }
 }
@@ -2654,10 +4442,14 @@ private struct RenameGroupSheet: View {
         !sanitizedName.isEmpty && !collision && sanitizedName != oldName
     }
     private var footerText: String {
-        if kindLabel == "Group" {
+        switch kindLabel {
+        case "Group":
             return "Other groups that reference this one (and any sequences targeting it) update their references automatically. Save the layout to persist."
+        case "Model":
+            return "Groups containing this model and sequences targeting it update their references automatically. Save the layout to persist."
+        default:
+            return "References to this item update automatically. Save the layout to persist."
         }
-        return "References to this view object update automatically. Save the layout to persist."
     }
 
     var body: some View {
@@ -3298,6 +5090,28 @@ private struct LayoutEditorBackgroundPropertiesView: View {
                     .labelsHidden()
                     .controlSize(.mini)
             }
+            // J-19 — Layout-group display rolled up here so the
+            // Background row carries everything that affects the 2D
+            // preview's canvas. Read-only for now — editing these
+            // is a follow-up (canvas size + grid / bbox / center-0
+            // toggles each need bridge setters).
+            Divider().padding(.vertical, 2)
+            row("Canvas") {
+                Text("\(canvasWidth) × \(canvasHeight)")
+                    .foregroundStyle(.secondary)
+            }
+            row("2D centre = 0") {
+                Text((summary["display2DCenter0"] as? Bool ?? false) ? "Yes" : "No")
+                    .foregroundStyle(.secondary)
+            }
+            row("Grid") {
+                Text(gridLabel)
+                    .foregroundStyle(.secondary)
+            }
+            row("Bounding box") {
+                Text((summary["display2DBoundingBox"] as? Bool ?? false) ? "On" : "Off")
+                    .foregroundStyle(.secondary)
+            }
 
             Divider().padding(.vertical, 4)
             Text("The 2D background is a per-layout-group attribute, not a real view object. It draws behind your models in the 2D preview at the configured brightness / alpha.")
@@ -3306,6 +5120,24 @@ private struct LayoutEditorBackgroundPropertiesView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .font(.caption.monospacedDigit())
+    }
+
+    private var canvasWidth: Int {
+        (summary["previewWidth"] as? NSNumber)?.intValue
+            ?? (summary["previewWidth"] as? Int)
+            ?? 0
+    }
+    private var canvasHeight: Int {
+        (summary["previewHeight"] as? NSNumber)?.intValue
+            ?? (summary["previewHeight"] as? Int)
+            ?? 0
+    }
+    private var gridLabel: String {
+        let on = (summary["display2DGrid"] as? Bool) ?? false
+        let spacing = (summary["display2DGridSpacing"] as? NSNumber)?.intValue
+            ?? (summary["display2DGridSpacing"] as? Int)
+            ?? 100
+        return on ? "On (\(spacing))" : "Off"
     }
 
     private var imagePath: String {
@@ -3841,6 +5673,151 @@ private struct LayoutEditorDoubleField: View {
         // 2 decimals matches desktop's wxPropertyGrid default;
         // overridden via `precision` for int fields (0) or higher-
         // precision floats.
+        String(format: "%.\(Swift.max(0, precision))f", v)
+    }
+}
+
+/// J-20.3 — Editable spin button. Compose a numeric TextField
+/// with a SwiftUI Stepper +/-: shows the current value, lets the
+/// user type a new one, and supports ±-by-step taps. Replaces
+/// the J-20 "Stepper-only" rows that hid the value when
+/// `.labelsHidden()` suppressed the label closure.
+///
+/// Two variants — `Int` and `Double` — so the on-screen text
+/// matches the underlying type (no spurious decimal for ints,
+/// configurable precision + step for floats).
+private struct LayoutEditorIntSpin: View {
+    let id: String
+    let initial: Int
+    let range: ClosedRange<Int>
+    var step: Int = 1
+    let commit: (Int) -> Void
+
+    @State private var draft: String = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            TextField("", text: $draft)
+                .multilineTextAlignment(.trailing)
+                .keyboardType(.numbersAndPunctuation)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 70)
+                .focused($focused)
+                .id(id)
+                .onAppear { draft = "\(initial)" }
+                .onChange(of: id) { _, _ in
+                    if !focused { draft = "\(initial)" }
+                }
+                .onChange(of: initial) { _, newValue in
+                    if !focused { draft = "\(newValue)" }
+                }
+                .onChange(of: focused) { _, nowFocused in
+                    if !nowFocused { commitDraft() }
+                }
+                .onSubmit { commitDraft() }
+            Stepper("",
+                    value: Binding<Int>(
+                        get: { currentValue() },
+                        set: { newVal in
+                            let clamped = clamp(newVal)
+                            draft = "\(clamped)"
+                            commit(clamped)
+                        }
+                    ),
+                    in: range,
+                    step: step)
+            .labelsHidden()
+            .controlSize(.mini)
+        }
+    }
+
+    private func currentValue() -> Int {
+        if let v = Int(draft.trimmingCharacters(in: .whitespaces)) {
+            return clamp(v)
+        }
+        return initial
+    }
+    private func clamp(_ v: Int) -> Int {
+        Swift.max(range.lowerBound, Swift.min(range.upperBound, v))
+    }
+    private func commitDraft() {
+        guard let parsed = Int(draft.trimmingCharacters(in: .whitespaces)) else {
+            draft = "\(initial)"
+            return
+        }
+        let v = clamp(parsed)
+        if "\(v)" != draft { draft = "\(v)" }
+        commit(v)
+    }
+}
+
+private struct LayoutEditorDoubleSpin: View {
+    let id: String
+    let initial: Double
+    let range: ClosedRange<Double>
+    var step: Double = 0.1
+    var precision: Int = 2
+    let commit: (Double) -> Void
+
+    @State private var draft: String = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            TextField("", text: $draft)
+                .multilineTextAlignment(.trailing)
+                .keyboardType(.numbersAndPunctuation)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 80)
+                .focused($focused)
+                .id(id)
+                .onAppear { draft = format(initial) }
+                .onChange(of: id) { _, _ in
+                    if !focused { draft = format(initial) }
+                }
+                .onChange(of: initial) { _, newValue in
+                    if !focused { draft = format(newValue) }
+                }
+                .onChange(of: focused) { _, nowFocused in
+                    if !nowFocused { commitDraft() }
+                }
+                .onSubmit { commitDraft() }
+            Stepper("",
+                    value: Binding<Double>(
+                        get: { currentValue() },
+                        set: { newVal in
+                            let clamped = clamp(newVal)
+                            draft = format(clamped)
+                            commit(clamped)
+                        }
+                    ),
+                    in: range,
+                    step: step)
+            .labelsHidden()
+            .controlSize(.mini)
+        }
+    }
+
+    private func currentValue() -> Double {
+        if let v = Double(draft.trimmingCharacters(in: .whitespaces)) {
+            return clamp(v)
+        }
+        return initial
+    }
+    private func clamp(_ v: Double) -> Double {
+        Swift.max(range.lowerBound, Swift.min(range.upperBound, v))
+    }
+    private func commitDraft() {
+        guard let parsed = Double(draft.trimmingCharacters(in: .whitespaces)) else {
+            draft = format(initial)
+            return
+        }
+        let v = clamp(parsed)
+        if format(v) != draft { draft = format(v) }
+        commit(v)
+    }
+    private func format(_ v: Double) -> String {
         String(format: "%.\(Swift.max(0, precision))f", v)
     }
 }
@@ -4805,8 +6782,26 @@ fileprivate extension Color {
 
     /// Emits `#RRGGBB`; alpha is dropped (desktop tag colours don't
     /// carry alpha and we don't want a round-trip to introduce one).
+    ///
+    /// Routes through the sRGB color space explicitly. `UIColor(self)
+    /// .getRed` reads in the device color space — on Display-P3 iPads
+    /// that mangles the exact hex the user typed (e.g. #FF0000 becomes
+    /// something slightly off). Converting via CGColor → sRGB keeps the
+    /// round-trip bit-exact.
     func toHexString() -> String {
         let ui = UIColor(self)
+        let srgbCG = ui.cgColor.converted(to: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                           intent: .defaultIntent,
+                                           options: nil)
+        if let c = srgbCG?.components, c.count >= 3 {
+            let ir = Int((max(0, min(1, c[0])) * 255).rounded())
+            let ig = Int((max(0, min(1, c[1])) * 255).rounded())
+            let ib = Int((max(0, min(1, c[2])) * 255).rounded())
+            return String(format: "#%02X%02X%02X", ir, ig, ib)
+        }
+        // Fall back to device-space read if the conversion fails —
+        // shouldn't happen for any color we hand out, but better
+        // than crashing.
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         ui.getRed(&r, green: &g, blue: &b, alpha: &a)
         let ir = Int((r * 255).rounded())

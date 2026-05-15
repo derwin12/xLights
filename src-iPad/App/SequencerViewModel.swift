@@ -330,6 +330,16 @@ class SequencerViewModel {
     var layoutEditorSelectedGroup: String? = nil
     var layoutEditorSelectedObject: String? = nil
 
+    /// J-20.6 — active sidebar tab in the Layout Editor, mirrored
+    /// from `LayoutEditorView`'s `@State sidebarTab`. Lives on the
+    /// view model so the canvas / preview pane can gate picking
+    /// behaviour (e.g. don't fall through to view-object picks
+    /// when the user is on the Models tab — desktop only lets
+    /// you select objects from the Layout panel's object list).
+    /// String-typed to avoid pulling `LayoutSidebarTab` into the
+    /// view model module.
+    var layoutEditorActiveTab: String = "models"
+
     /// J-13 — name of the Terrain view object currently in
     /// heightmap edit mode. When non-nil, canvas taps modify
     /// the terrain's PointData rather than selecting models.

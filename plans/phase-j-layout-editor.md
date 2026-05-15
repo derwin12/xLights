@@ -386,6 +386,724 @@ The long tail. Per-model property pages and the Add Model toolbar.
   with two columns (in-group / available) similar to
   `DisplayElementsSheet`.
 
+### J-20.3 — Editable spin buttons ✓ 2026-05-15
+
+User feedback: the J-20 bare-Stepper rows showed no value —
+`.labelsHidden()` was suppressing the label closure that
+contained the value Text. The right idiom is a real spin-button
+widget: an editable numeric field next to ± buttons.
+
+**New widgets:**
+
+- `LayoutEditorIntSpin` — TextField (numeric keyboard, sRGB-style
+  focus / commit / clamp logic mirrored from the existing
+  `LayoutEditorDoubleField`) + `Stepper("", value:in:step:)
+  .labelsHidden()` to the right. Editing the field commits on
+  submit / blur; tapping ± commits immediately.
+- `LayoutEditorDoubleSpin` — same shape with step + precision
+  parameters so floats render the right number of decimals.
+
+**Replaced sites:**
+
+- Per-type descriptor `int` and `double` cases in
+  `typeDescriptorControl` — small-range fields now get spin
+  widgets, larger ones keep the plain numeric field.
+- `lowDefFactorField` in the Model header.
+- `ccIntField` and `ccDoubleField` in the Controller Connection
+  section.
+- `StartChannelEditorSheet`'s Channel + Universe rows.
+
+**Steppers that stay as-is:**
+
+- The two Steppers inside Form `Section`s in
+  `StartChannelEditorSheet` would have shown values fine (label
+  visibility is the Form default), but we converted them to
+  spin widgets for consistency.
+
+### J-20.2 — Image file picker + DisableUnusedProperties parity + MultiPoint/PolyLine basics ✓ 2026-05-15
+
+Final push on the Models-tab polish before re-prioritising.
+
+**Image file picker:**
+
+- Per-type descriptor pipeline gained a new `imageFile` `kind`.
+  SwiftUI renders a truncated path label + folder icon button +
+  clear button. Folder button opens a `.fileImporter` scoped to
+  image UTTypes; on success the security-scoped path goes
+  through `ObtainAccessToURL` (for persistent bookmark) and
+  commits via `setPerTypeProperty`.
+- `BuildImageProps` now emits the `Image` field as `imageFile`
+  instead of plain `string`, so the picker is wired
+  automatically.
+
+**DisableUnusedProperties parity:**
+
+- Bridge surface adds a `disabledKeys` array on `modelLayoutSummary`
+  listing iPad-bridge keys that the current model type's adapter
+  disables on desktop:
+  - **Image** disables: faces, states, submodels, strands, nodes,
+    stringType, stringColor, rgbwHandlingIndex, dimmingCurve,
+    pixelSize.
+  - **Label** disables: same as Image plus pixelStyle and
+    blackTransparency.
+  - **ChannelBlock** disables: stringType, stringColor,
+    rgbwHandlingIndex.
+- SwiftUI applies `.opacity(0.45)` + `.disabled(true)` to the
+  matching rows. Model Data popup rows hide their pencil/eye
+  icon when disabled so users don't tap into a non-functional
+  editor.
+
+**MultiPoint per-type basics:**
+
+- `BuildMultiPointProps` mirrors the desktop's
+  `MultiPointPropertyAdapter` minus the Indiv Start Nodes
+  surface: # Lights / # Nodes (read-only — canvas-driven),
+  Strings (1..48), Height. Indiv Start Nodes per-string editor
+  deferred — would mirror the existing Indiv Start Channel
+  pipeline once the desktop pattern is ported.
+- Setters route through new MultiPoint dispatches.
+
+**PolyLine per-type basics:**
+
+- `BuildPolyLineProps` exposes # Lights / # Nodes (read-only),
+  Lights/Node, Strings, Starting Location (Green/Blue),
+  Alternate Drop Nodes, Height. Segment / corner / per-string
+  start node editors deferred — those are intricate enough to
+  warrant their own slice.
+- `AlternateNodes` setter extended so the shared key now flips
+  through to PolyLine's setter via dynamic_cast.
+
+**Still deferred:**
+
+- Custom-model node-grid editor.
+- DMX family (per user direction).
+- PolyLine / MultiPoint Indiv Start Nodes + segment + corner
+  editors.
+- Superstring per-index colour set (upstream Model API).
+
+### J-20.1 — Model header extras + more per-type audits + stepper polish ✓ 2026-05-15
+
+Follow-up to J-20 covering the remaining model-header rows and
+several per-type builders the first audit pass left alone.
+
+**Model header (every model):**
+
+- `Low Definition Factor` (Stepper, 1..100). Only rendered when
+  `Model::SupportsLowDefinitionRender()` returns true (matrix /
+  image types today).
+- `Shadow Model For` picker. Surfaces every non-group model
+  other than self via a new `shadowModelOptions` array. Empty-
+  string sentinel reads as `(none)`. Mirrors desktop's
+  `OTHERMODELLIST` build.
+- Bridge: `setLayoutModelProperty` handles `lowDefinitionFactor`
+  and `shadowModelFor` keys.
+
+**Image (DisplayAsType::Image):**
+
+- New `BuildImageProps` exposes Image file path, Off Brightness
+  (0..200), Read White As Alpha — mirrors desktop
+  `ImagePropertyAdapter`. File path is a plain string field for
+  now; a proper file picker affordance is a follow-up.
+- Setters: `Image`, `OffBrightness`, `WhiteAsAlpha` (each
+  clears the image cache when needed).
+
+**Label (DisplayAsType::Label):**
+
+- New `BuildLabelProps` exposes Label Text, Font Size (8..40
+  Stepper), Text Color — mirrors desktop `LabelPropertyAdapter`.
+- Introduced a new `color` `kind` in the type-descriptor
+  pipeline so per-type colour rows route through the same
+  sRGB-pinned `hexColor` / `hexFromColor` helpers as the
+  layout-editor pickers (no Display-P3 drift).
+
+**Tree:**
+
+- Was calling `BuildMatrixProps` then appending tree-specific
+  fields — that produced a duplicate "Direction" enum.
+  Desktop `TreePropertyAdapter` replaces Matrix's Direction
+  with `StrandDir` ("Strand Direction"). Rebuilt `BuildTreeProps`
+  to emit the tree-specific block first (Type + round-tree-only
+  floats + Alternate Nodes / Don't Zig Zag with mutex gating),
+  then the inherited matrix props, finishing with `StrandDir`
+  instead of `MatrixStyle`.
+- Setter aliases `StrandDir` → `MatrixModel::SetVertical` so
+  the same in-memory state drives both keys.
+
+**Circle:**
+
+- Added the missing `LayerSizes` editor (matches desktop's
+  `AddLayerSizeProperty`). Layer-size edit reuses the same
+  `LayerSizesEditorSheet` from J-19 / Arches.
+
+**Controller Connection stepper polish:**
+
+- `ccIntField` and `ccDoubleField` now pick a SwiftUI Stepper
+  when the range fits the ±-tap idiom (int: span ≤ 1000;
+  double: (span / step) ≤ 200). Keyboard text field for
+  anything larger. Cuts down on keyboard summons for port,
+  brightness, gamma, etc.
+
+**Still deferred:**
+
+- PolyLine / MultiPoint per-type (indiv start nodes + segment +
+  corner editors).
+- Custom-model node-grid editor.
+- DMX family (per user direction).
+- Image-file picker UI on the Image type.
+- Superstring per-index colour set (upstream Model API).
+
+### J-20 — Controller Connection + Start Channel + model-type audit ✓ 2026-05-15
+
+Continues the J-19 restructuring with the three biggest remaining
+items the user called out: a real Controller Connection section,
+a structured Start Channel editor, and a parity audit of the
+per-type property builders against their desktop adapters.
+
+**Real Controller Connection section:**
+
+- New `controllerConnectionFor:` bridge helper assembles a single
+  `controllerConnection` sub-dictionary surfacing every field the
+  desktop's `AddControllerProperties` builds:
+  - `port` + dynamic `portMax` (driven by `ControllerCaps` and
+    the active protocol family — Serial / Pixel / LED Panel /
+    Virtual Matrix / PWM each get their own max).
+  - `protocolOptions` + `protocolIndex` (driven by
+    `Model::GetControllerProtocols`).
+  - Smart-Remote subsection (pixel + caps>0): `useSmartRemote`,
+    `smartRemoteTypeOptions/Index`, `smartRemoteOptions/Index`
+    (the A/B/C… letter values from `GetSmartRemoteValues`),
+    `srMaxCascade` + `srCascadeOnPort` when
+    `GetNumPhysicalStrings() > 1`.
+  - Serial-only: `dmxChannel` (with caps-driven max) +
+    `speedOptions/speedIndex`.
+  - PWM-only: `pwmGamma`, `pwmBrightness`.
+  - Pixel per-property toggle / value pairs gated by
+    `caps->Supports*` (or unconditional when caps is null —
+    matches desktop's "old controllers" path): Start Null
+    Pixels, End Null Pixels, Brightness, Gamma, Color Order,
+    Direction, Group Count, Zig Zag, Smart Ts.
+- `setLayoutModelProperty` routes ~25 new `cc.*` keys through
+  the model's `ControllerConnection` instance, including
+  `UpdateProperty(CTRL_PROPS::XXX_ACTIVE)` toggles and the
+  matching value setters.
+- SwiftUI: brand-new `controllerConnectionFields` ViewBuilder
+  on `LayoutEditorPropertiesView` builds the section
+  dynamically from the sub-dictionary. Helpers
+  (`ccPortRow` / `ccProtocolRow` / `ccSmartRemoteRows` /
+  `ccPixelToggleRow` / `ccPixelEnumToggleRow` /
+  `ccIntField` / `ccDoubleField` / `ccEnumPicker`) keep the
+  per-row plumbing compact.
+- The old pseudo-section that mixed Preview + Controller +
+  Start Channel into "Controller Connection" is now the
+  "Model" header section, sitting between Type and the real
+  Controller Connection.
+
+**Start Channel structured editor:**
+
+- New `StartChannelEditorSheet` (iPad equivalent of desktop's
+  `StartChannelDialog`). Pencil button next to the Start
+  Channel field opens the sheet; reads the existing value,
+  parses it into one of the five formats, lets the user edit
+  via a mode picker + per-mode fields, recomposes the wire
+  string on save. Modes mirror the desktop dialog:
+  - **Channel #** — raw integer (`123`).
+  - **Universe** — `#<universe>:<channel>` or
+    `#<ip>:<universe>:<channel>` (IP "ANY" collapses to the
+    2-segment form).
+  - **From Model** — `>ModelName:N` (chain relative).
+  - **Start Of Model** — `@ModelName:N`.
+  - **Controller** — `!ControllerName:N`.
+- Live preview row in the sheet shows the recomposed string
+  before save. Save commits via the existing
+  `setLayoutModelProperty` "modelStartChannel" key.
+
+**Per-type property audit + fixes:**
+
+Walked the iPad's `Build*Props` builders vs the matching
+desktop `*PropertyAdapter::AddTypeProperties`. Fixed:
+
+- **Star** — was using `StartCornerOptions()` (4-entry matrix
+  corners) for `StarStart`; desktop uses a 12-entry Star-
+  specific vocabulary ("Top Ctr-CCW", "Top Ctr-CW", …, "Right
+  Bottom-CCW"). New `StarStartLocationOptions()` helper +
+  setter fix. Also gained the `LayerSizes` editor (matches
+  desktop's `AddLayerSizeProperty(grid)`), and the "Inner
+  Layer %" row is now properly conditional on
+  `GetNumStrands() > 1`.
+- **Sphere** — `Degrees` range was 1..360, desktop is 45..360;
+  `Southern Latitude` was -90..90, desktop is -89..-1;
+  `Northern Latitude` was -90..90, desktop is 1..89. Labels
+  fixed too ("Start" / "End" → "Southern" / "Northern"). Row
+  order corrected: Degrees + Latitudes come BEFORE the matrix
+  block on desktop.
+- **Cube** — was emitting raw int fields for `CubeStyleIdx`
+  and `CubeStartIdx` with placeholder ranges (0..99) instead
+  of the desktop's named enums. Now exposes the 8-named
+  starting locations + 6-named direction styles + 3-named
+  strand styles. Added the missing `StrandPerLayer` (Layers
+  All Start in Same Place) toggle. Width/Height/Depth ranges
+  corrected from 1..1000 to 1..100.
+- **Spinner** — full rebuild. Was missing Starting Location
+  enum entirely (6 choices: Center CCW/CW, End CCW/CW, Center
+  Alternate CCW/CW). Key names corrected to match desktop
+  (`FoldCount`, `SpinnerArmNodeCount`, `Hollow`, `Arc`,
+  `StartAngle`, `ZigZag`) — old `Spinner*` aliases kept as
+  fallbacks for compatibility. Ranges fixed (e.g. # Strings
+  1..100 → 1..640, Arms/String → 1..250, Hollow 0..95 →
+  0..80, Start Angle 0..360 → -360..360). Zig-Zag now gated
+  on Alternate Nodes being off. New
+  `SpinnerModel::DecodeStartLocation`-aware setter for
+  `MatrixStart`.
+
+Models verified parity-equivalent on a quick scan (no changes
+needed today): Matrix, Tree, Icicles, CandyCane, Circle,
+Wreath, SingleLine, WindowFrame, ChannelBlock. Custom remains
+read-only — needs a grid editor that's still deferred.
+
+**Steppers for small-range numeric inputs:**
+
+- `typeDescriptorControl(.int)` now picks a SwiftUI `Stepper`
+  when `max - min ≤ 1000`, and the regular numeric text field
+  otherwise. Sweet-spot threshold matches the kind of values
+  users want to nudge by ±1 — 360 degrees, percent, number of
+  strings, etc. Bigger ranges (10 000 nodes) keep the keyboard
+  field because step-by-1 is impractical.
+
+**Deferred for later:**
+
+- Per-type rebuild for: Image / Label / MovingHead / Servo /
+  MultiPoint / PolyLine / SinglePixel / various DMX types
+  (DMX family explicitly deferred by user).
+- Custom model node-grid editor.
+- StartChannelDialog "from this preview only" filter and
+  controller validation (warn when channel > controller
+  channels).
+- Superstring per-index colour set (still requires upstream
+  Model API).
+
+### J-19 — Models-tab restructuring + colour-space audit ✓ 2026-05-15
+
+Wholesale correction of the Models-tab property pane against the
+desktop reference (`src-ui-wx/modelproperties/`). Pass-1 (J-18)
+was a simplified facsimile that got several things wrong — this
+restores the desktop's actual section layout, dynamic surfaces,
+and screen-location class branching.
+
+**Section ordering + Description (Phase 1):**
+
+- Description moved out of Appearance and into the model-header
+  row (between Type and the per-type section), matching desktop.
+- The bottom-of-pane "Display" roll-up (canvas / 2D center=0 /
+  grid / bounding box) deleted from the Models tab and surfaced
+  read-only on the 2D Background object instead — desktop treats
+  these as per-layout-group settings, not model settings.
+- Default Mode (3D / 2D toggle) removed entirely — it's a
+  per-session preview state, not a model property.
+
+**Arches per-type rebuild (Phase 2):**
+
+- `BuildArchesProps` now mirrors `ArchesPropertyAdapter::AddType
+  Properties` verbatim:
+  - `Layered Arches` checkbox is the FIRST property.
+  - When OFF: `# Arches` + `Nodes Per Arch`; when ON: a single
+    `Nodes` field + the per-layer size editor + `Hollow %` +
+    `Zig-Zag Layers`.
+  - `Lights Per Node` + `Arc Degrees` always; `Arch Tilt`
+    always (was missing); `Gap Between Arches` only when not
+    layered.
+  - `Starting Location` has 2 choices when not layered, 4
+    choices (Green/Blue × Inside/Outside) when layered.
+- Bridge gained setters for `LayeredArches`, `LayerSizes`
+  (wholesale-replace via NSArray<NSNumber*>), `ArchesSkew`,
+  `ArchesGap`, `ArchesStart` (encodes the 2/4-choice variants
+  via `SetDirection` / `SetStartSide` / `SetIsBtoT`).
+- New `LayerSizesEditorSheet` — `NavigationStack` + `List` of
+  per-layer node-count fields with swipe-to-delete and an
+  "Add layer" button.
+
+**Controller picker + Start-Channel gate (Phase 3):**
+
+- Controller is now an enum picker, not a free-text field.
+  Options: `Use Start Channel` + `No Controller` + every
+  auto-layout controller name from
+  `OutputManager::GetAutoLayoutControllerNames()`. Mirrors
+  desktop's CONTROLLERS array exactly.
+- Bridge writes back via a new `controllerSelection` key:
+  `Use Start Channel` becomes `""` on the model;
+  `No Controller` and named controllers round-trip verbatim.
+- Start Channel field is now read-only display unless the
+  picker is set to `Use Start Channel`. Matches desktop's
+  `Enable(GetControllerName() == "" || _controller == 0)`.
+- Indiv-string Start Channel rows get the same gate.
+
+**String Properties dynamic surface (Phase 4):**
+
+- Sub-controls under String Type now depend on the type:
+  - `Single Color` / `Single Color Intensity` / `Node Single
+    Color`: a `Color` row with a `ColorPicker` driving
+    `Model::SetCustomColor` via the new `stringColor` key.
+  - `Superstring`: a `Colours` count field (1..32) + per-index
+    `Colour N` display rows. Count writes through to
+    `Model::SetSuperStringColours`; per-index colour set is
+    deferred (Model lacks a vector mutator — would require
+    adding `SetSuperStringColour(int, xlColor)` upstream).
+  - Other types: disabled `—` placeholder.
+- `RGBW Color Handling` picker (5 options) appears on every
+  type but is enabled only when `!HasSingleChannel && Channel
+  Count >= 4`. Bridge: `rgbwHandlingIndex` → `Model::
+  SetRGBWHandling` via the index-to-string mapping.
+
+**Size/Location by screen-location class (Phase 5):**
+
+- Bridge now exposes `screenLocationKind` (`boxed` /
+  `twoPoint` / `threePoint` / `other`) + `screenLocation
+  Fields` dictionary with class-appropriate keys.
+- SwiftUI's Size/Location section branches:
+  - **Boxed**: `X`/`Y`/`Z` + `ScaleX`/`ScaleY`/`ScaleZ` (with
+    `supportsZScaling` gating ScaleZ) + `RotateX`/`RotateY`/
+    `RotateZ`.
+  - **TwoPoint**: `World X/Y/Z` + `X1/Y1/Z1` + `X2/Y2/Z2`.
+    Editing X1 shifts world + back-shifts X2 to keep the far
+    endpoint stationary (matches desktop).
+  - **ThreePoint**: TwoPoint + `Height` (clamped to |h|≥0.01)
+    + `Shear` (when `GetSupportsShear()`) + `RotateX`.
+  - **Other (PolyPoint etc.)**: World only + a "edit via
+    handles" hint — per-vertex editing already lives in the
+    canvas gesture path.
+
+**Colour-space audit (cross-cutting):**
+
+Triggered by the user's note: SwiftUI's `ColorPicker` hands
+back `Color` values in the *device* colour space — on Display-P3
+iPads that's extended-sRGB, and reading those components
+directly mangles the exact `#RRGGBB` hex the user typed. The
+fix is to always convert through `CGColorSpace.sRGB` before
+reading bytes.
+
+Audited call sites:
+- `Color.hexString` extension (`LayoutEditorView.swift`):
+  was `UIColor(self).getRed`; now does `cgColor.converted(to:
+  sRGB)` and reads components from the converted CGColor.
+- `Color(hexString:)` extension: already sRGB-pinned via
+  `init(.sRGB, ...)`.
+- `colorFromHex` (`ColorPanelCustomRows.swift`): switched
+  from `Color(red:green:blue:)` (device space) to
+  `Color(.sRGB, red:green:blue:opacity:)`.
+- `ColorPaletteView.colorFromHex` (struct method): same fix.
+- Layout-editor `hexColor` / `hexFromColor` helpers used by
+  the new `stringColorRow`: both pinned to sRGB.
+- `XLColorCurve.mm xlColorFromUI` (ObjC++): was using
+  `UIColor.getRed` which reads in the source colour space;
+  now always converts via `CGColorCreateCopyByMatchingTo
+  ColorSpace(sRGB, …)` before reading bytes. UIColor used in
+  curve `setPoint` calls comes from `UIColor(newColor)` which
+  preserves the source space, so the conversion at the C++
+  boundary is what makes the round-trip bit-exact.
+
+**Deferred items (recorded but not in this pass):**
+
+- The REAL "Controller Connection" section: port / protocol /
+  smart-remote subsection / null-pixels / brightness / gamma /
+  color order / direction / group count / zig-zag / smart Ts.
+  Big bridge surface — its own slice.
+- StartChannelDialog: special editor with format picker
+  (`1` / `#1:N` / `>Model1:1` / `@ip:univ:ch` / `&start_def`).
+  Currently the field is gated read-only when not editable
+  but the format-picker dialog isn't ported.
+- Per-type rebuild parity for the other model adapters
+  (Icicles / Cube / Sphere / Tree / Matrix / SingleLine /
+  CandyCane / Spinner / WindowFrame / ChannelBlock / Custom).
+  J-18 versions remain in place. Arches established the
+  template; the rest are straight ports.
+- Superstring colour per-index set: requires upstream Model
+  API (`SetSuperStringColour(int, xlColor)`). Reads + count
+  edits work today; per-index colour edits return NO.
+
+### J-18 pass 6 — Dimming Curve clear ✓ 2026-05-14
+
+First write on the Dimming Curve category — clear only. Curve
+editing isn't in scope (would need a curve-picker UI + per-
+type parameters — separate slice).
+
+**Bridge** (`XLSequenceDocument`):
+
+- `clearDimmingCurveOnModel:` — guards on `GetDimmingCurve() !=
+  nullptr`, calls `Model::SetDimmingInfo({})` which deletes the
+  cached `modelDimmingCurve` and empties the `dimmingInfo` map.
+  Save's re-serialization writes no `<dimmingCurve>` child
+  block when the map is empty (via
+  `BaseSerializingVisitor::WriteDimmingCurve`).
+
+**SwiftUI:**
+
+- Dimming Curve row gained an inline trash button visible only
+  when `hasDimmingCurve` is true. Tap → destructive alert with
+  Cancel / Clear. Clear routes to a new
+  `clearDimmingCurve(modelName:)` helper that pushes undo +
+  bridge call + bumps save state.
+- Alert message warns the user that editing isn't on iPad yet,
+  so this is one-way (until the desktop puts a curve back).
+
+### J-18 pass 5 — In Model Groups → tap to navigate ✓ 2026-05-14
+
+UI-only: the "In Model Groups" entry on the Models tab is now a
+tappable shortcut to the Groups tab with the picked group
+selected. Editing membership still happens on the Groups tab —
+this just removes the friction of switching tabs + scrolling to
+find the group manually.
+
+**SwiftUI:**
+
+- New `GroupRefListSheet` — `List` of group names with a
+  `chevron.right` affordance. Tapping a row calls back to
+  close the sheet and navigate.
+- `LayoutEditorPropertiesView` gained an `onNavigateToGroup`
+  callback wired in the parent (`LayoutEditorView.body`) to
+  flip `sidebarTab` to `.groups` and set
+  `viewModel.layoutEditorSelectedGroup`.
+
+### J-18 pass 4 — SubModel delete ✓ 2026-05-14
+
+First write op on the SubModels category. Delete only — add /
+rename / geometry editing each need their own slice because
+SubModels carry per-instance range or line geometry that the
+iPad has no UI for yet.
+
+**Bridge** (`XLSequenceDocument`):
+
+- `deleteSubModelNamed:onModel:` — looks up the parent Model,
+  verifies the named submodel exists, aborts render, calls
+  `Model::RemoveSubModel` (which deletes the SubModel object
+  and erases it from `subModels` + `sortedSubModels`), marks
+  the parent dirty so the next save rewrites the parent
+  `<model>` node without the `<subModel>` child.
+- Group / effect references to "Parent/SubModel" are NOT
+  auto-cleaned — matches desktop behaviour. Users get a stale-
+  member warning on next reload.
+
+**SwiftUI:**
+
+- New `SubModelListSheet` — `List` with `onDelete` swipe.
+  Footer text explains delete is the only available op; editing
+  requires desktop.
+- `ModelDataKind.isEditable` now covers `.submodels` so the
+  pencil icon appears on the row.
+- The property pane gained an `onDeleteSubModel` callback
+  routed to a new `deleteSubModel(modelName:submodelName:)`
+  helper that pushes undo + the bridge call + bumps the
+  save / undo state.
+
+**Deferred for later passes:** SubModel add / rename / geometry
+editing. Faces / States / Dimming Curve editing.
+
+### J-18 pass 3 — Strand + Node name editing ✓ 2026-05-14
+
+Next two popup categories lifted from read-only to editable.
+Strand and node names are positional labels — slot N maps to
+strand-N / node-N — so the editor is a fixed-length renamer,
+not a list manager. Empty slots are preserved so positional
+ordering survives a save → reload.
+
+**Bridge** (`XLSequenceDocument`):
+
+- `setStrandNames:names:` and `setNodeNames:names:` — wholesale-
+  replace the model's strand / node name string. Both call into
+  `Model::SetStrandNames` / `SetNodeNames` which parse a
+  comma-delimited string into `strandNames` / `nodeNames`
+  vectors. A new `joinIndexedNames:` helper does the
+  array-of-NSString → comma-joined std::string conversion,
+  stripping commas inside each entry (the delimiter would
+  otherwise corrupt the wire format).
+- Both methods abort render first (J-18.5), increment the
+  change count, and mark the model dirty so the save path
+  re-serializes the `<model>` node — strand/node-name attrs
+  ride along via `BaseSerializingVisitor`.
+
+**SwiftUI:**
+
+- New `IndexedNamesEditorSheet` — `NavigationStack` + `List` of
+  numbered `TextField` rows. The slot count is whatever the
+  bridge sent in `extras` (lazy-filled to `GetNumStrands()` /
+  `GetNodeCount()`); placeholders default to "Strand N" /
+  "Node N" matching the desktop `GetStrandName(i, def=true)`
+  fallback.
+- `ModelDataKind.isEditable` now returns `true` for
+  `.aliases`, `.strands`, `.nodes`.
+- The property pane gained an `onCommitIndexedNames` callback
+  routed to a new `commitIndexedNames(modelName:kind:names:)`
+  that pushes undo + the bridge call + bumps the usual save /
+  undo state.
+
+**Deferred:** Faces / States / SubModels / Dimming Curve are
+still view-only — those each warrant their own slice.
+
+### J-18.5 — Abort render before every layout mutation ✓ 2026-05-14
+
+**Why this matters:** the render engine holds raw `Model*` /
+`ViewObject*` pointers across the whole frame-graph build. If a
+mutation rewrites that state mid-render (rename, delete, move,
+property change, …), the worker dereferences stale geometry and
+crashes — the failure mode is rare in dev but lethal in
+production once a real sequence has a real render in flight.
+
+Desktop's `xLightsFrame::AbortRender` is called at the top of
+every `LayoutPanel` mutation. iPad had the call site but the
+underlying implementation didn't actually wait.
+
+**Fix in three parts:**
+
+1. `iPadRenderContext::AbortRender(int maxTimeMs)` now mirrors
+   the desktop contract — signal abort, then block on
+   `IsRenderDone()` (10 ms poll) until the in-flight jobs drain
+   or the timeout elapses. Was a fire-and-forget `SignalAbort`
+   that returned `true` whether or not the render was actually
+   done.
+2. `XLSequenceDocument.mm` — every layout-mutation entry point
+   (about 20 methods) now calls `_context->AbortRender(5000)`
+   before touching model / group / view-object state:
+   - `setLayoutModelProperty`, `setLayoutModelGroupProperty`,
+     `setLayoutViewObjectProperty`, `setPerTypeProperty`
+   - `deleteModel`, `renameModel`, `deleteModelGroup`,
+     `renameModelGroup`, `createModelGroup`, `addModel:toGroup:`,
+     `removeModel:fromGroup:`, `deleteViewObject`,
+     `renameViewObject`, `duplicateViewObject`,
+     `createViewObjectWithType:`
+   - `setModelAliases`, `setStrandNames`, `setNodeNames`,
+     `setCurve`, `deleteVertexAtIndex`, `insertVertexInSegment`
+   - `undoLastLayoutChange` (undo can rewrite arbitrary fields)
+3. `XLMetalBridge.mm` — gesture and canvas-driven mutations:
+   - `createModelOfType`, `importXmodelFromPath`,
+     `duplicateModels`
+   - `alignModels`, `distributeModels`, `matchSizeOfModels`,
+     `flipModels`
+   - `dragHandle`, `endHandleDragForDocument`, `moveModel`,
+     `moveViewObject`, `editTerrainHeight`,
+     `dragBody3DToScreenPoint`, `applyPinchScaleFactor`,
+     `applyTwistRotationRadians`
+
+**Cost when no render is in flight:** one virtual call +
+`IsRenderDone()` atomic check, returns immediately. Effectively
+free for the gesture hot path.
+
+**Cost during an active render:** the first mutation in any
+sequence blocks the main thread until workers drain (typically
+tens of ms for a single-model render, longer for full-sequence
+batches). Subsequent mutations in the same gesture are free —
+the render is gone. Matches the desktop behaviour the user
+already understands.
+
+### J-18 pass 2 — Alias editing ✓ 2026-05-14
+
+First popup category lifted from read-only to editable. Aliases
+are the simplest of the popup-dialog surfaces (just a flat list
+of lowercase strings), so they're the right vehicle to establish
+the editor-sheet pattern.
+
+**Bridge:**
+
+- `setModelAliases:aliases:` — wholesale-replace the model's
+  alias list. Strings get trimmed + lowercased + de-duped
+  matching `Model::SetAliases` semantics. Marks the model
+  dirty; SaveLayoutChanges fully re-serializes the `<model>`
+  node, so child `<aliases>` elements come along automatically
+  via `BaseSerializingVisitor::WriteAliases`.
+
+**SwiftUI:**
+
+- New `AliasEditorSheet` — Form with an "Add alias" row
+  (TextField + Add button + live "Will save as 'foo'" preview)
+  and an Aliases list with swipe-to-delete. Cancel discards;
+  Save commits the full new list.
+- `ModelDataKind.isEditable` gates the row icon: editable
+  categories show a pencil (and stay tappable when empty so the
+  first entry can be added); read-only categories keep the
+  list-bullet and hide when empty.
+- The property pane gained an `onCommitAliases` callback —
+  separate from `commit` because aliases are a collection. The
+  parent (`LayoutEditorView`) routes the callback to a new
+  `commitAliases(modelName:aliases:)` that pushes undo + the
+  bridge call + bumps `summaryToken` / `hasUnsavedChanges`.
+
+**Deferred:**
+
+- Faces / States / SubModels / Dimming Curve editing still
+  view-only; each is its own pass.
+- No per-alias edit (rename of an existing alias) — delete +
+  re-add is fine for a list this short.
+
+### J-18 — Models tab pass 1 ✓ 2026-05-14
+
+First slice of the (huge) Models-tab editing surface. Scope picked
+in conversation: rename + controller-connection editing +
+read-only summaries for the popup categories. DMX models, popup
+editing, and per-type Custom-model nodes are deferred.
+
+**Model rename:**
+
+- `renameModel:to:` — sanitizes via `Model::SafeModelName`,
+  refuses collisions, refuses SubModel rename (those round-trip
+  through the parent), calls `ModelManager::Rename` for the
+  in-memory swap, then `MarkModelRenamed` + dirties the renamed
+  model AND every group that directly contains the new name
+  (the in-memory rename doesn't dirty group XML on its own).
+- `iPadRenderContext::_renamedModels` map + `MarkModelRenamed`
+  helper + extended HasDirty / Clear / SaveLayoutChanges guard.
+- `SaveLayoutChanges` model patch branch consults the rename
+  map: locates the on-disk `<model>` element by OLD name, then
+  patches the `name` attribute + rest of the dirty fields.
+
+**Controller Connection editing:**
+
+- New summary keys: `modelStartChannel` (string),
+  `hasIndividualStartChannels` (bool), `individualStartChannels`
+  (array of per-string channel strings, lazy-filled to
+  `GetNumStrings()`), `hasMultipleStrings`, `numStrings`,
+  `modelChain`, `modelChainOptions`, `modelChainApplicable`.
+- `setLayoutModelProperty` gained cases for
+  `modelStartChannel`, `hasIndividualStartChannels`,
+  `individualStartChannel<N>` (parses the trailing index off the
+  key — keeps the per-string fields keyed independently so
+  partial edits route correctly), and `modelChain` (translates
+  the `"Beginning"` sentinel back to the empty string).
+- UI: when the model has multiple strings, an "Indiv Start
+  Chans" toggle shows. OFF — one Start Channel field; ON — N
+  String-K fields, one per string. Single-string models always
+  show one Start Channel. Model Chain picker appears only when
+  controller + protocol + port are all set.
+
+**Read-only popup summaries (PopupDialog parity, view-only):**
+
+- `extrasFor:` helper assembles `submodelNames`, `faceNames`,
+  `stateNames`, `aliasNames`, `strandNames`, `nodeNames`,
+  `inModelGroups`, `hasDimmingCurve`. The Models tab gains a
+  "Model Data" section listing each category with its count
+  and (when non-empty) a list-bullet icon that opens
+  `ModelDataViewerSheet` — generic read-only `NavigationStack`
+  with a `List` of the entries. Dimming Curve is just Set / —.
+- Editing these is intentionally out of scope for J-18; the
+  desktop popups (Face editor, State editor, Aliases dialog,
+  …) each warrant their own slice. The viewer is the bridge so
+  users can at least *see* what's defined.
+
+**SwiftUI:**
+
+- `LayoutEditorPropertiesView` Name row gained a pencil icon
+  →`RenameGroupSheet(kindLabel: "Model")`.
+- New collapsible "Model Data" section ordered between String
+  Properties and Appearance.
+- `RenameGroupSheet.footerText` now switches by kindLabel for
+  Group / Model / Object.
+
+**Deferred (tracked for Models-tab pass 2+):**
+
+- DMX models — different property model entirely, defer the
+  whole family.
+- Popup editing (Faces, States, SubModels, Aliases, Dimming
+  curve, Strand/Node-name editor) — each is its own sub-sheet;
+  view-only for now.
+- Custom-model node grid + per-channel layout editing.
+- Multi-model rename / bulk Start-Channel re-assignment.
+
 ### J-17 — Objects tab finish ✓ 2026-05-14
 
 Closes the remaining Objects-tab deferred items in one pass.
