@@ -82,6 +82,27 @@
 #include "models/TreeModel.h"
 #include "models/WindowFrameModel.h"
 #include "models/WreathModel.h"
+#include "models/dmx/DmxFloodlight.h"
+#include "models/dmx/DmxModel.h"
+#include "models/dmx/DmxColorAbility.h"
+#include "models/dmx/DmxColorAbilityRGB.h"
+#include "models/dmx/DmxColorAbilityCMY.h"
+#include "models/dmx/DmxColorAbilityWheel.h"
+#include "models/dmx/DmxPresetAbility.h"
+#include "models/dmx/DmxBeamAbility.h"
+#include "models/dmx/DmxShutterAbility.h"
+#include "models/dmx/DmxDimmerAbility.h"
+#include "models/dmx/DmxMotor.h"
+#include "models/dmx/DmxMovingHead.h"
+#include "models/dmx/DmxMovingHeadComm.h"
+#include "models/dmx/DmxGeneral.h"
+#include "models/dmx/DmxMovingHeadAdv.h"
+#include "models/dmx/DmxSkull.h"
+#include "models/dmx/DmxServo.h"
+#include "models/dmx/DmxServo3D.h"
+#include "models/dmx/Servo.h"
+#include "models/dmx/DmxImage.h"
+#include "models/dmx/Mesh.h"
 #include "utils/FileUtils.h"
 #include "utils/ExternalHooks.h"
 #include "utils/xlImage.h"
@@ -5130,6 +5151,30 @@ static NSMutableDictionary* MakeStringProp(NSString* key, NSString* label,
     } mutableCopy];
 }
 
+// J-3 (DMX) — a non-editable section divider inside the per-type
+// descriptor stream. Renders full-width in the property panel so
+// DMX subsections (Color / Shutter / Beam) read as their own
+// blocks rather than a flat key list. The key needs to be unique
+// so SwiftUI's ForEach doesn't dedupe headers that share a label
+// — caller picks a short identifier.
+static NSMutableDictionary* MakeHeaderDescriptor(NSString* key, NSString* label) {
+    return [@{
+        @"key": key, @"label": label, @"kind": @"header",
+    } mutableCopy];
+}
+
+// J-30 — one-shot action button inside the per-type descriptor
+// stream. SwiftUI renders a button with the supplied label;
+// tapping it fires `typeCommit(key, @YES)` which the setter
+// interprets as "perform this side-effect". Used for the
+// Skulltronix preset on DmxSkull; could host other one-shot
+// model operations later (e.g. "Reset Defaults").
+static NSMutableDictionary* MakeButtonDescriptor(NSString* key, NSString* label) {
+    return [@{
+        @"key": key, @"label": label, @"kind": @"button",
+    } mutableCopy];
+}
+
 // Common "Top Left / Top Right / Bottom Left / Bottom Right"
 // starting-location combo. Encoded as a 0..3 index matching the
 // desktop's `MatrixStart` / `WreathStart` enum order.
@@ -5704,6 +5749,694 @@ static void BuildPolyLineProps(PolyLineModel* pl, NSMutableArray* out) {
     }
 }
 
+// J-3 (DMX) — emit DmxColorAbility property descriptors. Today
+// only the RGBW path is fleshed out; CMYW + ColorWheel fall back
+// to a placeholder header so the user can at least see what type
+// the model is configured for. PWM brightness/gamma fields are
+// gated on the controller's PWM-protocol support, which we don't
+// expose to the bridge yet — skipped for v1, matching how
+// LayoutPanel sees them only when wired to a PWM-capable
+// controller.
+static void AppendDmxColorProps(DmxColorAbility* color, NSMutableArray* out) {
+    if (!color) return;
+    using CT = DmxColorAbility::DMX_COLOR_TYPE;
+    switch (color->GetColorType()) {
+    case CT::DMX_COLOR_RGBW: {
+        auto* rgb = static_cast<DmxColorAbilityRGB*>(color);
+        [out addObject:MakeHeaderDescriptor(@"DmxColorHeader", @"Color (RGBW)")];
+        [out addObject:MakeIntProp(@"DmxRedChannel",   @"Red Channel",
+                                     (int)rgb->GetRedChannel(),   0, 512)];
+        [out addObject:MakeIntProp(@"DmxGreenChannel", @"Green Channel",
+                                     (int)rgb->GetGreenChannel(), 0, 512)];
+        [out addObject:MakeIntProp(@"DmxBlueChannel",  @"Blue Channel",
+                                     (int)rgb->GetBlueChannel(),  0, 512)];
+        [out addObject:MakeIntProp(@"DmxWhiteChannel", @"White Channel",
+                                     (int)rgb->GetWhiteChannel(), 0, 512)];
+        break;
+    }
+    case CT::DMX_COLOR_CMYW: {
+        auto* cmy = static_cast<DmxColorAbilityCMY*>(color);
+        [out addObject:MakeHeaderDescriptor(@"DmxColorHeader", @"Color (CMYW)")];
+        [out addObject:MakeIntProp(@"DmxCyanChannel",    @"Cyan Channel",
+                                     (int)cmy->GetCyanChannel(),    0, 512)];
+        [out addObject:MakeIntProp(@"DmxMagentaChannel", @"Magenta Channel",
+                                     (int)cmy->GetMagentaChannel(), 0, 512)];
+        [out addObject:MakeIntProp(@"DmxYellowChannel",  @"Yellow Channel",
+                                     (int)cmy->GetYellowChannel(),  0, 512)];
+        [out addObject:MakeIntProp(@"DmxWhiteChannel",   @"White Channel",
+                                     (int)cmy->GetWhiteChannel(),   0, 512)];
+        break;
+    }
+    case CT::DMX_COLOR_WHEEL: {
+        auto* wh = static_cast<DmxColorAbilityWheel*>(color);
+        [out addObject:MakeHeaderDescriptor(@"DmxColorHeader", @"Color Wheel")];
+        [out addObject:MakeIntProp(@"DmxWheelChannel",       @"Wheel Channel",
+                                     (int)wh->GetWheelChannel(),   0, 512)];
+        [out addObject:MakeIntProp(@"DmxWheelDimmerChannel", @"Dimmer Channel",
+                                     (int)wh->GetDimmerChannel(),  0, 512)];
+        [out addObject:MakeIntProp(@"DmxWheelDelay",         @"Wheel Delay (ms)",
+                                     (int)wh->GetWheelDelay(),     0, 5000)];
+        // J-30 — custom wheel-colour list as a clickable
+        // descriptor. SwiftUI's `wheelColorList` kind opens an
+        // editor sheet that commits the full list back through
+        // the `DmxWheelColorList` setter (wholesale replace).
+        NSMutableArray* wheelEntries = [NSMutableArray array];
+        for (const auto& c : wh->GetWheelColorSettings()) {
+            NSString* hex = [NSString stringWithFormat:@"#%02X%02X%02X",
+                              c.color.Red(), c.color.Green(), c.color.Blue()];
+            [wheelEntries addObject:@{
+                @"color":    hex,
+                @"dmxValue": @(c.dmxValue),
+            }];
+        }
+        [out addObject:@{
+            @"key":   @"DmxWheelColorList",
+            @"label": @"Wheel Colours",
+            @"kind":  @"wheelColorList",
+            @"value": wheelEntries,
+        }];
+        break;
+    }
+    case CT::DMX_COLOR_UNUSED:
+        break;
+    }
+}
+
+// J-30 — emit the preset list as a clickable descriptor. The
+// SwiftUI `presetList` kind opens an inline editor sheet that
+// commits back the full list (wholesale replace through the
+// `DmxPresetList` setter). Each entry carries channel /
+// value / description.
+static void AppendDmxPresetProps(const DmxPresetAbility& preset, NSMutableArray* out) {
+    NSMutableArray* entries = [NSMutableArray array];
+    for (const auto& p : preset.GetPresetSettings()) {
+        [entries addObject:@{
+            @"channel":     @(p.DMXChannel),
+            @"value":       @(p.DMXValue),
+            @"description": [NSString stringWithUTF8String:p.Description.c_str()],
+        }];
+    }
+    [out addObject:@{
+        @"key":   @"DmxPresetList",
+        @"label": @"Presets",
+        @"kind":  @"presetList",
+        @"value": entries,
+    }];
+}
+
+static void AppendDmxShutterProps(const DmxShutterAbility& shutter, NSMutableArray* out) {
+    [out addObject:MakeHeaderDescriptor(@"DmxShutterHeader", @"Shutter")];
+    [out addObject:MakeIntProp(@"DmxShutterChannel", @"Shutter Channel",
+                                 shutter.GetShutterChannel(), 0, 512)];
+    [out addObject:MakeIntProp(@"DmxShutterOpen", @"Open Threshold",
+                                 shutter.GetShutterThreshold(), -255, 255)];
+    [out addObject:MakeIntProp(@"DmxShutterOnValue", @"On Value",
+                                 shutter.GetShutterOnValue(), 0, 255)];
+}
+
+static void AppendDmxBeamProps(const DmxBeamAbility& beam, NSMutableArray* out) {
+    [out addObject:MakeHeaderDescriptor(@"DmxBeamHeader", @"Beam")];
+    [out addObject:MakeDoubleProp(@"DmxBeamLength", @"Display Length",
+                                    (double)beam.GetBeamLength(), 0.0, 100.0, 0.1, 2)];
+    [out addObject:MakeDoubleProp(@"DmxBeamWidth", @"Display Width",
+                                    (double)beam.GetBeamWidth(), 0.01, 150.0, 0.1, 2)];
+    if (beam.SupportsOrient()) {
+        [out addObject:MakeIntProp(@"DmxBeamOrient", @"Orientation",
+                                     beam.GetBeamOrient(), 0, 360)];
+    }
+    if (beam.SupportsYOffset()) {
+        [out addObject:MakeDoubleProp(@"DmxBeamYOffset", @"Y Offset",
+                                        (double)beam.GetBeamYOffset(), 0.0, 500.0, 1.0, 1)];
+    }
+}
+
+static void BuildDmxFloodlightProps(DmxFloodlight* fl, NSMutableArray* out) {
+    [out addObject:MakeIntProp(@"DmxChannelCount", @"# Channels",
+                                 fl->GetDmxChannelCount(), 1, 512)];
+    if (fl->HasPresetAbility()) {
+        AppendDmxPresetProps(*fl->GetPresetAbility(), out);
+    }
+    if (fl->HasColorAbility()) {
+        AppendDmxColorProps(fl->GetColorAbility(), out);
+    }
+    if (fl->HasShutterAbility()) {
+        AppendDmxShutterProps(*fl->GetShutterAbility(), out);
+    }
+    if (fl->HasBeamAbility()) {
+        AppendDmxBeamProps(*fl->GetBeamAbility(), out);
+    }
+}
+
+static void AppendDmxDimmerProps(const DmxDimmerAbility& dim, NSMutableArray* out) {
+    [out addObject:MakeHeaderDescriptor(@"DmxDimmerHeader", @"Dimmer")];
+    [out addObject:MakeIntProp(@"MhDimmerChannel", @"Dimmer Channel",
+                                 dim.GetDimmerChannel(), 0, 512)];
+}
+
+// J-3 (DMX) — emit a DmxMotor's 10 knobs (channel coarse/fine,
+// min/max limit, range of motion, orient zero/home, slew limit,
+// reverse, upside down). Key prefix is the motor's `base_name`
+// (`PanMotor` / `TiltMotor`) so the setter side can route via the
+// shared keys (`PanMotorChannelCoarse`, …, `TiltMotorUpsideDown`).
+// Matches desktop's `DmxComponentPropertyHelpers::
+// AddMotorProperties` (DmxComponentPropertyHelpers.cpp:191).
+static void AppendDmxMotorProps(const DmxMotor& motor, NSMutableArray* out) {
+    NSString* base = [NSString stringWithUTF8String:motor.GetName().c_str()];
+    NSString* header = ([base isEqualToString:@"PanMotor"] ? @"Pan Motor" :
+                         [base isEqualToString:@"TiltMotor"] ? @"Tilt Motor" :
+                         base);
+    [out addObject:MakeHeaderDescriptor([base stringByAppendingString:@"Header"],
+                                          header)];
+    [out addObject:MakeIntProp([base stringByAppendingString:@"ChannelCoarse"],
+                                 @"Channel (Coarse)",
+                                 motor.GetChannelCoarse(), 0, 512)];
+    [out addObject:MakeIntProp([base stringByAppendingString:@"ChannelFine"],
+                                 @"Channel (Fine)",
+                                 motor.GetChannelFine(), 0, 512)];
+    [out addObject:MakeIntProp([base stringByAppendingString:@"MinLimit"],
+                                 @"Min Limit (deg)",
+                                 motor.GetMinLimit(), -180, 0)];
+    [out addObject:MakeIntProp([base stringByAppendingString:@"MaxLimit"],
+                                 @"Max Limit (deg)",
+                                 motor.GetMaxLimit(), 0, 180)];
+    [out addObject:MakeDoubleProp([base stringByAppendingString:@"RangeOfMotion"],
+                                    @"Range of Motion (deg)",
+                                    (double)motor.GetRangeOfMotion(),
+                                    0.0, 65535.0, 1.0, 1)];
+    [out addObject:MakeIntProp([base stringByAppendingString:@"OrientZero"],
+                                 @"Orient to Zero (deg)",
+                                 motor.GetOrientZero(), 0, 360)];
+    NSString* homeLabel = [base isEqualToString:@"PanMotor"]
+        ? @"Orient Forward (deg)"
+        : @"Orient Up (deg)";
+    [out addObject:MakeIntProp([base stringByAppendingString:@"OrientHome"],
+                                 homeLabel,
+                                 motor.GetOrientHome(), 0, 360)];
+    [out addObject:MakeDoubleProp([base stringByAppendingString:@"SlewLimit"],
+                                    @"Slew Limit (deg/sec)",
+                                    (double)motor.GetSlewLimit(),
+                                    0.0, 500.0, 0.1, 2)];
+    [out addObject:MakeBoolProp([base stringByAppendingString:@"Reverse"],
+                                  @"Reverse Rotation",
+                                  motor.GetReverse() ? YES : NO)];
+    [out addObject:MakeBoolProp([base stringByAppendingString:@"UpsideDown"],
+                                  @"Upside Down",
+                                  motor.GetUpsideDown() ? YES : NO)];
+}
+
+static NSArray<NSString*>* DmxMovingHeadStyleOptions() {
+    return @[@"Moving Head Top",
+             @"Moving Head Side",
+             @"Moving Head Bars",
+             @"Moving Head Top Bars",
+             @"Moving Head Side Bars",
+             @"Moving Head 3D"];
+}
+static NSString* DmxMovingHeadStyleNameForIndex(int idx) {
+    // Note: the on-disk style string differs from the display name
+    // for the *Bars* entries — "Moving Head TopBars" / "SideBars"
+    // (no space) per `DmxMovingHeadPropertyAdapter::
+    // DMX_STYLE_NAMES`. The bridge writes the canonical form.
+    static NSArray<NSString*>* names = @[@"Moving Head Top",
+                                           @"Moving Head Side",
+                                           @"Moving Head Bars",
+                                           @"Moving Head TopBars",
+                                           @"Moving Head SideBars",
+                                           @"Moving Head 3D"];
+    if (idx < 0 || idx >= (int)names.count) return names[0];
+    return names[idx];
+}
+static NSArray<NSString*>* DmxMovingHeadFixtureOptions() {
+    return @[@"MH1", @"MH2", @"MH3", @"MH4",
+             @"MH5", @"MH6", @"MH7", @"MH8"];
+}
+static NSArray<NSString*>* DmxColorTypeOptions() {
+    return @[@"RGBW", @"ColorWheel", @"CMYW", @"Unused"];
+}
+static int DmxColorTypeIndexFor(const DmxModel* dmx) {
+    if (!dmx || !dmx->HasColorAbility()) return 3;  // Unused
+    switch (dmx->GetColorAbility()->GetColorType()) {
+    case DmxColorAbility::DMX_COLOR_TYPE::DMX_COLOR_RGBW:   return 0;
+    case DmxColorAbility::DMX_COLOR_TYPE::DMX_COLOR_WHEEL:  return 1;
+    case DmxColorAbility::DMX_COLOR_TYPE::DMX_COLOR_CMYW:   return 2;
+    case DmxColorAbility::DMX_COLOR_TYPE::DMX_COLOR_UNUSED: return 3;
+    }
+    return 3;
+}
+
+// J-3 (DMX) — DmxMovingHeadAdv basic surface. Shares Pan / Tilt
+// motor blocks + Color / Dimmer / Shutter / Beam abilities with
+// DmxMovingHead, but adds three mesh files (base / yoke / head)
+// and a position-zones collision-avoidance grid that aren't
+// editable yet on iPad — those carry "edit on desktop" headers.
+// Mesh file pickers + the zone grid editor are DM-2 follow-up
+// work (XL).
+static void BuildDmxMovingHeadAdvProps(DmxMovingHeadAdv* mh, NSMutableArray* out) {
+    [out addObject:MakeEnumProp(@"DmxFixture", @"Fixture",
+                                 mh->GetFixtureVal() - 1,
+                                 DmxMovingHeadFixtureOptions())];
+    [out addObject:MakeIntProp(@"DmxChannelCount", @"# Channels",
+                                 mh->GetDmxChannelCount(), 1, 512)];
+    if (mh->HasPresetAbility()) {
+        AppendDmxPresetProps(*mh->GetPresetAbility(), out);
+    }
+    if (auto* pan = mh->GetPanMotor()) {
+        AppendDmxMotorProps(*pan, out);
+    }
+    if (auto* tilt = mh->GetTiltMotor()) {
+        AppendDmxMotorProps(*tilt, out);
+    }
+    [out addObject:MakeEnumProp(@"DmxColorType", @"Color Type",
+                                 DmxColorTypeIndexFor(mh),
+                                 DmxColorTypeOptions())];
+    if (mh->HasColorAbility()) {
+        AppendDmxColorProps(mh->GetColorAbility(), out);
+    }
+    if (mh->HasDimmerAbility()) {
+        AppendDmxDimmerProps(*mh->GetDimmerAbility(), out);
+    }
+    if (mh->HasShutterAbility()) {
+        AppendDmxShutterProps(*mh->GetShutterAbility(), out);
+    }
+    if (mh->HasBeamAbility()) {
+        AppendDmxBeamProps(*mh->GetBeamAbility(), out);
+    }
+    // 3D meshes — file picker per slot. Position-zone grid stays
+    // desktop-only (the collision-avoidance 2D-grid editor needs
+    // its own sheet, queued).
+    [out addObject:MakeHeaderDescriptor(@"DmxAdvMeshHeader", @"3D Meshes")];
+    Mesh* baseMesh = mh->GetBaseMesh();
+    [out addObject:@{
+        @"key":   @"AdvBaseMeshFile",
+        @"label": @"Base Mesh",
+        @"kind":  @"meshFile",
+        @"value": baseMesh ? [NSString stringWithUTF8String:baseMesh->GetObjFile().c_str()]
+                            : @"",
+    }];
+    Mesh* yokeMesh = mh->GetYokeMesh();
+    [out addObject:@{
+        @"key":   @"AdvYokeMeshFile",
+        @"label": @"Yoke Mesh",
+        @"kind":  @"meshFile",
+        @"value": yokeMesh ? [NSString stringWithUTF8String:yokeMesh->GetObjFile().c_str()]
+                            : @"",
+    }];
+    Mesh* headMesh = mh->GetHeadMesh();
+    [out addObject:@{
+        @"key":   @"AdvHeadMeshFile",
+        @"label": @"Head Mesh",
+        @"kind":  @"meshFile",
+        @"value": headMesh ? [NSString stringWithUTF8String:headMesh->GetObjFile().c_str()]
+                            : @"",
+    }];
+    // J-30 — position-zone list. Each zone gates a channel/value
+    // assignment to a Pan × Tilt rectangle; the model writes the
+    // zone's `value` to its `channel` whenever the head's
+    // current pan/tilt falls inside the zone (collision-
+    // avoidance for setups where the beam can't sweep certain
+    // directions, e.g. into walls).
+    NSMutableArray* zones = [NSMutableArray array];
+    for (const auto& z : mh->GetPositionZones()) {
+        [zones addObject:@{
+            @"panMin":  @(z.pan_min),
+            @"panMax":  @(z.pan_max),
+            @"tiltMin": @(z.tilt_min),
+            @"tiltMax": @(z.tilt_max),
+            @"channel": @(z.channel),
+            @"value":   @(z.value),
+        }];
+    }
+    [out addObject:@{
+        @"key":   @"DmxPositionZoneList",
+        @"label": @"Position Zones",
+        @"kind":  @"positionZoneList",
+        @"value": zones,
+    }];
+}
+
+// J-3 (DMX) — DmxSkull basic surface. Six servos (Jaw / Pan /
+// Tilt / Nod / EyeUD / EyeLR) plus eye-brightness and an
+// optional color ability. Servo *enables* (which servos this
+// fixture actually has) come from desktop's SkullConfigDialog —
+// a checkbox sheet we haven't ported. Per-servo channel / min /
+// max / orient are editable inline when the matching `HasXxx`
+// bool is set; the four head/jaw/eye meshes stay desktop-only.
+static void AppendDmxSkullServoProps(NSString* keyPrefix,
+                                       NSString* header,
+                                       Servo* servo,
+                                       int orient,
+                                       NSMutableArray* out) {
+    if (!servo) return;
+    [out addObject:MakeHeaderDescriptor([keyPrefix stringByAppendingString:@"Header"],
+                                          header)];
+    [out addObject:MakeIntProp([keyPrefix stringByAppendingString:@"Channel"],
+                                 @"Channel",
+                                 servo->GetChannel(), 0, 512)];
+    [out addObject:MakeIntProp([keyPrefix stringByAppendingString:@"MinLimit"],
+                                 @"Min Limit",
+                                 servo->GetMinLimit(), 0, 65535)];
+    [out addObject:MakeIntProp([keyPrefix stringByAppendingString:@"MaxLimit"],
+                                 @"Max Limit",
+                                 servo->GetMaxLimit(), 0, 65535)];
+    [out addObject:MakeIntProp([keyPrefix stringByAppendingString:@"Orient"],
+                                 @"Orient (deg)",
+                                 orient, -360, 360)];
+}
+
+static void BuildDmxSkullProps(DmxSkull* sk, NSMutableArray* out) {
+    [out addObject:MakeIntProp(@"DmxChannelCount", @"# Channels",
+                                 sk->GetDmxChannelCount(), 1, 512)];
+    if (sk->HasPresetAbility()) {
+        AppendDmxPresetProps(*sk->GetPresetAbility(), out);
+    }
+    [out addObject:MakeBoolProp(@"SkullIs16Bit", @"16-bit Servos",
+                                  sk->Is16Bit() ? YES : NO)];
+    [out addObject:MakeHeaderDescriptor(@"SkullEnableHeader",
+                                          @"Servo Enables")];
+    [out addObject:MakeBoolProp(@"SkullHasJaw",   @"Jaw",
+                                  sk->HasJaw()   ? YES : NO)];
+    [out addObject:MakeBoolProp(@"SkullHasPan",   @"Pan",
+                                  sk->HasPan()   ? YES : NO)];
+    [out addObject:MakeBoolProp(@"SkullHasTilt",  @"Tilt",
+                                  sk->HasTilt()  ? YES : NO)];
+    [out addObject:MakeBoolProp(@"SkullHasNod",   @"Nod",
+                                  sk->HasNod()   ? YES : NO)];
+    [out addObject:MakeBoolProp(@"SkullHasEyeUD", @"Eye Up/Down",
+                                  sk->HasEyeUD() ? YES : NO)];
+    [out addObject:MakeBoolProp(@"SkullHasEyeLR", @"Eye Left/Right",
+                                  sk->HasEyeLR() ? YES : NO)];
+    [out addObject:MakeBoolProp(@"SkullHasColor", @"Color",
+                                  sk->HasColor() ? YES : NO)];
+    [out addObject:MakeButtonDescriptor(@"SkullApplySkulltronix",
+                                          @"Apply Skulltronix Preset")];
+    if (sk->HasJaw()) {
+        AppendDmxSkullServoProps(@"SkullJaw", @"Jaw Servo",
+                                  sk->GetJawServo(), sk->GetJawOrient(), out);
+    }
+    if (sk->HasPan()) {
+        AppendDmxSkullServoProps(@"SkullPan", @"Pan Servo",
+                                  sk->GetPanServo(), sk->GetPanOrient(), out);
+    }
+    if (sk->HasTilt()) {
+        AppendDmxSkullServoProps(@"SkullTilt", @"Tilt Servo",
+                                  sk->GetTiltServo(), sk->GetTiltOrient(), out);
+    }
+    if (sk->HasNod()) {
+        AppendDmxSkullServoProps(@"SkullNod", @"Nod Servo",
+                                  sk->GetNodServo(), sk->GetNodOrient(), out);
+    }
+    if (sk->HasEyeUD()) {
+        AppendDmxSkullServoProps(@"SkullEyeUD", @"Eye Up/Down Servo",
+                                  sk->GetEyeUDServo(), sk->GetEyeUDOrient(), out);
+    }
+    if (sk->HasEyeLR()) {
+        AppendDmxSkullServoProps(@"SkullEyeLR", @"Eye Left/Right Servo",
+                                  sk->GetEyeLRServo(), sk->GetEyeLROrient(), out);
+    }
+    if (sk->HasColor()) {
+        [out addObject:MakeHeaderDescriptor(@"SkullEyeBrightHeader", @"Eyes")];
+        [out addObject:MakeIntProp(@"SkullEyeBrightnessChannel",
+                                     @"Eye Brightness Channel",
+                                     sk->GetEyeBrightnessChannel(), 0, 512)];
+        if (sk->HasColorAbility()) {
+            AppendDmxColorProps(sk->GetColorAbility(), out);
+        }
+    }
+    [out addObject:MakeHeaderDescriptor(@"SkullMeshHeader", @"3D Meshes")];
+    Mesh* headMesh = sk->GetHeadMesh();
+    [out addObject:@{
+        @"key":   @"SkullHeadMeshFile",
+        @"label": @"Head",
+        @"kind":  @"meshFile",
+        @"value": headMesh ? [NSString stringWithUTF8String:headMesh->GetObjFile().c_str()]
+                            : @"",
+    }];
+    Mesh* jawMesh = sk->GetJawMesh();
+    [out addObject:@{
+        @"key":   @"SkullJawMeshFile",
+        @"label": @"Jaw",
+        @"kind":  @"meshFile",
+        @"value": jawMesh ? [NSString stringWithUTF8String:jawMesh->GetObjFile().c_str()]
+                           : @"",
+    }];
+    Mesh* eyeLMesh = sk->GetEyeLMesh();
+    [out addObject:@{
+        @"key":   @"SkullEyeLMeshFile",
+        @"label": @"Eye Left",
+        @"kind":  @"meshFile",
+        @"value": eyeLMesh ? [NSString stringWithUTF8String:eyeLMesh->GetObjFile().c_str()]
+                            : @"",
+    }];
+    Mesh* eyeRMesh = sk->GetEyeRMesh();
+    [out addObject:@{
+        @"key":   @"SkullEyeRMeshFile",
+        @"label": @"Eye Right",
+        @"kind":  @"meshFile",
+        @"value": eyeRMesh ? [NSString stringWithUTF8String:eyeRMesh->GetObjFile().c_str()]
+                            : @"",
+    }];
+}
+
+// J-3 (DMX) — Servo style enum. Mirrors `Servo::SERVO_STYLE`
+// (Servo.h:77). Order is load-bearing — the setter writes back
+// the matching string via `Servo::SetStyle(string)`.
+static NSArray<NSString*>* DmxServoStyleOptions() {
+    return @[@"Translate X", @"Translate Y", @"Translate Z",
+             @"Rotate X",    @"Rotate Y",    @"Rotate Z"];
+}
+static int DmxServoStyleIndexFor(const Servo* s) {
+    if (!s) return 0;
+    NSString* str = [NSString stringWithUTF8String:s->GetStyle().c_str()];
+    NSArray* opts = DmxServoStyleOptions();
+    NSUInteger i = [opts indexOfObject:str];
+    return (i == NSNotFound) ? 0 : (int)i;
+}
+
+// J-3 (DMX) — emit a Servo's editable knobs. Key prefix is
+// `<keyPrefix>` (e.g. `Servo0`, `Servo1`); the setter side
+// decodes the suffix to dispatch back to the matching setter.
+static void AppendDmxServoKnobProps(NSString* keyPrefix,
+                                      NSString* headerLabel,
+                                      const Servo* s,
+                                      NSMutableArray* out) {
+    if (!s) return;
+    [out addObject:MakeHeaderDescriptor([keyPrefix stringByAppendingString:@"Header"],
+                                          headerLabel)];
+    [out addObject:MakeIntProp([keyPrefix stringByAppendingString:@"Channel"],
+                                 @"Channel",
+                                 s->GetChannel(), 0, 512)];
+    [out addObject:MakeBoolProp([keyPrefix stringByAppendingString:@"Is16Bit"],
+                                  @"16-bit",
+                                  s->Is16Bit() ? YES : NO)];
+    [out addObject:MakeIntProp([keyPrefix stringByAppendingString:@"MinLimit"],
+                                 @"Min Limit",
+                                 s->GetMinLimit(), 0, 65535)];
+    [out addObject:MakeIntProp([keyPrefix stringByAppendingString:@"MaxLimit"],
+                                 @"Max Limit",
+                                 s->GetMaxLimit(), 0, 65535)];
+    [out addObject:MakeDoubleProp([keyPrefix stringByAppendingString:@"RangeOfMotion"],
+                                    @"Range of Motion",
+                                    (double)s->GetRangeOfMotion(),
+                                    -65535.0, 65535.0, 1.0, 1)];
+    [out addObject:MakeEnumProp([keyPrefix stringByAppendingString:@"Style"],
+                                  @"Style",
+                                  DmxServoStyleIndexFor(s),
+                                  DmxServoStyleOptions())];
+    [out addObject:MakeIntProp([keyPrefix stringByAppendingString:@"ControllerMin"],
+                                 @"Controller Min Pulse (us)",
+                                 s->GetControllerMin(), 0, 65535)];
+    [out addObject:MakeIntProp([keyPrefix stringByAppendingString:@"ControllerMax"],
+                                 @"Controller Max Pulse (us)",
+                                 s->GetControllerMax(), 0, 65535)];
+    [out addObject:MakeBoolProp([keyPrefix stringByAppendingString:@"ControllerReverse"],
+                                  @"Reverse",
+                                  s->GetControllerReverse() ? YES : NO)];
+}
+
+// J-3 (DMX) — DmxServo basic surface. N servos (1–25) with the
+// full per-servo knob set. Static + motion image files stay
+// desktop-only (image-picker UX is a separate piece of work).
+static void BuildDmxServoProps(DmxServo* ds, NSMutableArray* out) {
+    [out addObject:MakeIntProp(@"DmxChannelCount", @"# Channels",
+                                 ds->GetDmxChannelCount(), 1, 512)];
+    [out addObject:MakeIntProp(@"ServoNumServos", @"# Servos",
+                                 ds->GetNumServos(), 1, 25)];
+    [out addObject:MakeBoolProp(@"ServoIs16Bit", @"16-bit Servos",
+                                  ds->Is16Bit() ? YES : NO)];
+    [out addObject:MakeDoubleProp(@"ServoBrightness", @"Brightness (%)",
+                                    (double)ds->GetBrightness(),
+                                    0.0, 100.0, 1.0, 1)];
+    [out addObject:MakeIntProp(@"ServoTransparency", @"Transparency (%)",
+                                 ds->GetTransparency(), 0, 100)];
+    if (ds->HasPresetAbility()) {
+        AppendDmxPresetProps(*ds->GetPresetAbility(), out);
+    }
+    for (int i = 0; i < ds->GetNumServos(); ++i) {
+        NSString* prefix = [NSString stringWithFormat:@"Servo%d", i];
+        NSString* hdr = [NSString stringWithFormat:@"Servo %d", i + 1];
+        AppendDmxServoKnobProps(prefix, hdr, ds->GetServo(i), out);
+        DmxImage* staticImg = ds->GetStaticImage(i);
+        [out addObject:@{
+            @"key":   [NSString stringWithFormat:@"Servo%dStaticImage", i],
+            @"label": @"   Static Image",
+            @"kind":  @"imageFile",
+            @"value": staticImg ? [NSString stringWithUTF8String:staticImg->GetImageFile().c_str()]
+                                : @"",
+        }];
+        DmxImage* motionImg = ds->GetMotionImage(i);
+        [out addObject:@{
+            @"key":   [NSString stringWithFormat:@"Servo%dMotionImage", i],
+            @"label": @"   Motion Image",
+            @"kind":  @"imageFile",
+            @"value": motionImg ? [NSString stringWithUTF8String:motionImg->GetImageFile().c_str()]
+                                 : @"",
+        }];
+    }
+}
+
+// J-3 (DMX) — DmxServo3d basic surface. Per-servo knobs plus
+// counts for static / motion meshes; the mesh-to-servo / servo-
+// to-mesh linking matrix is a 2D grid editor that stays
+// desktop-only for now (the iPad bridge surfaces the counts
+// only — the array itself isn't read back).
+static void BuildDmxServo3dProps(DmxServo3d* ds, NSMutableArray* out) {
+    [out addObject:MakeIntProp(@"DmxChannelCount", @"# Channels",
+                                 ds->GetDmxChannelCount(), 1, 512)];
+    [out addObject:MakeIntProp(@"ServoNumServos", @"# Servos",
+                                 ds->GetNumServos(), 1, 24)];
+    [out addObject:MakeIntProp(@"Servo3dNumStatic", @"# Static Meshes",
+                                 ds->GetNumStatic(), 1, 24)];
+    [out addObject:MakeIntProp(@"Servo3dNumMotion", @"# Motion Meshes",
+                                 ds->GetNumMotion(), 1, 24)];
+    [out addObject:MakeBoolProp(@"ServoIs16Bit", @"16-bit Servos",
+                                  ds->Is16Bit() ? YES : NO)];
+    [out addObject:MakeDoubleProp(@"ServoBrightness", @"Brightness (%)",
+                                    (double)ds->GetBrightness(),
+                                    0.0, 100.0, 1.0, 1)];
+    [out addObject:MakeBoolProp(@"Servo3dShowPivot", @"Show Pivot",
+                                  ds->GetShowPivot() ? YES : NO)];
+    if (ds->HasPresetAbility()) {
+        AppendDmxPresetProps(*ds->GetPresetAbility(), out);
+    }
+    for (int i = 0; i < ds->GetNumServos(); ++i) {
+        NSString* prefix = [NSString stringWithFormat:@"Servo%d", i];
+        NSString* hdr = [NSString stringWithFormat:@"Servo %d", i + 1];
+        AppendDmxServoKnobProps(prefix, hdr, ds->GetServo(i), out);
+    }
+    [out addObject:MakeHeaderDescriptor(@"DmxServo3dStaticMeshHeader",
+                                          @"Static Meshes")];
+    for (int i = 0; i < ds->GetNumStatic(); ++i) {
+        Mesh* mesh = ds->GetStaticMesh(i);
+        [out addObject:@{
+            @"key":   [NSString stringWithFormat:@"Servo3dStatic%dMeshFile", i],
+            @"label": [NSString stringWithFormat:@"Static %d", i + 1],
+            @"kind":  @"meshFile",
+            @"value": mesh ? [NSString stringWithUTF8String:mesh->GetObjFile().c_str()]
+                           : @"",
+        }];
+    }
+    [out addObject:MakeHeaderDescriptor(@"DmxServo3dMotionMeshHeader",
+                                          @"Motion Meshes")];
+    for (int i = 0; i < ds->GetNumMotion(); ++i) {
+        Mesh* mesh = ds->GetMotionMesh(i);
+        [out addObject:@{
+            @"key":   [NSString stringWithFormat:@"Servo3dMotion%dMeshFile", i],
+            @"label": [NSString stringWithFormat:@"Motion %d", i + 1],
+            @"kind":  @"meshFile",
+            @"value": mesh ? [NSString stringWithUTF8String:mesh->GetObjFile().c_str()]
+                           : @"",
+        }];
+    }
+    // J-30 — servo / mesh linking. Two parallel enum pickers
+    // per servo: which Mesh drives each Servo, and which Servo
+    // drives each Mesh. Each picker lists "Mesh 1" .. "Mesh N"
+    // where N is the servo count. Desktop's mental model:
+    // `servo_links[i] = j` means servo i's motion comes from
+    // mesh j; -1 = identity (use i itself). The iPad
+    // descriptors flatten -1 to i on emit so the enum can pick
+    // any concrete option without a separate "default" entry.
+    const int numServos = ds->GetNumServos();
+    NSMutableArray<NSString*>* linkOptions = [NSMutableArray array];
+    for (int i = 0; i < numServos; ++i) {
+        [linkOptions addObject:[NSString stringWithFormat:@"Mesh %d", i + 1]];
+    }
+    if (numServos > 1) {
+        [out addObject:MakeHeaderDescriptor(@"DmxServo3dServoLinkHeader",
+                                              @"Servo Linkage")];
+        for (int i = 0; i < numServos; ++i) {
+            const int raw = ds->GetServoLink(i);
+            const int idx = (raw == -1) ? i : raw;
+            [out addObject:MakeEnumProp(
+                [NSString stringWithFormat:@"Servo3dServo%dLink", i],
+                [NSString stringWithFormat:@"Servo %d", i + 1],
+                idx,
+                linkOptions)];
+        }
+        [out addObject:MakeHeaderDescriptor(@"DmxServo3dMeshLinkHeader",
+                                              @"Mesh Linkage")];
+        for (int i = 0; i < numServos; ++i) {
+            const int raw = ds->GetMeshLink(i);
+            const int idx = (raw == -1) ? i : raw;
+            [out addObject:MakeEnumProp(
+                [NSString stringWithFormat:@"Servo3dMesh%dLink", i],
+                [NSString stringWithFormat:@"Mesh %d", i + 1],
+                idx,
+                linkOptions)];
+        }
+    }
+}
+
+static void BuildDmxGeneralProps(DmxGeneral* g, NSMutableArray* out) {
+    [out addObject:MakeIntProp(@"DmxChannelCount", @"# Channels",
+                                 g->GetDmxChannelCount(), 1, 512)];
+    if (g->HasPresetAbility()) {
+        AppendDmxPresetProps(*g->GetPresetAbility(), out);
+    }
+    [out addObject:MakeEnumProp(@"DmxColorType", @"Color Type",
+                                 DmxColorTypeIndexFor(g),
+                                 DmxColorTypeOptions())];
+    if (g->HasColorAbility()) {
+        AppendDmxColorProps(g->GetColorAbility(), out);
+    }
+}
+
+static void BuildDmxMovingHeadProps(DmxMovingHead* mh, NSMutableArray* out) {
+    [out addObject:MakeEnumProp(@"DmxStyle", @"DMX Style",
+                                 mh->GetDmxStyleVal(),
+                                 DmxMovingHeadStyleOptions())];
+    [out addObject:MakeEnumProp(@"DmxFixture", @"Fixture",
+                                 mh->GetFixtureVal() - 1,
+                                 DmxMovingHeadFixtureOptions())];
+    [out addObject:MakeIntProp(@"DmxChannelCount", @"# Channels",
+                                 mh->GetDmxChannelCount(), 1, 512)];
+    if (mh->HasPresetAbility()) {
+        AppendDmxPresetProps(*mh->GetPresetAbility(), out);
+    }
+    [out addObject:MakeBoolProp(@"HideBody", @"Hide Body",
+                                  mh->GetHideBody() ? YES : NO)];
+    if (auto* pan = mh->GetPanMotor()) {
+        AppendDmxMotorProps(*pan, out);
+    }
+    if (auto* tilt = mh->GetTiltMotor()) {
+        AppendDmxMotorProps(*tilt, out);
+    }
+    [out addObject:MakeEnumProp(@"DmxColorType", @"Color Type",
+                                 DmxColorTypeIndexFor(mh),
+                                 DmxColorTypeOptions())];
+    if (mh->HasColorAbility()) {
+        AppendDmxColorProps(mh->GetColorAbility(), out);
+    }
+    if (mh->HasDimmerAbility()) {
+        AppendDmxDimmerProps(*mh->GetDimmerAbility(), out);
+    }
+    if (mh->HasShutterAbility()) {
+        AppendDmxShutterProps(*mh->GetShutterAbility(), out);
+    }
+    if (mh->HasBeamAbility()) {
+        AppendDmxBeamProps(*mh->GetBeamAbility(), out);
+    }
+}
+
 static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
     // J-21/J-23 — mirrors CustomPropertyAdapter:
     // Model Data opens the new point/click/drag grid editor;
@@ -5831,6 +6564,30 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
         break;
     case DisplayAsType::Custom:
         BuildCustomProps(static_cast<CustomModel*>(m), out);
+        break;
+    case DisplayAsType::DmxFloodlight:
+    case DisplayAsType::DmxFloodArea:
+        // DmxFloodArea is a DmxFloodlight subclass with only a
+        // different DrawModel — the property surface is identical.
+        BuildDmxFloodlightProps(static_cast<DmxFloodlight*>(m), out);
+        break;
+    case DisplayAsType::DmxMovingHead:
+        BuildDmxMovingHeadProps(static_cast<DmxMovingHead*>(m), out);
+        break;
+    case DisplayAsType::DmxMovingHeadAdv:
+        BuildDmxMovingHeadAdvProps(static_cast<DmxMovingHeadAdv*>(m), out);
+        break;
+    case DisplayAsType::DmxGeneral:
+        BuildDmxGeneralProps(static_cast<DmxGeneral*>(m), out);
+        break;
+    case DisplayAsType::DmxSkull:
+        BuildDmxSkullProps(static_cast<DmxSkull*>(m), out);
+        break;
+    case DisplayAsType::DmxServo:
+        BuildDmxServoProps(static_cast<DmxServo*>(m), out);
+        break;
+    case DisplayAsType::DmxServo3d:
+        BuildDmxServo3dProps(static_cast<DmxServo3d*>(m), out);
         break;
     default:
         break;
@@ -6503,7 +7260,604 @@ static void BuildCustomProps(CustomModel* cm, NSMutableArray* out) {
             xlColor xc(v);
             if (xc != lm->GetLabelTextColor()) { lm->SetLabelTextColor(xc); changed = YES; }
         }
-    } else {
+    }
+    // J-3 (DMX) — DMX-model knobs. All keys share the
+    // `DmxModel`-as-base dispatch: cast to the relevant ability
+    // subobject and update its scalar. Floodlight is the only
+    // fixture wired to `BuildXxxProps` today, but the setter is
+    // shared so it auto-handles MovingHead / FloodArea / etc.
+    // once their builders land.
+    else if (k == "DmxChannelCount") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* dmx = dynamic_cast<DmxModel*>(m);
+        if (dmx && dmx->GetDmxChannelCount() != v) {
+            dmx->UpdateChannelCount(v, /* do_work */ true);
+            changed = YES;
+        }
+    } else if (k == "DmxRedChannel" || k == "DmxGreenChannel"
+               || k == "DmxBlueChannel" || k == "DmxWhiteChannel"
+               || k == "DmxCyanChannel" || k == "DmxMagentaChannel"
+               || k == "DmxYellowChannel") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* dmx = dynamic_cast<DmxModel*>(m);
+        if (!dmx || !dmx->HasColorAbility()) return NO;
+        using CT = DmxColorAbility::DMX_COLOR_TYPE;
+        auto* color = dmx->GetColorAbility();
+        if (color->GetColorType() == CT::DMX_COLOR_RGBW) {
+            auto* rgb = static_cast<DmxColorAbilityRGB*>(color);
+            if (k == "DmxRedChannel"   && (int)rgb->GetRedChannel()   != v) {
+                rgb->SetRedChannel((uint32_t)v); changed = YES;
+            } else if (k == "DmxGreenChannel" && (int)rgb->GetGreenChannel() != v) {
+                rgb->SetGreenChannel((uint32_t)v); changed = YES;
+            } else if (k == "DmxBlueChannel"  && (int)rgb->GetBlueChannel()  != v) {
+                rgb->SetBlueChannel((uint32_t)v); changed = YES;
+            } else if (k == "DmxWhiteChannel" && (int)rgb->GetWhiteChannel() != v) {
+                rgb->SetWhiteChannel((uint32_t)v); changed = YES;
+            }
+        } else if (color->GetColorType() == CT::DMX_COLOR_CMYW) {
+            auto* cmy = static_cast<DmxColorAbilityCMY*>(color);
+            if (k == "DmxCyanChannel"    && (int)cmy->GetCyanChannel()    != v) {
+                cmy->SetCyanChannel(v); changed = YES;
+            } else if (k == "DmxMagentaChannel" && (int)cmy->GetMagentaChannel() != v) {
+                cmy->SetMagentaChannel(v); changed = YES;
+            } else if (k == "DmxYellowChannel"  && (int)cmy->GetYellowChannel()  != v) {
+                cmy->SetYellowChannel(v); changed = YES;
+            } else if (k == "DmxWhiteChannel"   && (int)cmy->GetWhiteChannel()   != v) {
+                cmy->SetWhiteChannel(v); changed = YES;
+            }
+        }
+        // Wheel doesn't share those keys — its setters live below.
+    } else if (k == "DmxWheelChannel" || k == "DmxWheelDimmerChannel"
+               || k == "DmxWheelDelay") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* dmx = dynamic_cast<DmxModel*>(m);
+        if (!dmx || !dmx->HasColorAbility()) return NO;
+        if (dmx->GetColorAbility()->GetColorType()
+            != DmxColorAbility::DMX_COLOR_TYPE::DMX_COLOR_WHEEL) return NO;
+        auto* wh = static_cast<DmxColorAbilityWheel*>(dmx->GetColorAbility());
+        if (k == "DmxWheelChannel" && (int)wh->GetWheelChannel() != v) {
+            wh->SetWheelChannel((uint32_t)v); changed = YES;
+        } else if (k == "DmxWheelDimmerChannel" && (int)wh->GetDimmerChannel() != v) {
+            wh->SetDimmerChannel((uint32_t)v); changed = YES;
+        } else if (k == "DmxWheelDelay" && (int)wh->GetWheelDelay() != v) {
+            wh->SetWheelDelay((uint32_t)v); changed = YES;
+        }
+    } else if (k == "DmxShutterChannel" || k == "DmxShutterOpen"
+               || k == "DmxShutterOnValue") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* dmx = dynamic_cast<DmxModel*>(m);
+        if (dmx && dmx->HasShutterAbility()) {
+            auto* sh = dmx->GetShutterAbility();
+            if (k == "DmxShutterChannel" && sh->GetShutterChannel() != v) {
+                sh->SetShutterChannel(v); changed = YES;
+            } else if (k == "DmxShutterOpen" && sh->GetShutterThreshold() != v) {
+                sh->SetShutterThreshold(v); changed = YES;
+            } else if (k == "DmxShutterOnValue" && sh->GetShutterOnValue() != v) {
+                sh->SetShutterOnValue(v); changed = YES;
+            }
+        }
+    } else if (k == "DmxBeamLength" || k == "DmxBeamWidth"
+               || k == "DmxBeamYOffset") {
+        double v = asDouble(&ok); if (!ok) return NO;
+        auto* dmx = dynamic_cast<DmxModel*>(m);
+        if (dmx && dmx->HasBeamAbility()) {
+            auto* b = dmx->GetBeamAbility();
+            if (k == "DmxBeamLength"
+                && std::fabs((double)b->GetBeamLength() - v) > 1e-4) {
+                b->SetBeamLength((float)v); changed = YES;
+            } else if (k == "DmxBeamWidth"
+                       && std::fabs((double)b->GetBeamWidth() - v) > 1e-4) {
+                b->SetBeamWidth((float)v); changed = YES;
+            } else if (k == "DmxBeamYOffset"
+                       && b->SupportsYOffset()
+                       && std::fabs((double)b->GetBeamYOffset() - v) > 1e-4) {
+                b->SetBeamYOffset((float)v); changed = YES;
+            }
+        }
+    } else if (k == "DmxBeamOrient") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* dmx = dynamic_cast<DmxModel*>(m);
+        if (dmx && dmx->HasBeamAbility()) {
+            auto* b = dmx->GetBeamAbility();
+            if (b->SupportsOrient() && b->GetBeamOrient() != v) {
+                b->SetBeamOrient(v); changed = YES;
+            }
+        }
+    } else if (k == "MhDimmerChannel") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* dmx = dynamic_cast<DmxModel*>(m);
+        if (dmx && dmx->HasDimmerAbility()
+            && dmx->GetDimmerAbility()->GetDimmerChannel() != v) {
+            dmx->GetDimmerAbility()->SetDimmerChannel(v); changed = YES;
+        }
+    } else if (k == "DmxColorType") {
+        int v = asInt(&ok); if (!ok) return NO;
+        // Color type maps to `DmxModel::InitColorAbility(int type)`,
+        // where type follows the same 0..3 ordering desktop uses
+        // (RGBW / Wheel / CMYW / Unused — matches
+        // `DMX_COLOR_TYPES_VALUES`).
+        auto* dmx = dynamic_cast<DmxModel*>(m);
+        if (dmx && DmxColorTypeIndexFor(dmx) != v) {
+            dmx->InitColorAbility(v); changed = YES;
+        }
+    }
+    // J-3 (DMX) — MovingHead-specific knobs.
+    else if (k == "DmxStyle") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* mh = dynamic_cast<DmxMovingHead*>(m);
+        if (mh && mh->GetDmxStyleVal() != v) {
+            mh->SetDmxStyleVal(v);
+            mh->SetDmxStyle(std::string(
+                DmxMovingHeadStyleNameForIndex(v).UTF8String));
+            changed = YES;
+        }
+    } else if (k == "DmxFixture") {
+        int v = asInt(&ok); if (!ok) return NO;
+        // Shared between DmxMovingHead and DmxMovingHeadAdv via the
+        // common `DmxMovingHeadComm` base.
+        auto* mhc = dynamic_cast<DmxMovingHeadComm*>(m);
+        if (mhc && (mhc->GetFixtureVal() - 1) != v) {
+            mhc->SetFixtureVal(v);
+            mhc->SetDmxFixture(DmxMovingHeadComm::FixtureIDtoString(v));
+            changed = YES;
+        }
+    } else if (k == "HideBody") {
+        BOOL v = asBool(&ok); if (!ok) return NO;
+        auto* mh = dynamic_cast<DmxMovingHead*>(m);
+        if (mh && mh->GetHideBody() != (bool)v) {
+            mh->SetHideBody(v); changed = YES;
+        }
+    }
+    // J-3 (DMX) — DmxSkull-specific knobs.
+    else if (k == "SkullIs16Bit") {
+        BOOL v = asBool(&ok); if (!ok) return NO;
+        auto* sk = dynamic_cast<DmxSkull*>(m);
+        if (sk && sk->Is16Bit() != (bool)v) {
+            sk->SetIs16Bit(v); changed = YES;
+        }
+    } else if (k == "SkullHasJaw" || k == "SkullHasPan"
+               || k == "SkullHasTilt" || k == "SkullHasNod"
+               || k == "SkullHasEyeUD" || k == "SkullHasEyeLR"
+               || k == "SkullHasColor") {
+        BOOL v = asBool(&ok); if (!ok) return NO;
+        auto* sk = dynamic_cast<DmxSkull*>(m);
+        if (!sk) return NO;
+        if (k == "SkullHasJaw"   && sk->HasJaw()   != (bool)v) {
+            sk->SetHasJaw(v);   changed = YES;
+        } else if (k == "SkullHasPan"   && sk->HasPan()   != (bool)v) {
+            sk->SetHasPan(v);   changed = YES;
+        } else if (k == "SkullHasTilt"  && sk->HasTilt()  != (bool)v) {
+            sk->SetHasTilt(v);  changed = YES;
+        } else if (k == "SkullHasNod"   && sk->HasNod()   != (bool)v) {
+            sk->SetHasNod(v);   changed = YES;
+        } else if (k == "SkullHasEyeUD" && sk->HasEyeUD() != (bool)v) {
+            sk->SetHasEyeUD(v); changed = YES;
+        } else if (k == "SkullHasEyeLR" && sk->HasEyeLR() != (bool)v) {
+            sk->SetHasEyeLR(v); changed = YES;
+        } else if (k == "SkullHasColor" && sk->HasColor() != (bool)v) {
+            sk->SetHasColor(v); changed = YES;
+        }
+    } else if (k == "SkullApplySkulltronix") {
+        // One-shot: the bool payload is ignored — taps always
+        // apply the preset, which sets the `setup_skulltronix`
+        // flag so `InitModel()` (re)assigns the canonical
+        // Skulltronix channel layout on the next reinitialise.
+        auto* sk = dynamic_cast<DmxSkull*>(m);
+        if (sk) {
+            sk->SetSkulltronix();
+            changed = YES;
+        }
+    } else if (k == "SkullEyeBrightnessChannel") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* sk = dynamic_cast<DmxSkull*>(m);
+        if (sk && sk->GetEyeBrightnessChannel() != v) {
+            sk->SetEyeBrightnessChannel(v); changed = YES;
+        }
+    } else if (k.find("Skull") == 0
+               && (k.find("Channel") != std::string::npos
+                   || k.find("MinLimit") != std::string::npos
+                   || k.find("MaxLimit") != std::string::npos
+                   || k.find("Orient") != std::string::npos)) {
+        auto* sk = dynamic_cast<DmxSkull*>(m);
+        if (!sk) return NO;
+        // Decode `Skull<servo><suffix>`. Servo name is whatever
+        // sits between the `Skull` prefix and the trailing
+        // `Channel`/`MinLimit`/`MaxLimit`/`Orient`. Keeps the
+        // per-servo cases compact instead of N × 4 individual
+        // string compares.
+        Servo* servo = nullptr;
+        int* orient = nullptr;
+        std::string servoName;
+        if      (k.find("SkullJaw")   == 0) { servo = sk->GetJawServo();
+                                              servoName = "Jaw"; }
+        else if (k.find("SkullPan")   == 0) { servo = sk->GetPanServo();
+                                              servoName = "Pan"; }
+        else if (k.find("SkullTilt")  == 0) { servo = sk->GetTiltServo();
+                                              servoName = "Tilt"; }
+        else if (k.find("SkullNod")   == 0) { servo = sk->GetNodServo();
+                                              servoName = "Nod"; }
+        else if (k.find("SkullEyeUD") == 0) { servo = sk->GetEyeUDServo();
+                                              servoName = "EyeUD"; }
+        else if (k.find("SkullEyeLR") == 0) { servo = sk->GetEyeLRServo();
+                                              servoName = "EyeLR"; }
+        else return NO;
+        const std::string suffix = k.substr(5 + servoName.size());
+        if (suffix == "Channel") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (servo && servo->GetChannel() != v) {
+                servo->SetChannel(v); changed = YES;
+            }
+        } else if (suffix == "MinLimit") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (servo && servo->GetMinLimit() != v) {
+                servo->SetMinLimit(v); changed = YES;
+            }
+        } else if (suffix == "MaxLimit") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (servo && servo->GetMaxLimit() != v) {
+                servo->SetMaxLimit(v); changed = YES;
+            }
+        } else if (suffix == "Orient") {
+            int v = asInt(&ok); if (!ok) return NO;
+            int cur = 0;
+            if      (servoName == "Jaw")   cur = sk->GetJawOrient();
+            else if (servoName == "Pan")   cur = sk->GetPanOrient();
+            else if (servoName == "Tilt")  cur = sk->GetTiltOrient();
+            else if (servoName == "Nod")   cur = sk->GetNodOrient();
+            else if (servoName == "EyeUD") cur = sk->GetEyeUDOrient();
+            else if (servoName == "EyeLR") cur = sk->GetEyeLROrient();
+            if (cur != v) {
+                if      (servoName == "Jaw")   sk->SetJawOrient(v);
+                else if (servoName == "Pan")   sk->SetPanOrient(v);
+                else if (servoName == "Tilt")  sk->SetTiltOrient(v);
+                else if (servoName == "Nod")   sk->SetNodOrient(v);
+                else if (servoName == "EyeUD") sk->SetEyeUDOrient(v);
+                else if (servoName == "EyeLR") sk->SetEyeLROrient(v);
+                changed = YES;
+            }
+        } else {
+            return NO;
+        }
+        (void)orient;  // silence unused-var when default
+    }
+    // J-30 — wholesale-replace setters for the DMX list editors.
+    // Sheet emits an NSArray of NSDictionary entries; the
+    // setter clears the existing list and rebuilds it.
+    else if (k == "DmxPresetList") {
+        NSArray* arr = ([value isKindOfClass:[NSArray class]] ? (NSArray*)value : nil);
+        auto* dmx = dynamic_cast<DmxModel*>(m);
+        if (!arr || !dmx || !dmx->HasPresetAbility()) return NO;
+        auto* preset = dmx->GetPresetAbility();
+        while (preset->GetPresetsCount() > 0) preset->PopPreset();
+        for (id obj in arr) {
+            if (![obj isKindOfClass:[NSDictionary class]]) continue;
+            NSDictionary* d = obj;
+            uint8_t ch  = (uint8_t)[(NSNumber*)d[@"channel"] intValue];
+            uint8_t val = (uint8_t)[(NSNumber*)d[@"value"]   intValue];
+            NSString* descNS = (NSString*)d[@"description"] ?: @"";
+            std::string desc = std::string([descNS UTF8String]);
+            preset->AddPreset(ch, val, desc);
+        }
+        changed = YES;
+    } else if (k == "DmxPositionZoneList") {
+        NSArray* arr = ([value isKindOfClass:[NSArray class]] ? (NSArray*)value : nil);
+        auto* mha = dynamic_cast<DmxMovingHeadAdv*>(m);
+        if (!arr || !mha) return NO;
+        std::vector<PositionZone> zones;
+        zones.reserve(arr.count);
+        for (id obj in arr) {
+            if (![obj isKindOfClass:[NSDictionary class]]) continue;
+            NSDictionary* d = obj;
+            PositionZone z;
+            z.pan_min  = [(NSNumber*)d[@"panMin"]  intValue];
+            z.pan_max  = [(NSNumber*)d[@"panMax"]  intValue];
+            z.tilt_min = [(NSNumber*)d[@"tiltMin"] intValue];
+            z.tilt_max = [(NSNumber*)d[@"tiltMax"] intValue];
+            z.channel  = [(NSNumber*)d[@"channel"] intValue];
+            z.value    = (uint8_t)[(NSNumber*)d[@"value"] intValue];
+            zones.push_back(z);
+        }
+        mha->SetPositionZones(zones);
+        changed = YES;
+    } else if (k == "DmxWheelColorList") {
+        NSArray* arr = ([value isKindOfClass:[NSArray class]] ? (NSArray*)value : nil);
+        auto* dmx = dynamic_cast<DmxModel*>(m);
+        if (!arr || !dmx || !dmx->HasColorAbility()) return NO;
+        if (dmx->GetColorAbility()->GetColorType()
+            != DmxColorAbility::DMX_COLOR_TYPE::DMX_COLOR_WHEEL) return NO;
+        auto* wh = static_cast<DmxColorAbilityWheel*>(dmx->GetColorAbility());
+        wh->ClearColors();
+        for (id obj in arr) {
+            if (![obj isKindOfClass:[NSDictionary class]]) continue;
+            NSDictionary* d = obj;
+            NSString* hex = (NSString*)d[@"color"] ?: @"#FFFFFF";
+            std::string hexCpp = [hex UTF8String];
+            xlColor col(hexCpp);
+            uint8_t v = (uint8_t)[(NSNumber*)d[@"dmxValue"] intValue];
+            wh->AddWheelColor(col, v);
+        }
+        changed = YES;
+    }
+    // J-30 — file-path setters for DMX mesh / image fields.
+    // Picker UI emits the picked path through commitPerType, and
+    // the matching `Set*File` + `Notify*FileChanged()` calls
+    // invalidate the cached mesh / image so the canvas redraws
+    // with the new asset.
+    else if (k == "AdvBaseMeshFile" || k == "AdvYokeMeshFile" || k == "AdvHeadMeshFile") {
+        std::string v = asString(&ok); if (!ok) return NO;
+        auto* mha = dynamic_cast<DmxMovingHeadAdv*>(m);
+        if (!mha) return NO;
+        Mesh* mesh = (k == "AdvBaseMeshFile") ? mha->GetBaseMesh()
+                   : (k == "AdvYokeMeshFile") ? mha->GetYokeMesh()
+                                              : mha->GetHeadMesh();
+        if (mesh && mesh->GetObjFile() != v) {
+            mesh->SetObjFile(v);
+            mesh->NotifyObjFileChanged();
+            changed = YES;
+        }
+    } else if (k == "SkullHeadMeshFile" || k == "SkullJawMeshFile"
+               || k == "SkullEyeLMeshFile" || k == "SkullEyeRMeshFile") {
+        std::string v = asString(&ok); if (!ok) return NO;
+        auto* sk = dynamic_cast<DmxSkull*>(m);
+        if (!sk) return NO;
+        Mesh* mesh = (k == "SkullHeadMeshFile") ? sk->GetHeadMesh()
+                   : (k == "SkullJawMeshFile")  ? sk->GetJawMesh()
+                   : (k == "SkullEyeLMeshFile") ? sk->GetEyeLMesh()
+                                                : sk->GetEyeRMesh();
+        if (mesh && mesh->GetObjFile() != v) {
+            mesh->SetObjFile(v);
+            mesh->NotifyObjFileChanged();
+            changed = YES;
+        }
+    } else if (k.length() > 5 && k.substr(0, 5) == "Servo"
+               && std::isdigit((unsigned char)k[5])
+               && (k.find("StaticImage") != std::string::npos
+                   || k.find("MotionImage") != std::string::npos)) {
+        std::string v = asString(&ok); if (!ok) return NO;
+        auto* ds = dynamic_cast<DmxServo*>(m);
+        if (!ds) return NO;
+        size_t pos = 5;
+        while (pos < k.length() && std::isdigit((unsigned char)k[pos])) ++pos;
+        const int idx = std::atoi(k.substr(5, pos - 5).c_str());
+        if (idx < 0 || idx >= ds->GetNumServos()) return NO;
+        const std::string suffix = k.substr(pos);
+        DmxImage* img = (suffix == "StaticImage") ? ds->GetStaticImage(idx)
+                                                   : ds->GetMotionImage(idx);
+        if (img && img->GetImageFile() != v) {
+            img->SetImageFile(v);
+            img->NotifyImageFileChanged();
+            changed = YES;
+        }
+    } else if (k.length() > 12 && k.substr(0, 12) == "Servo3dStatic"
+               && k.find("MeshFile") != std::string::npos) {
+        // "Servo3dStatic" + index + "MeshFile"
+        std::string v = asString(&ok); if (!ok) return NO;
+        auto* ds3 = dynamic_cast<DmxServo3d*>(m);
+        if (!ds3) return NO;
+        const size_t prefixLen = std::string("Servo3dStatic").length();
+        size_t pos = prefixLen;
+        while (pos < k.length() && std::isdigit((unsigned char)k[pos])) ++pos;
+        const int idx = std::atoi(k.substr(prefixLen, pos - prefixLen).c_str());
+        if (idx < 0 || idx >= ds3->GetNumStatic()) return NO;
+        Mesh* mesh = ds3->GetStaticMesh(idx);
+        if (mesh && mesh->GetObjFile() != v) {
+            mesh->SetObjFile(v);
+            mesh->NotifyObjFileChanged();
+            changed = YES;
+        }
+    } else if (k.length() > 12 && k.substr(0, 13) == "Servo3dMotion"
+               && k.find("MeshFile") != std::string::npos) {
+        std::string v = asString(&ok); if (!ok) return NO;
+        auto* ds3 = dynamic_cast<DmxServo3d*>(m);
+        if (!ds3) return NO;
+        const size_t prefixLen = std::string("Servo3dMotion").length();
+        size_t pos = prefixLen;
+        while (pos < k.length() && std::isdigit((unsigned char)k[pos])) ++pos;
+        const int idx = std::atoi(k.substr(prefixLen, pos - prefixLen).c_str());
+        if (idx < 0 || idx >= ds3->GetNumMotion()) return NO;
+        Mesh* mesh = ds3->GetMotionMesh(idx);
+        if (mesh && mesh->GetObjFile() != v) {
+            mesh->SetObjFile(v);
+            mesh->NotifyObjFileChanged();
+            changed = YES;
+        }
+    }
+    // J-3 (DMX) — DmxServo / DmxServo3d top-level knobs. Per-
+    // servo settings come through the `Servo<N>Xxx` decoder
+    // further down.
+    else if (k == "ServoNumServos") {
+        int v = asInt(&ok); if (!ok) return NO;
+        if (auto* ds = dynamic_cast<DmxServo*>(m); ds && ds->GetNumServos() != v) {
+            ds->SetNumServos(v); changed = YES;
+        } else if (auto* ds3 = dynamic_cast<DmxServo3d*>(m); ds3 && ds3->GetNumServos() != v) {
+            ds3->SetNumServos(v); changed = YES;
+        }
+    } else if (k == "Servo3dNumStatic") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* ds3 = dynamic_cast<DmxServo3d*>(m);
+        if (ds3 && ds3->GetNumStatic() != v) { ds3->SetNumStatic(v); changed = YES; }
+    } else if (k == "Servo3dNumMotion") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* ds3 = dynamic_cast<DmxServo3d*>(m);
+        if (ds3 && ds3->GetNumMotion() != v) { ds3->SetNumMotion(v); changed = YES; }
+    } else if (k.length() > 12 && k.substr(0, 12) == "Servo3dServo"
+               && k.find("Link") != std::string::npos) {
+        // "Servo3dServo<idx>Link"
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* ds3 = dynamic_cast<DmxServo3d*>(m);
+        if (!ds3) return NO;
+        size_t pos = 12;
+        while (pos < k.length() && std::isdigit((unsigned char)k[pos])) ++pos;
+        const int idx = std::atoi(k.substr(12, pos - 12).c_str());
+        if (idx < 0 || idx >= ds3->GetNumServos()) return NO;
+        if (ds3->GetServoLink(idx) != v) {
+            ds3->SetServoLink(idx, v); changed = YES;
+        }
+    } else if (k.length() > 11 && k.substr(0, 11) == "Servo3dMesh"
+               && k.find("Link") != std::string::npos) {
+        // "Servo3dMesh<idx>Link"
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* ds3 = dynamic_cast<DmxServo3d*>(m);
+        if (!ds3) return NO;
+        size_t pos = 11;
+        while (pos < k.length() && std::isdigit((unsigned char)k[pos])) ++pos;
+        const int idx = std::atoi(k.substr(11, pos - 11).c_str());
+        if (idx < 0 || idx >= ds3->GetNumServos()) return NO;
+        if (ds3->GetMeshLink(idx) != v) {
+            ds3->SetMeshLink(idx, v); changed = YES;
+        }
+    } else if (k == "Servo3dShowPivot") {
+        BOOL v = asBool(&ok); if (!ok) return NO;
+        auto* ds3 = dynamic_cast<DmxServo3d*>(m);
+        if (ds3 && ds3->GetShowPivot() != (bool)v) {
+            ds3->SetShowPivot(v); changed = YES;
+        }
+    } else if (k == "ServoIs16Bit") {
+        BOOL v = asBool(&ok); if (!ok) return NO;
+        if (auto* ds = dynamic_cast<DmxServo*>(m); ds && ds->Is16Bit() != (bool)v) {
+            ds->SetIs16Bit(v); changed = YES;
+        } else if (auto* ds3 = dynamic_cast<DmxServo3d*>(m); ds3 && ds3->Is16Bit() != (bool)v) {
+            ds3->SetIs16Bit(v); changed = YES;
+        }
+    } else if (k == "ServoBrightness") {
+        double v = asDouble(&ok); if (!ok) return NO;
+        if (auto* ds = dynamic_cast<DmxServo*>(m); ds
+            && std::fabs((double)ds->GetBrightness() - v) > 1e-3) {
+            ds->SetBrightness((float)v); changed = YES;
+        } else if (auto* ds3 = dynamic_cast<DmxServo3d*>(m); ds3
+                    && std::fabs((double)ds3->GetBrightness() - v) > 1e-3) {
+            ds3->SetBrightness((float)v); changed = YES;
+        }
+    } else if (k == "ServoTransparency") {
+        int v = asInt(&ok); if (!ok) return NO;
+        auto* ds = dynamic_cast<DmxServo*>(m);
+        if (ds && ds->GetTransparency() != v) {
+            ds->SetTransparency(v); changed = YES;
+        }
+    }
+    // Per-servo knobs — `Servo<N>Channel`, `Servo<N>MinLimit`,
+    // `Servo<N>MaxLimit`, `Servo<N>RangeOfMotion`,
+    // `Servo<N>Style`, `Servo<N>Is16Bit`,
+    // `Servo<N>ControllerMin`, `Servo<N>ControllerMax`,
+    // `Servo<N>ControllerReverse`. N is parsed from after the
+    // `Servo` prefix; the suffix dispatches to the right setter.
+    else if (k.length() > 5 && k.substr(0, 5) == "Servo"
+             && std::isdigit((unsigned char)k[5])) {
+        size_t pos = 5;
+        while (pos < k.length() && std::isdigit((unsigned char)k[pos])) ++pos;
+        const int idx = std::atoi(k.substr(5, pos - 5).c_str());
+        const std::string suffix = k.substr(pos);
+        Servo* servo = nullptr;
+        if (auto* ds = dynamic_cast<DmxServo*>(m); ds && idx < ds->GetNumServos()) {
+            servo = ds->GetServo(idx);
+        } else if (auto* ds3 = dynamic_cast<DmxServo3d*>(m); ds3 && idx < ds3->GetNumServos()) {
+            servo = ds3->GetServo(idx);
+        }
+        if (!servo) return NO;
+        if (suffix == "Channel") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (servo->GetChannel() != v) { servo->SetChannel(v); changed = YES; }
+        } else if (suffix == "MinLimit") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (servo->GetMinLimit() != v) { servo->SetMinLimit(v); changed = YES; }
+        } else if (suffix == "MaxLimit") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (servo->GetMaxLimit() != v) { servo->SetMaxLimit(v); changed = YES; }
+        } else if (suffix == "RangeOfMotion") {
+            double v = asDouble(&ok); if (!ok) return NO;
+            if (std::fabs((double)servo->GetRangeOfMotion() - v) > 1e-3) {
+                servo->SetRangeOfMotion((float)v); changed = YES;
+            }
+        } else if (suffix == "Style") {
+            int v = asInt(&ok); if (!ok) return NO;
+            NSArray* opts = DmxServoStyleOptions();
+            if (v >= 0 && v < (int)opts.count) {
+                std::string newStyle = [(NSString*)opts[v] UTF8String];
+                if (servo->GetStyle() != newStyle) {
+                    servo->SetStyle(newStyle); changed = YES;
+                }
+            }
+        } else if (suffix == "Is16Bit") {
+            BOOL v = asBool(&ok); if (!ok) return NO;
+            if (servo->Is16Bit() != (bool)v) {
+                servo->Set16Bit(v); changed = YES;
+            }
+        } else if (suffix == "ControllerMin") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (servo->GetControllerMin() != v) {
+                servo->SetControllerMin(v); changed = YES;
+            }
+        } else if (suffix == "ControllerMax") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (servo->GetControllerMax() != v) {
+                servo->SetControllerMax(v); changed = YES;
+            }
+        } else if (suffix == "ControllerReverse") {
+            BOOL v = asBool(&ok); if (!ok) return NO;
+            if (servo->GetControllerReverse() != (bool)v) {
+                servo->SetControllerReverse(v); changed = YES;
+            }
+        } else {
+            return NO;
+        }
+    }
+    // Motor knobs — keyed by motor base_name + suffix.
+    // `PanMotorChannelCoarse`, `TiltMotorMinLimit`, …
+    //
+    // Both DmxMovingHead and DmxMovingHeadAdv expose `GetPanMotor`
+    // / `GetTiltMotor` via the shared `DmxMovingHeadComm` base, so
+    // the cast goes through that — not the concrete subclass.
+    else if (k.find("PanMotor") == 0 || k.find("TiltMotor") == 0) {
+        auto* mhc = dynamic_cast<DmxMovingHeadComm*>(m);
+        if (!mhc) {
+            return NO;
+        }
+        DmxMotor* motor = (k.find("PanMotor") == 0)
+            ? mhc->GetPanMotor() : mhc->GetTiltMotor();
+        if (!motor) return NO;
+        const std::string base = (k.find("PanMotor") == 0)
+            ? "PanMotor" : "TiltMotor";
+        const std::string suffix = k.substr(base.size());
+        if (suffix == "ChannelCoarse") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (motor->GetChannelCoarse() != v) { motor->SetChannelCoarse(v); changed = YES; }
+        } else if (suffix == "ChannelFine") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (motor->GetChannelFine() != v) { motor->SetChannelFine(v); changed = YES; }
+        } else if (suffix == "MinLimit") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (motor->GetMinLimit() != v) { motor->SetMinLimit(v); changed = YES; }
+        } else if (suffix == "MaxLimit") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (motor->GetMaxLimit() != v) { motor->SetMaxLimit(v); changed = YES; }
+        } else if (suffix == "RangeOfMotion") {
+            double v = asDouble(&ok); if (!ok) return NO;
+            if (std::fabs((double)motor->GetRangeOfMotion() - v) > 1e-3) {
+                motor->SetRangeOfMOtion((float)v); changed = YES;
+            }
+        } else if (suffix == "OrientZero") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (motor->GetOrientZero() != v) { motor->SetOrientZero(v); changed = YES; }
+        } else if (suffix == "OrientHome") {
+            int v = asInt(&ok); if (!ok) return NO;
+            if (motor->GetOrientHome() != v) { motor->SetOrientHome(v); changed = YES; }
+        } else if (suffix == "SlewLimit") {
+            double v = asDouble(&ok); if (!ok) return NO;
+            if (std::fabs((double)motor->GetSlewLimit() - v) > 1e-3) {
+                motor->SetSlewLimit((float)v); changed = YES;
+            }
+        } else if (suffix == "Reverse") {
+            BOOL v = asBool(&ok); if (!ok) return NO;
+            if (motor->GetReverse() != (bool)v) { motor->SetReverse(v); changed = YES; }
+        } else if (suffix == "UpsideDown") {
+            BOOL v = asBool(&ok); if (!ok) return NO;
+            if (motor->GetUpsideDown() != (bool)v) { motor->SetUpsideDown(v); changed = YES; }
+        } else {
+            spdlog::warn("setPerTypeProperty: unknown motor key '{}'", k);
+            return NO;
+        }
+    }
+    else {
         spdlog::warn("setPerTypeProperty: unknown key '{}' for model '{}' (type {})",
                      k, modelName.UTF8String, m->GetDisplayAsString());
         return NO;

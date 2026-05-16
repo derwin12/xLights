@@ -376,6 +376,266 @@ work. Model rename and copy/paste / reset menus are J-3+ as well.
   on `SequencerViewModel`). Per-op (drag = single undo entry,
   recorded on touch-down state).
 
+### J-30 — DMX model configuration ✓ 2026-05-15
+
+Promoted out of `future-custom-models.md` Phase V because hitting
+desktop parity on the Layout Panel needs at least the
+high-frequency DMX fixtures (Floodlight, MovingHead, FloodArea)
+configurable on iPad. Lower-priority fixtures (Servo, Servo3D,
+Skull, MovingHeadAdv with meshes) stay deferred to the
+future-custom-models plan.
+
+**Shared infrastructure landed 2026-05-15:**
+- `MakeHeaderDescriptor(key:label:)` — new descriptor kind
+  `"header"` for full-width section dividers inside the per-type
+  property stream. SwiftUI's `typeDescriptorRow` renders it as a
+  secondary-coloured caption above the next field group; needed
+  so DMX models can split into Color / Shutter / Beam / Preset
+  visual blocks.
+- `AppendDmxColorProps(DmxColorAbility*, out)` — RGBW path emits
+  Red / Green / Blue / White channel ints (0–512). CMYW and
+  ColorWheel get placeholder headers ("edit on desktop") for now.
+- `AppendDmxShutterProps(DmxShutterAbility&, out)` — Channel,
+  Open Threshold, On Value.
+- `AppendDmxBeamProps(DmxBeamAbility&, out)` — Display Length /
+  Width, plus Orientation (when `SupportsOrient()`) and Y Offset
+  (when `SupportsYOffset()`).
+- `setPerTypeProperty:` cases for every DMX key route through
+  `dynamic_cast<DmxModel*>` so the same handlers work for every
+  fixture as more `BuildXxxProps` land.
+
+**DM-3 DmxFloodlight ✓ 2026-05-15:**
+- `BuildDmxFloodlightProps` emits `DmxChannelCount` (1–512) plus
+  the Color / Shutter / Beam blocks gated on the matching
+  `HasXxxAbility` flag. Matches desktop
+  `DmxFloodlightPropertyAdapter` minus the PWM brightness / gamma
+  fields (those need controller-caps wiring that the bridge
+  doesn't expose yet).
+- Wired into `perTypePropertiesForModel` switch so the property
+  panel picks up Floodlight automatically.
+
+**DM-4 DmxFloodArea ✓ 2026-05-15:**
+- DmxFloodArea is a DmxFloodlight subclass with only a different
+  DrawModel — the property surface is identical, so the
+  `perTypePropertiesForModel` switch falls through to
+  `BuildDmxFloodlightProps` via shared case label.
+
+**DM-1 DmxMovingHead ✓ 2026-05-15:**
+- `BuildDmxMovingHeadProps` emits the full surface: DMX Style
+  (6 styles, on-disk name preserved including the no-space
+  "TopBars" / "SideBars" pair), Fixture (MH1–MH8),
+  `DmxChannelCount`, Hide Body, Pan Motor + Tilt Motor blocks
+  (10 knobs each — channel coarse/fine, min/max limit, range
+  of motion, orient zero/home, slew limit, reverse, upside
+  down), Color Type picker that drives
+  `DmxModel::InitColorAbility(int)`, then the conditional
+  Color / Dimmer / Shutter / Beam blocks.
+- `AppendDmxMotorProps` keys are prefixed with the motor's
+  `base_name` (`PanMotor*` / `TiltMotor*`) so the shared setter
+  routes each motor through the right `DmxMotor*` without
+  needing per-motor switch cases.
+- New `AppendDmxDimmerProps` (one knob: `MhDimmerChannel`).
+- Color-type changes go through `DmxModel::InitColorAbility`,
+  which re-instantiates the color ability subobject — the
+  property panel's next descriptor read pulls the new fields.
+
+**DM-5 DmxGeneral ✓ 2026-05-15:**
+- `BuildDmxGeneralProps` — `DmxChannelCount` + Color Type
+  picker + the conditional Color block. Generic fixture with
+  no motor / beam / shutter — the simplest of the three new
+  ones.
+
+**DM-9 Color ability subsystems ✓ 2026-05-15 (scalars):**
+- CMYW path now emits the four channel fields (Cyan / Magenta /
+  Yellow / White) plus matching setter cases. Both RGBW and
+  CMYW models accept `DmxWhiteChannel` — the bridge dispatches
+  to the right ability subobject based on the active color
+  type.
+- ColorWheel path emits Wheel Channel, Dimmer Channel, Wheel
+  Delay (ms) as editable spinners, plus a read-only
+  "N wheel colours — edit on desktop" footer when the wheel
+  has custom-colour entries defined. The colour-list editor
+  sheet (up to 25 entries × (color, dmxValue)) is queued.
+- PWM brightness / gamma fields stay deferred — they need the
+  controller-caps `SupportsPWM()` query exposed to the bridge.
+
+**DM-10 Preset ability ✓ 2026-05-15 (read-only count):**
+- `AppendDmxPresetProps` adds a header reading "Presets — N
+  defined (edit on desktop)" whenever a fixture's preset
+  ability has any entries, so users at least see that presets
+  exist. Inline list editing is queued with the wheel-colour
+  editor.
+
+**DM-2 DmxMovingHeadAdv ✓ 2026-05-15 (motor + ability surface):**
+- `BuildDmxMovingHeadAdvProps` reuses the shared Pan / Tilt
+  motor, Color, Dimmer, Shutter, Beam appenders. Surfaces
+  `DmxFixture` (via the shared `DmxMovingHeadComm` base) +
+  `DmxChannelCount` + preset count + the full ability surface.
+- Setter for `PanMotor*` / `TiltMotor*` and `DmxFixture` now
+  routes via `dynamic_cast<DmxMovingHeadComm*>` instead of
+  `DmxMovingHead*`, so MovingHead and MovingHeadAdv share the
+  same handler set.
+- Still desktop-only: the three mesh files (base / yoke /
+  head) and the position-zones collision grid editor. Header
+  footer signals it.
+
+**DM-8 DmxSkull ✓ 2026-05-15 (per-servo surface):**
+- `BuildDmxSkullProps` emits channel count, 16-bit toggle,
+  per-servo blocks (Jaw / Pan / Tilt / Nod / EyeUD / EyeLR) —
+  each carrying Channel / Min Limit / Max Limit / Orient
+  inline whenever the matching `HasXxx` flag is set. Eye
+  brightness channel + the color block surface when the
+  skull has a color ability.
+- Servo *enables* (which of the six servos this fixture
+  actually has) live behind the desktop SkullConfigDialog
+  popup and remain desktop-only — header in the panel signals
+  that. Same for the Skulltronix one-click preset.
+- Mesh paths (head / jaw / eye-L / eye-R) stay desktop-only.
+
+**DM-6 DmxServo ✓ 2026-05-15 (per-servo surface):**
+- `BuildDmxServoProps` emits channel count, # servos (1–25),
+  model-level 16-bit toggle, brightness, transparency, preset
+  count, then a per-servo block per active servo. Each servo
+  block carries: Channel, 16-bit, Min Limit, Max Limit, Range
+  of Motion, Style (Translate X/Y/Z / Rotate X/Y/Z),
+  Controller Min/Max Pulse, Reverse.
+- New shared `AppendDmxServoKnobProps` is reusable for any
+  fixture that exposes a list of `Servo*` (DmxServo3d uses
+  the same).
+- The Style picker maps to `Servo::SetStyle(string)` which
+  internally tracks an enum — the bridge writes the canonical
+  display name.
+- Static + motion image files are deferred (image-picker UX
+  is a separate piece of work); header signals it.
+
+**DM-7 DmxServo3d ✓ 2026-05-15 (per-servo surface):**
+- `BuildDmxServo3dProps` shares the per-servo block from
+  DM-6, plus mesh counts (# Static / # Motion, both 1–24),
+  Show Pivot toggle, brightness. # Servos picker too.
+- Mesh files + the M2S / S2M linking matrix (a 2D grid
+  editor in desktop) stay desktop-only; header signals it.
+
+**Per-servo setter decoder:**
+- Keys `Servo<N><Suffix>` (e.g. `Servo3MaxLimit`,
+  `Servo0Style`, `Servo5ControllerReverse`) decode the index
+  from the digit run after `Servo`, route to the matching
+  fixture's `GetServo(N)`, then dispatch on the suffix. Keeps
+  the setter compact instead of 25 × 9 individual cases.
+
+**Coverage:** all 8 DMX fixture types now have per-type panes
+on iPad (Floodlight, FloodArea, MovingHead, MovingHeadAdv,
+General, Skull, Servo, Servo3d).
+
+**File pickers ✓ 2026-05-15:**
+- New `meshFile` descriptor kind. SwiftUI renders a path-label
+  + cube button that opens a `.fileImporter` scoped to mesh
+  UTTypes (`.obj` / `.3ds` / `.stl` / `.ply`, with `.data`
+  fallback). Cleared via the trailing `xmark.circle`.
+- `imageFile` descriptor (existing) is now also emitted from
+  DMX builders for fixtures that use `DmxImage` for textures.
+- Wired into every DMX fixture that has a mesh / image:
+  - **DM-2 DmxMovingHeadAdv:** base / yoke / head mesh files.
+  - **DM-6 DmxServo:** per-servo static + motion image files.
+  - **DM-7 DmxServo3d:** per-index static + motion mesh files.
+  - **DM-8 DmxSkull:** head / jaw / eye-L / eye-R mesh files.
+- Setter routes each picked path through `Set*File` +
+  `Notify*FileChanged()` so the canvas re-loads the asset on
+  the next draw.
+- Bundled the two new `.fileImporter` modifiers into a single
+  `PerTypeFilePickers` ViewModifier so the LayoutEditorView
+  body chain stays within Swift's type-checker budget.
+- Extracted `modelPropertiesView(modelName:summary:)` from
+  `propertyPaneBody` for the same reason — the
+  `LayoutEditorPropertiesView(...)` construction was the
+  heaviest expression in the body chain.
+
+**DM-16 StartChannelDialog ✓ 2026-05-15:**
+- `StartChannelEditorSheet` (J-20) was already the structured
+  editor for the model-wide Start Channel, covering all 5
+  modes desktop's `StartChannelDialog` exposes via radio
+  buttons (None / Universe / End of Model / Start of Model /
+  Controller — "Preview-only" in the future-plan's listing
+  was a typo; the radio-button count on desktop is 5).
+- Per-string Start Channel fields now also surface the pencil
+  shortcut so users can pick a format for each individual
+  string in multi-string models without hand-typing the
+  prefix syntax. Previously the per-string fields were
+  text-only — only the model-wide field had the structured
+  editor.
+
+**DM-8 SkullConfigDialog popup ✓ 2026-05-15:**
+- New descriptor kind `button` for one-shot actions; SwiftUI
+  renders a bordered play-icon button that commits a sentinel
+  `@YES` value the setter interprets as "perform side-effect".
+- Replaced the desktop-only servo-enable header with inline
+  bool descriptors for Jaw / Pan / Tilt / Nod / EyeUD /
+  EyeLR / Color. Toggling any of them flips the matching
+  `Has*` flag on the model; the per-servo block below
+  re-renders (or hides) on the next descriptor read.
+- "Apply Skulltronix Preset" button calls `SetSkulltronix()`
+  which sets a flag `InitModel()` consumes on the next
+  reinitialise to assign canonical Skulltronix channels.
+
+**DM-10 Preset list editor ✓ 2026-05-15:**
+- New descriptor kind `presetList` opens a sheet
+  (`DmxPresetListEditorSheet`) with channel / value /
+  description fields per row. Max 25 entries (matches
+  desktop's `MAX_PRESETS`).
+- Bridge setter wholesale-replaces: clears existing presets
+  via `PopPreset` loop, then `AddPreset` per submitted entry.
+- Wired into every fixture that has a preset ability
+  (Floodlight, MovingHead, MovingHeadAdv, General, Skull,
+  Servo, Servo3d).
+
+**DM-9 Wheel-colour list editor ✓ 2026-05-15:**
+- New descriptor kind `wheelColorList` opens a sheet
+  (`DmxWheelColorListEditorSheet`) with a SwiftUI ColorPicker
+  + DMX-value spinner per row. Max 25 entries (matches
+  desktop's `MAX_COLORS`).
+- Bridge setter clears + rebuilds via
+  `DmxColorAbilityWheel::ClearColors` + `AddWheelColor`.
+- Module-scope `dmxHexColor` / `dmxHexFromColor` helpers (the
+  inner-view versions are private; the sheets live at module
+  scope).
+
+**DM-13 PositionZoneDialog ✓ 2026-05-15:**
+- New descriptor kind `positionZoneList` opens a sheet
+  (`DmxPositionZoneListEditorSheet`) with Pan Min/Max, Tilt
+  Min/Max, Channel, Value spinners per row. No fixed cap —
+  the desktop dialog has no documented one.
+- Wired only into DmxMovingHeadAdv (the only fixture that
+  exposes position zones).
+- Bridge setter wholesale-replaces via `SetPositionZones`.
+
+**DM-7 Mesh / Servo linking ✓ 2026-05-15:**
+- Turned out not to be a true 24×24 matrix on desktop —
+  it's two parallel lists of N enum pickers (Servo i picks a
+  Mesh from {Mesh 1..N}; Mesh i picks a Servo from the same
+  list). Both stored as `int[24]` arrays where `-1` = identity.
+- Emitted as inline enum descriptors per servo + per mesh
+  whenever `# Servos > 1`. The `-1` sentinel is flattened to
+  the matching identity index on emit so the enum picker can
+  surface any concrete option without a separate "default"
+  entry.
+- Setter dispatcher decodes `Servo3dServo<N>Link` /
+  `Servo3dMesh<N>Link` keys and writes through
+  `SetServoLink` / `SetMeshLink`.
+
+**Status:** all J-30 work is now shipped. Every DMX fixture
+type is fully configurable on iPad with its full list-editor
+sub-surfaces (presets, wheel colours, position zones, servo
+enables, servo/mesh linking). Apart from advanced
+power-user features that the desktop also hides behind
+specialised dialogs (PWM brightness/gamma tied to controller
+caps, the DMXEffect 48-channel grid in the effects panel),
+the Layout panel is at functional parity with desktop for
+DMX work.
+
+**Still deferred** (future-custom-models.md): DmxMovingHeadAdv
+mesh-import flow, DmxServo / DmxServo3D, DmxSkull,
+PositionZoneDialog, DMXEffect 48-channel grid, RemapDMX
+Channels.
+
 ### J-3 — Per-type properties + model creation (~4–6 wk)
 
 The long tail. Per-model property pages. (Model creation runs
@@ -2543,7 +2803,7 @@ flat attribute list under `<modelGroups>`, not `<models>`).
   exposed).
 - Controllers tab (whole controller-setup surface).
 
-### J-4 — Multi-select operations ✓ mostly 2026-05-15
+### J-4 — Multi-select operations ✓ 2026-05-15
 
 Direct ports of the desktop math; the work was the contextual
 toolbar + selection handling. `MultiSelectActionBar` surfaces
@@ -2562,12 +2822,22 @@ displayed in the bar.
 - Single undo entry per op via `pushLayoutUndoSnapshotForModel:`
   before each affected model's mutation.
 
-**Still pending:**
-- **Bulk edit** — select N models → set one property → applies to
-  all. Bridge plumbing already exists
-  (`setLayoutModelProperty:key:value:`); just needs the property
-  panel to route an edit through every selected model under one
-  undo group when multi-select is active.
+**Bulk edit (✓ 2026-05-15):**
+- `commitProperty(modelName:key:value:)` and
+  `commitPerTypeProperty(modelName:key:value:)` in
+  `LayoutEditorView.swift` route the edit through every model in
+  `viewModel.layoutEditorSelection` when ≥2 are selected. Each
+  affected model gets its own undo snapshot pushed before the
+  edit — same per-affected-model pattern align / distribute /
+  match-size already use. The per-type setter no-ops on type-
+  mismatched models (e.g. `TreeBranches` on a Star) so a mixed-
+  type multi-select just applies to the matching subset.
+- Deny-list for keys that uniquely identify a model: `name`,
+  `modelStartChannel`, `description`. These always stay single-
+  model. `LayoutEditorView.bulkEditDeniedKeys` enforces it.
+- Property panel shows a small accent banner ("Edits apply to N
+  selected models") at the top when the selection is ≥2, so the
+  fan-out behaviour is discoverable.
 
 ## Out of scope (S-pro / future)
 

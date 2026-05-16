@@ -143,6 +143,14 @@ struct LayoutEditorView: View {
     @State private var pendingImagePickKey: String = ""
     @State private var pendingImagePickModel: String = ""
 
+    // J-30 — DMX mesh-file picker (`.obj` etc). Routed through
+    // `commitPerTypeProperty` like the image picker, but on a
+    // separate fileImporter so the allowed content types match
+    // mesh files instead of bitmaps.
+    @State private var meshFilePickerVisible: Bool = false
+    @State private var pendingMeshPickKey: String = ""
+    @State private var pendingMeshPickModel: String = ""
+
     // J-23 — Custom-model visual editor payload. When non-nil
     // the `.sheet(item:)` opens the editor and the payload
     // carries the captured-at-open grid + dims + bg image.
@@ -177,6 +185,16 @@ struct LayoutEditorView: View {
         ["xmodel", "gdtf", "lff", "lpf"].compactMap {
             UTType(filenameExtension: $0)
         }
+    }()
+
+    /// J-30 — UTTypes accepted by the DMX mesh-file picker. Falls
+    /// back to `.data` so the importer remains usable on systems
+    /// that don't know any of the extension-derived UTIs.
+    private static let meshFileImporterTypes: [UTType] = {
+        var types: [UTType] = ["obj", "3ds", "stl", "ply"]
+            .compactMap { UTType(filenameExtension: $0) }
+        types.append(.data)
+        return types
     }()
 
     /// J-12 — Add-View-Object sheet → bridge create. Auto-
@@ -303,6 +321,28 @@ struct LayoutEditorView: View {
             if granted { url.stopAccessingSecurityScopedResource() }
             commitPerTypeProperty(modelName: modelName,
                                    key: pendingImagePickKey,
+                                   value: path as NSString)
+        case .failure(let err):
+            saveErrorMessage = err.localizedDescription
+        }
+    }
+
+    /// J-30 — mesh file (.obj) picker completion for DMX models.
+    /// Same security-scoped dance as the image picker; routes to
+    /// `commitPerTypeProperty` so the DMX-side setter handles
+    /// `*MeshFile` keys with `Mesh::SetObjFile` +
+    /// `NotifyObjFileChanged()`.
+    private func handleMeshFilePick(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first,
+                  let modelName = viewModel.layoutEditorSelectedModel else { return }
+            let granted = url.startAccessingSecurityScopedResource()
+            let path = url.path
+            _ = XLSequenceDocument.obtainAccess(toPath: path, enforceWritable: false)
+            if granted { url.stopAccessingSecurityScopedResource() }
+            commitPerTypeProperty(modelName: modelName,
+                                   key: pendingMeshPickKey,
                                    value: path as NSString)
         case .failure(let err):
             saveErrorMessage = err.localizedDescription
@@ -509,14 +549,17 @@ struct LayoutEditorView: View {
                       allowedContentTypes: [.png, .jpeg, .tiff, .bmp, .gif, .image],
                       allowsMultipleSelection: false,
                       onCompletion: handleBackgroundImagePick)
-        // J-20.2 — Image-model file picker. Same security-scoped
-        // dance as the background importer; on success, route
-        // through the per-type commit so the descriptor pipeline
-        // picks up the new path.
-        .fileImporter(isPresented: $imageFilePickerVisible,
-                      allowedContentTypes: [.png, .jpeg, .tiff, .bmp, .gif, .image],
-                      allowsMultipleSelection: false,
-                      onCompletion: handleImageFilePick)
+        // J-20.2 / J-30 — per-type file pickers bundled into a
+        // single modifier so the outer body's chain stays within
+        // Swift's type-checker budget. The bundle applies two
+        // independent fileImporters (image bitmaps + DMX meshes)
+        // that each commit through the per-type setter.
+        .modifier(PerTypeFilePickers(
+            imageVisible: $imageFilePickerVisible,
+            meshVisible: $meshFilePickerVisible,
+            meshContentTypes: Self.meshFileImporterTypes,
+            onImagePick: handleImageFilePick,
+            onMeshPick: handleMeshFilePick))
         // J-23 / J-23.4 — Custom-model visual editor. Full-screen
         // cover on iPad so the canvas gets the whole window (the
         // detent-clamped sheet was way too small for placing
@@ -866,29 +909,35 @@ struct LayoutEditorView: View {
         }
     }
 
+    /// Extracted from `propertyPaneBody` so the Swift type-checker
+    /// has a smaller per-expression budget — the original
+    /// composition tipped over once `onPickMeshFile` was added.
     @ViewBuilder
-    private var propertyPaneBody: some View {
-        switch sidebarTab {
-        case .models:
-            if let name = viewModel.layoutEditorSelectedModel,
-               let summary = viewModel.document.modelLayoutSummary(name) {
-                // ObjC bridges NSArray<NSDictionary*> as
-                // `[[AnyHashable: Any]]` — coerce keys to String so
-                // the descriptor view's `[[String: Any]]` matches.
-                let rawDescriptors = viewModel.document.perTypeProperties(forModel: name)
-                let descriptors: [[String: Any]] = rawDescriptors.compactMap { entry in
-                    var out: [String: Any] = [:]
-                    for (k, v) in entry {
-                        if let key = k as? String { out[key] = v }
-                    }
-                    return out.isEmpty ? nil : out
-                }
-                LayoutEditorPropertiesView(
+    private func modelPropertiesView(modelName name: String,
+                                       summary: [String: Any]) -> some View {
+        let rawDescriptors = viewModel.document.perTypeProperties(forModel: name)
+        let descriptors: [[String: Any]] = rawDescriptors.compactMap { entry in
+            var out: [String: Any] = [:]
+            for (k, v) in entry {
+                if let key = k as? String { out[key] = v }
+            }
+            return out.isEmpty ? nil : out
+        }
+        let pickImage: (String) -> Void = { key in
+            pendingImagePickKey = key
+            imageFilePickerVisible = true
+        }
+        let pickMesh: (String) -> Void = { key in
+            pendingMeshPickKey = key
+            meshFilePickerVisible = true
+        }
+        LayoutEditorPropertiesView(
                     modelName: name,
                     summary: summary,
                     typeDescriptors: descriptors,
                     layoutGroups: layoutGroups,
                     token: summaryToken,
+                    multiSelectionSize: viewModel.layoutEditorSelection.count,
                     commit: { key, value in
                         commitProperty(modelName: name, key: key, value: value)
                     },
@@ -928,10 +977,8 @@ struct LayoutEditorView: View {
                     onClearDimmingCurve: {
                         clearDimmingCurve(modelName: name)
                     },
-                    onPickImageFile: { key in
-                        pendingImagePickKey = key
-                        imageFilePickerVisible = true
-                    },
+                    onPickImageFile: pickImage,
+                    onPickMeshFile: pickMesh,
                     onLoadFaceState: { kind in
                         // J-22 — bridge returns NSDictionary which
                         // Swift bridges to [String: AnyHashable].
@@ -987,6 +1034,15 @@ struct LayoutEditorView: View {
                         openCustomModelEditor(modelName: name)
                     }
                 )
+    }
+
+    @ViewBuilder
+    private var propertyPaneBody: some View {
+        switch sidebarTab {
+        case .models:
+            if let name = viewModel.layoutEditorSelectedModel,
+               let summary = viewModel.document.modelLayoutSummary(name) {
+                modelPropertiesView(modelName: name, summary: summary)
             } else {
                 emptyPropertyHint(
                     title: "Pick a model",
@@ -1788,11 +1844,21 @@ struct LayoutEditorView: View {
     /// props; structural changes (string count etc.) refresh the
     /// model list too because channel ranges can shift.
     private func commitPerTypeProperty(modelName: String, key: String, value: Any) {
-        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
-        let changed = viewModel.document.setPerTypeProperty(key,
-                                                            onModel: modelName,
-                                                            value: value)
-        if changed {
+        // J-4 bulk edit: per-type setters silently no-op on type-
+        // mismatched models (e.g. setting `TreeBranches` on a Star
+        // returns NO with a warn log), so a multi-selection of mixed
+        // types just applies to the matching subset.
+        let targets = bulkEditTargets(forKey: key, leader: modelName)
+        var anyChanged = false
+        for name in targets {
+            viewModel.document.pushLayoutUndoSnapshot(forModel: name)
+            if viewModel.document.setPerTypeProperty(key,
+                                                     onModel: name,
+                                                     value: value) {
+                anyChanged = true
+            }
+        }
+        if anyChanged {
             summaryToken &+= 1
             hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
             canUndo = viewModel.document.canUndoLayoutChange()
@@ -2038,15 +2104,22 @@ struct LayoutEditorView: View {
     }
 
     private func commitProperty(modelName: String, key: String, value: Any) {
-        // Capture undo BEFORE the edit so the snapshot reflects the
-        // pre-edit state. Pushed unconditionally — even no-op edits
-        // leave a stale entry, which we accept as cheap (the user
-        // can just hit Undo twice).
-        viewModel.document.pushLayoutUndoSnapshot(forModel: modelName)
-        let changed = viewModel.document.setLayoutModelProperty(modelName,
-                                                                key: key,
-                                                                value: value)
-        if changed {
+        let targets = bulkEditTargets(forKey: key, leader: modelName)
+        var anyChanged = false
+        for name in targets {
+            // Capture undo BEFORE the edit so the snapshot reflects
+            // the pre-edit state. Pushed per affected model — undo
+            // pops one snapshot at a time, matching the existing
+            // align / distribute / match-size pattern (one undo
+            // step per affected model).
+            viewModel.document.pushLayoutUndoSnapshot(forModel: name)
+            if viewModel.document.setLayoutModelProperty(name,
+                                                          key: key,
+                                                          value: value) {
+                anyChanged = true
+            }
+        }
+        if anyChanged {
             summaryToken &+= 1
             hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
             canUndo = viewModel.document.canUndoLayoutChange()
@@ -2058,6 +2131,32 @@ struct LayoutEditorView: View {
                 refreshModelList()
             }
         }
+    }
+
+    /// J-4 — bulk edit. When two or more models are selected, the
+    /// property-panel edit applies to every selected model under one
+    /// logical operation. Returns the list of models to apply the
+    /// edit to, leader first.
+    ///
+    /// Keys in `bulkEditDeniedKeys` are model-unique (name, start-
+    /// channel, description) and always stay single-model regardless
+    /// of selection. The current per-type setter silently no-ops on
+    /// keys that don't apply to a given model's type, so a multi-
+    /// selection that spans types just lets the matching subset
+    /// receive the edit — no need to filter by type at this level.
+    private static let bulkEditDeniedKeys: Set<String> = [
+        "name", "modelStartChannel", "description"
+    ]
+
+    private func bulkEditTargets(forKey key: String, leader: String) -> [String] {
+        if Self.bulkEditDeniedKeys.contains(key) {
+            return [leader]
+        }
+        let sel = viewModel.layoutEditorSelection
+        guard sel.count > 1, sel.contains(leader) else { return [leader] }
+        var arr = [leader]
+        arr.append(contentsOf: sel.filter { $0 != leader })
+        return arr
     }
 
     /// Arrow-key nudge: +1 unit per tap, +10 with shift. dx/dy are
@@ -2355,6 +2454,13 @@ private struct LayoutEditorPropertiesView: View {
     let typeDescriptors: [[String: Any]]
     let layoutGroups: [String]
     let token: Int
+    /// J-4 bulk edit — number of models in the multi-selection
+    /// (1 when only the leader is selected). When ≥2, the panel
+    /// shows a banner so the user knows their edits will fan out
+    /// to every selected model. Drives `commit` / `typeCommit`'s
+    /// bulk-apply behavior via the parent's
+    /// `bulkEditTargets(forKey:leader:)` helper.
+    let multiSelectionSize: Int
     let commit: (_ key: String, _ value: Any) -> Void
     let typeCommit: (_ key: String, _ value: Any) -> Void
     let onRenameRequest: () -> Void
@@ -2368,6 +2474,12 @@ private struct LayoutEditorPropertiesView: View {
     let onNavigateToGroup: (_ groupName: String) -> Void
     let onClearDimmingCurve: () -> Void
     let onPickImageFile: (_ key: String) -> Void
+    /// J-30 — DMX mesh-file picker. Same signature as
+    /// `onPickImageFile`; the parent opens a `.fileImporter`
+    /// scoped to mesh UTTypes (`.obj` / `.3ds` / `.stl` / `.ply`)
+    /// and routes the picked path back through
+    /// `commitPerTypeProperty`.
+    let onPickMeshFile: (_ key: String) -> Void
     let onLoadFaceState: (_ kind: ModelDataKind) -> [String: [String: String]]
     let onCommitFaceState: (_ kind: ModelDataKind, _ entries: [String: [String: String]]) -> Void
     let onLoadDimming: () -> [String: [String: String]]
@@ -2395,6 +2507,13 @@ private struct LayoutEditorPropertiesView: View {
     // had a race where the sheet's @State sometimes initialised
     // from a stale capture of `pendingLayerSizes`.
     @State private var layerSizesEditorPayload: LayerSizesPayload? = nil
+    // J-30 — DMX list editors (presets + wheel colours). Both
+    // emit `.sheet(item:)` so the sheet's @State always re-
+    // initialises from the latest descriptor read; same pattern
+    // as the layer-sizes editor.
+    @State private var dmxPresetEditorPayload: DmxPresetListPayload? = nil
+    @State private var dmxWheelColorEditorPayload: DmxWheelColorListPayload? = nil
+    @State private var dmxPositionZoneEditorPayload: DmxPositionZoneListPayload? = nil
     // J-20 — Start Channel structured editor. Initial value /
     // commit key are captured at open time so the sheet doesn't
     // need to know about per-string vs. model-wide routing.
@@ -2404,6 +2523,20 @@ private struct LayoutEditorPropertiesView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if multiSelectionSize >= 2 {
+                HStack(spacing: 6) {
+                    Image(systemName: "rectangle.stack")
+                        .foregroundStyle(Color.accentColor)
+                    Text("Edits apply to \(multiSelectionSize) selected models")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.accentColor.opacity(0.12),
+                            in: RoundedRectangle(cornerRadius: 4))
+            }
             // 1. Header — non-collapsible identity block.
             row("Name") {
                 HStack(spacing: 6) {
@@ -2665,6 +2798,27 @@ private struct LayoutEditorPropertiesView: View {
                                       typeCommit("LayerSizes",
                                                   sizes.map { NSNumber(value: $0) } as NSArray)
                                   })
+        }
+        .sheet(item: $dmxPresetEditorPayload) { payload in
+            DmxPresetListEditorSheet(initial: payload.entries,
+                                      commit: { newEntries in
+                                          typeCommit("DmxPresetList",
+                                                      newEntries as NSArray)
+                                      })
+        }
+        .sheet(item: $dmxWheelColorEditorPayload) { payload in
+            DmxWheelColorListEditorSheet(initial: payload.entries,
+                                          commit: { newEntries in
+                                              typeCommit("DmxWheelColorList",
+                                                          newEntries as NSArray)
+                                          })
+        }
+        .sheet(item: $dmxPositionZoneEditorPayload) { payload in
+            DmxPositionZoneListEditorSheet(initial: payload.entries,
+                                            commit: { newEntries in
+                                                typeCommit("DmxPositionZoneList",
+                                                            newEntries as NSArray)
+                                            })
         }
         .sheet(isPresented: $startChannelEditorVisible) {
             StartChannelEditorSheet(
@@ -3500,14 +3654,30 @@ private struct LayoutEditorPropertiesView: View {
     /// model-wide Start Channel).
     private func startChannelField(key: String, initial: String) -> some View {
         let editable = (summary["startChannelEditable"] as? Bool) ?? true
-        return Group {
+        return HStack(spacing: 6) {
             if editable {
                 LayoutEditorStringField(
                     id: "\(modelName).\(key).\(token)",
                     initial: initial,
                     commit: { commit(key, $0 as NSString) }
                 )
-                .frame(maxWidth: 140, alignment: .trailing)
+                .frame(maxWidth: 110, alignment: .trailing)
+                // J-30 — per-string variant gets the same pencil
+                // shortcut as the model-wide field so users can
+                // pick a format (Channel # / Universe / End of
+                // Model / Start of Model / Controller) without
+                // hand-typing the prefix syntax.
+                Button {
+                    pendingStartChannelKey = key
+                    pendingStartChannelInitial = initial
+                    startChannelEditorVisible = true
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Pick start channel format")
             } else {
                 Text(initial.isEmpty ? "—" : initial)
                     .foregroundStyle(.secondary)
@@ -3637,15 +3807,29 @@ private struct LayoutEditorPropertiesView: View {
         let label = d["label"] as? String ?? key
         let kind = d["kind"] as? String ?? ""
         let enabled = (d["enabled"] as? Bool) ?? true
-        HStack(alignment: .firstTextBaseline) {
+        if kind == "header" {
+            // J-3 (DMX) — full-width section divider inside the
+            // type-properties block. DMX models in particular have
+            // several optional sub-blocks (Color / Shutter / Beam /
+            // Preset) that need visual separation; emitting a
+            // header descriptor between them is cleaner than
+            // baking a separate descriptor stream per sub-block.
             Text(label)
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .frame(minWidth: 110, alignment: .leading)
-            Spacer(minLength: 8)
-            typeDescriptorControl(kind: kind, key: key, d: d)
-                .disabled(!enabled)
-                .opacity(enabled ? 1.0 : 0.5)
-                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+        } else {
+            HStack(alignment: .firstTextBaseline) {
+                Text(label)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 110, alignment: .leading)
+                Spacer(minLength: 8)
+                typeDescriptorControl(kind: kind, key: key, d: d)
+                    .disabled(!enabled)
+                    .opacity(enabled ? 1.0 : 0.5)
+                    .lineLimit(1)
+            }
         }
     }
 
@@ -3793,6 +3977,108 @@ private struct LayoutEditorPropertiesView: View {
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("Clear image")
                 }
+            }
+        case "meshFile":
+            // J-30 — DMX mesh file (.obj / .3ds / .stl / .ply).
+            // Same path-label + folder-button layout as imageFile,
+            // routes through a separate fileImporter scoped to
+            // mesh UTTypes.
+            let path = d["value"] as? String ?? ""
+            let display = path.isEmpty ? "—" : (path as NSString).lastPathComponent
+            HStack(spacing: 6) {
+                Text(display)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 110, alignment: .trailing)
+                Button {
+                    onPickMeshFile(key)
+                } label: {
+                    Image(systemName: "cube.transparent")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Pick mesh file")
+                if !path.isEmpty {
+                    Button(role: .destructive) {
+                        typeCommit(key, "" as NSString)
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Clear mesh")
+                }
+            }
+        case "button":
+            // J-30 — one-shot action button. Tapping commits a
+            // sentinel value (`@YES`) that the bridge setter
+            // interprets as "perform the side-effect". Used by
+            // the Skulltronix preset on DmxSkull and is reusable
+            // for any future one-shot model operation.
+            Button {
+                typeCommit(key, NSNumber(value: true))
+            } label: {
+                Image(systemName: "play.fill")
+                    .font(.caption2)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+        case "presetList":
+            // J-30 — DmxPresetAbility list editor.
+            let entries = (d["value"] as? NSArray) ?? []
+            HStack(spacing: 6) {
+                Text("\(entries.count) preset\(entries.count == 1 ? "" : "s")")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 130, alignment: .trailing)
+                Button {
+                    dmxPresetEditorPayload = DmxPresetListPayload(
+                        entries: entries)
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Edit presets")
+            }
+        case "wheelColorList":
+            // J-30 — DmxColorAbilityWheel custom-colour list.
+            let entries = (d["value"] as? NSArray) ?? []
+            HStack(spacing: 6) {
+                Text("\(entries.count) colour\(entries.count == 1 ? "" : "s")")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 130, alignment: .trailing)
+                Button {
+                    dmxWheelColorEditorPayload = DmxWheelColorListPayload(
+                        entries: entries)
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Edit wheel colours")
+            }
+        case "positionZoneList":
+            // J-30 — DmxMovingHeadAdv collision-avoidance zones.
+            let entries = (d["value"] as? NSArray) ?? []
+            HStack(spacing: 6) {
+                Text("\(entries.count) zone\(entries.count == 1 ? "" : "s")")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 130, alignment: .trailing)
+                Button {
+                    dmxPositionZoneEditorPayload = DmxPositionZoneListPayload(
+                        entries: entries)
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Edit position zones")
             }
         case "layerSizes":
             // J-20.4/7 — NSArray<NSNumber*> bridging is unreliable
@@ -5928,6 +6214,360 @@ private struct FaceStateEntryDetailView: View {
 }
 
 
+/// J-30 — module-scope copies of the hex / Color helpers that
+/// LayoutEditorPropertiesView keeps as private methods.
+/// Duplicated here so the DMX list-editor sheets (which live at
+/// module scope) can render colour swatches without piping a
+/// closure through `LayoutEditorPropertiesView`.
+private func dmxHexColor(_ hex: String) -> Color {
+    var s = hex
+    if s.hasPrefix("#") { s.removeFirst() }
+    guard let v = UInt32(s, radix: 16), s.count == 6 else {
+        return Color(.sRGB, red: 1, green: 0, blue: 0, opacity: 1)
+    }
+    let r = Double((v >> 16) & 0xff) / 255.0
+    let g = Double((v >> 8)  & 0xff) / 255.0
+    let b = Double(v & 0xff) / 255.0
+    return Color(.sRGB, red: r, green: g, blue: b, opacity: 1)
+}
+private func dmxHexFromColor(_ c: Color) -> String {
+    let cg = c.resolve(in: EnvironmentValues()).cgColor
+    let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+    guard let conv = cg.converted(to: srgb, intent: .defaultIntent, options: nil),
+          let comps = conv.components,
+          comps.count >= 3 else { return "#FF0000" }
+    let ri = Int(round(comps[0] * 255))
+    let gi = Int(round(comps[1] * 255))
+    let bi = Int(round(comps[2] * 255))
+    return String(format: "#%02X%02X%02X",
+                  max(0, min(255, ri)),
+                  max(0, min(255, gi)),
+                  max(0, min(255, bi)))
+}
+
+/// J-30 — DMX preset list editor.
+private struct DmxPresetListPayload: Identifiable {
+    let id = UUID()
+    let entries: NSArray
+}
+
+private struct DmxPresetListEntry: Identifiable {
+    let id = UUID()
+    var channel: Int
+    var value: Int
+    var description: String
+}
+
+private struct DmxPresetListEditorSheet: View {
+    let initial: NSArray
+    let commit: (_ entries: [[String: Any]]) -> Void
+
+    @State private var rows: [DmxPresetListEntry]
+    @Environment(\.dismiss) private var dismiss
+
+    init(initial: NSArray, commit: @escaping (_ entries: [[String: Any]]) -> Void) {
+        self.initial = initial
+        self.commit = commit
+        var seeded: [DmxPresetListEntry] = []
+        for obj in initial {
+            guard let d = obj as? NSDictionary else { continue }
+            let ch  = (d["channel"] as? NSNumber)?.intValue ?? 0
+            let v   = (d["value"]   as? NSNumber)?.intValue ?? 0
+            let dsc = (d["description"] as? String) ?? ""
+            seeded.append(DmxPresetListEntry(channel: ch, value: v, description: dsc))
+        }
+        self._rows = State(initialValue: seeded)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section(footer: Text("Each preset writes a fixed DMX value to a channel when the model isn't actively rendering. Max 25 entries.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)) {
+                    ForEach($rows) { $row in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Channel").font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                LayoutEditorIntSpin(
+                                    id: "preset.ch.\(row.id)",
+                                    initial: row.channel,
+                                    range: 0...255,
+                                    commit: { row.channel = $0 })
+                            }
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Value").font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                LayoutEditorIntSpin(
+                                    id: "preset.val.\(row.id)",
+                                    initial: row.value,
+                                    range: 0...255,
+                                    commit: { row.value = $0 })
+                            }
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Description").font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                TextField("Optional", text: $row.description)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(minWidth: 100)
+                            }
+                        }
+                    }
+                    .onDelete { idx in rows.remove(atOffsets: idx) }
+                }
+                if rows.count < 25 {
+                    Button {
+                        rows.append(DmxPresetListEntry(channel: 1, value: 0, description: ""))
+                    } label: {
+                        Label("Add Preset", systemImage: "plus.circle")
+                    }
+                }
+            }
+            .navigationTitle("Presets")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let out: [[String: Any]] = rows.map {
+                            ["channel":     NSNumber(value: $0.channel),
+                             "value":       NSNumber(value: $0.value),
+                             "description": $0.description]
+                        }
+                        commit(out)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+/// J-30 — DMX wheel-colour list editor (ColorWheel ability).
+private struct DmxWheelColorListPayload: Identifiable {
+    let id = UUID()
+    let entries: NSArray
+}
+
+private struct DmxWheelColorListEntry: Identifiable {
+    let id = UUID()
+    var colorHex: String
+    var dmxValue: Int
+}
+
+private struct DmxWheelColorListEditorSheet: View {
+    let initial: NSArray
+    let commit: (_ entries: [[String: Any]]) -> Void
+
+    @State private var rows: [DmxWheelColorListEntry]
+    @Environment(\.dismiss) private var dismiss
+
+    init(initial: NSArray, commit: @escaping (_ entries: [[String: Any]]) -> Void) {
+        self.initial = initial
+        self.commit = commit
+        var seeded: [DmxWheelColorListEntry] = []
+        for obj in initial {
+            guard let d = obj as? NSDictionary else { continue }
+            let hex = (d["color"]    as? String) ?? "#FFFFFF"
+            let v   = (d["dmxValue"] as? NSNumber)?.intValue ?? 0
+            seeded.append(DmxWheelColorListEntry(colorHex: hex, dmxValue: v))
+        }
+        self._rows = State(initialValue: seeded)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section(footer: Text("Each entry maps a colour wheel slot to a DMX value (0–255). Max 25 entries.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)) {
+                    ForEach($rows) { $row in
+                        HStack(spacing: 10) {
+                            ColorPicker("", selection: Binding(
+                                get: { dmxHexColor(row.colorHex) },
+                                set: { row.colorHex = dmxHexFromColor($0) }
+                            ), supportsOpacity: false)
+                                .labelsHidden()
+                                .frame(width: 40, height: 24)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("DMX Value").font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                LayoutEditorIntSpin(
+                                    id: "wheel.val.\(row.id)",
+                                    initial: row.dmxValue,
+                                    range: 0...255,
+                                    commit: { row.dmxValue = $0 })
+                            }
+                        }
+                    }
+                    .onDelete { idx in rows.remove(atOffsets: idx) }
+                }
+                if rows.count < 25 {
+                    Button {
+                        rows.append(DmxWheelColorListEntry(
+                            colorHex: "#FFFFFF", dmxValue: 0))
+                    } label: {
+                        Label("Add Colour", systemImage: "plus.circle")
+                    }
+                }
+            }
+            .navigationTitle("Wheel Colours")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let out: [[String: Any]] = rows.map {
+                            ["color":    $0.colorHex,
+                             "dmxValue": NSNumber(value: $0.dmxValue)]
+                        }
+                        commit(out)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+/// J-30 — DMX position-zone editor (DmxMovingHeadAdv).
+private struct DmxPositionZoneListPayload: Identifiable {
+    let id = UUID()
+    let entries: NSArray
+}
+
+private struct DmxPositionZoneListEntry: Identifiable {
+    let id = UUID()
+    var panMin: Int
+    var panMax: Int
+    var tiltMin: Int
+    var tiltMax: Int
+    var channel: Int
+    var value: Int
+}
+
+private struct DmxPositionZoneListEditorSheet: View {
+    let initial: NSArray
+    let commit: (_ entries: [[String: Any]]) -> Void
+
+    @State private var rows: [DmxPositionZoneListEntry]
+    @Environment(\.dismiss) private var dismiss
+
+    init(initial: NSArray, commit: @escaping (_ entries: [[String: Any]]) -> Void) {
+        self.initial = initial
+        self.commit = commit
+        var seeded: [DmxPositionZoneListEntry] = []
+        for obj in initial {
+            guard let d = obj as? NSDictionary else { continue }
+            seeded.append(DmxPositionZoneListEntry(
+                panMin:  (d["panMin"]  as? NSNumber)?.intValue ?? 0,
+                panMax:  (d["panMax"]  as? NSNumber)?.intValue ?? 255,
+                tiltMin: (d["tiltMin"] as? NSNumber)?.intValue ?? 0,
+                tiltMax: (d["tiltMax"] as? NSNumber)?.intValue ?? 255,
+                channel: (d["channel"] as? NSNumber)?.intValue ?? 1,
+                value:   (d["value"]   as? NSNumber)?.intValue ?? 0))
+        }
+        self._rows = State(initialValue: seeded)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section(footer: Text("Each zone holds a channel at the specified value whenever the head's pan/tilt falls inside the Pan × Tilt rectangle. Used for collision avoidance (e.g. blanking a beam when it sweeps into a wall).")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)) {
+                    ForEach($rows) { $row in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 6) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Pan Min").font(.caption2).foregroundStyle(.secondary)
+                                    LayoutEditorIntSpin(
+                                        id: "zone.pmin.\(row.id)",
+                                        initial: row.panMin, range: 0...255,
+                                        commit: { row.panMin = $0 })
+                                }
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Pan Max").font(.caption2).foregroundStyle(.secondary)
+                                    LayoutEditorIntSpin(
+                                        id: "zone.pmax.\(row.id)",
+                                        initial: row.panMax, range: 0...255,
+                                        commit: { row.panMax = $0 })
+                                }
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Tilt Min").font(.caption2).foregroundStyle(.secondary)
+                                    LayoutEditorIntSpin(
+                                        id: "zone.tmin.\(row.id)",
+                                        initial: row.tiltMin, range: 0...255,
+                                        commit: { row.tiltMin = $0 })
+                                }
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Tilt Max").font(.caption2).foregroundStyle(.secondary)
+                                    LayoutEditorIntSpin(
+                                        id: "zone.tmax.\(row.id)",
+                                        initial: row.tiltMax, range: 0...255,
+                                        commit: { row.tiltMax = $0 })
+                                }
+                            }
+                            HStack(spacing: 6) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Channel").font(.caption2).foregroundStyle(.secondary)
+                                    LayoutEditorIntSpin(
+                                        id: "zone.ch.\(row.id)",
+                                        initial: row.channel, range: 1...512,
+                                        commit: { row.channel = $0 })
+                                }
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Value").font(.caption2).foregroundStyle(.secondary)
+                                    LayoutEditorIntSpin(
+                                        id: "zone.val.\(row.id)",
+                                        initial: row.value, range: 0...255,
+                                        commit: { row.value = $0 })
+                                }
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .onDelete { idx in rows.remove(atOffsets: idx) }
+                }
+                Button {
+                    rows.append(DmxPositionZoneListEntry(
+                        panMin: 0, panMax: 255,
+                        tiltMin: 0, tiltMax: 255,
+                        channel: 1, value: 0))
+                } label: {
+                    Label("Add Zone", systemImage: "plus.circle")
+                }
+            }
+            .navigationTitle("Position Zones")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let out: [[String: Any]] = rows.map {
+                            ["panMin":  NSNumber(value: $0.panMin),
+                             "panMax":  NSNumber(value: $0.panMax),
+                             "tiltMin": NSNumber(value: $0.tiltMin),
+                             "tiltMax": NSNumber(value: $0.tiltMax),
+                             "channel": NSNumber(value: $0.channel),
+                             "value":   NSNumber(value: $0.value)]
+                        }
+                        commit(out)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
 /// J-23.5 — Sheet asking "how many points to add along this
 /// line?" Opens when the user taps a line segment in the
 /// custom-model editor. New pixels are inserted between the
@@ -6236,6 +6876,32 @@ private struct AddViewObjectSheet: View {
 ///
 /// Factored out as a ViewModifier so LayoutEditorView's body
 /// chain stays under the Swift type-checker's complexity budget.
+/// J-30 — bundle of two `fileImporter` modifiers (image bitmaps
+/// + DMX `.obj` meshes) so they ride into the LayoutEditorView
+/// body as a single `.modifier(...)`. Keeps the outer chain
+/// short enough for Swift's type-checker to resolve in
+/// reasonable time.
+private struct PerTypeFilePickers: ViewModifier {
+    @Binding var imageVisible: Bool
+    @Binding var meshVisible: Bool
+    let meshContentTypes: [UTType]
+    let onImagePick: (Result<[URL], Error>) -> Void
+    let onMeshPick:  (Result<[URL], Error>) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .fileImporter(isPresented: $imageVisible,
+                           allowedContentTypes: [.png, .jpeg, .tiff,
+                                                  .bmp, .gif, .image],
+                           allowsMultipleSelection: false,
+                           onCompletion: onImagePick)
+            .fileImporter(isPresented: $meshVisible,
+                           allowedContentTypes: meshContentTypes,
+                           allowsMultipleSelection: false,
+                           onCompletion: onMeshPick)
+    }
+}
+
 private struct SidebarSelectionMutex: ViewModifier {
     @Environment(SequencerViewModel.self) var viewModel
     @Binding var sidebarTab: LayoutSidebarTab
