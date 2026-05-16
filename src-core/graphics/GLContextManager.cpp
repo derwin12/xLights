@@ -34,10 +34,8 @@
 #include <EGL/eglext_angle.h>
 #include <GLES3/gl3.h>
 
-// ANGLE's Metal backend is NOT thread-safe — only one context may be active
-// at a time.  Pool size 1 ensures callers serialize naturally: the second
-// thread blocks on the condition_variable until the first releases.
-static constexpr int kMaxPoolSize = 1;
+// ANGLE's Metal backend serializes rendering internally.  The pool grows on
+// demand so each ShaderRenderCache can hold its own context for its lifetime.
 
 struct GLContextManager::PlatformState {
     EGLDisplay display = EGL_NO_DISPLAY;
@@ -180,8 +178,12 @@ GLContextManager::ContextHandle GLContextManager::AcquireContext() {
         // The shared context's surface is not pooled; it stays with the shared ctx
     }
 
-    // Grow pool if below max
-    if (_platform->pool.empty() && _platform->contextCount < kMaxPoolSize) {
+    // Grow pool on demand — no hard cap.  ShaderRenderCache holds each context
+    // for its lifetime (not released per-frame) so the pool must be able to
+    // grow to match the number of concurrently-rendering shader effects.
+    // Note: ANGLE/Metal serializes rendering internally, so concurrent contexts
+    // will contend on the Metal command queue but will not corrupt each other.
+    if (_platform->pool.empty()) {
         lock.unlock();
         auto entry = createEGLContext(_platform, _platform->sharedContext);
         lock.lock();
@@ -191,10 +193,7 @@ GLContextManager::ContextHandle GLContextManager::AcquireContext() {
         }
     }
 
-    // Wait for a context to become available
-    while (_platform->pool.empty()) {
-        _platform->poolNotifier.wait(lock);
-    }
+    if (_platform->pool.empty()) return nullptr;
 
     auto entry = _platform->pool.front();
     _platform->pool.pop_front();
@@ -271,8 +270,6 @@ void* GLContextManager::GetNativeDisplay() const {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-
-static constexpr int kMaxPoolSize = 24;
 
 struct GLContextManager::PlatformState {
     CGLContextObj sharedContext = nullptr;       // Master context for resource sharing
@@ -422,8 +419,10 @@ GLContextManager::ContextHandle GLContextManager::AcquireContext() {
         if (!_platform->sharedContext) return nullptr;
     }
 
-    // Grow pool if below max
-    if (_platform->pool.empty() && _platform->contextCount < kMaxPoolSize) {
+    // Grow pool on demand — no hard cap.  ShaderRenderCache holds each context
+    // for its lifetime (not released per-frame) so the pool must be able to
+    // grow to match the number of concurrently-rendering shader effects.
+    if (_platform->pool.empty()) {
         lock.unlock();
         CGLContextObj ctx = createCGLContext(_platform->sharedContext);
         lock.lock();
@@ -433,10 +432,7 @@ GLContextManager::ContextHandle GLContextManager::AcquireContext() {
         }
     }
 
-    // Wait for a context to become available
-    while (_platform->pool.empty()) {
-        _platform->poolNotifier.wait(lock);
-    }
+    if (_platform->pool.empty()) return nullptr;
 
     CGLContextObj ctx = _platform->pool.front();
     _platform->pool.pop_front();
@@ -875,10 +871,6 @@ void* GLContextManager::GetNativeDisplay() const {
 #include <EGL/egl.h>
 #include <GL/gl.h>
 
-// One context per background render thread, plus one for the main thread.
-// Mirrors the macOS CGL pool size.
-static constexpr int kMaxPoolSize = 24;
-
 struct GLContextManager::PlatformState {
     // GLX path (X11 / XWayland)
     Display*     xDisplay  = nullptr;
@@ -1113,7 +1105,10 @@ GLContextManager::ContextHandle GLContextManager::AcquireContext() {
 
     std::unique_lock<std::mutex> lock(_platform->poolMutex);
 
-    if (_platform->pool.empty() && _platform->contextCount < kMaxPoolSize) {
+    // Grow pool on demand — no hard cap.  ShaderRenderCache holds each context
+    // for its lifetime (not released per-frame) so the pool must be able to
+    // grow to match the number of concurrently-rendering shader effects.
+    if (_platform->pool.empty()) {
         lock.unlock();
         PlatformState::PoolEntry entry = _platform->useEGL
             ? createEGLPoolEntry(_platform)
@@ -1128,9 +1123,7 @@ GLContextManager::ContextHandle GLContextManager::AcquireContext() {
         }
     }
 
-    while (_platform->pool.empty()) {
-        _platform->poolNotifier.wait(lock);
-    }
+    if (_platform->pool.empty()) return nullptr;
 
     auto entry = _platform->pool.front();
     _platform->pool.pop_front();

@@ -466,9 +466,9 @@ public:
     ShaderRenderCache() { _shaderConfig = nullptr; }
     virtual ~ShaderRenderCache()
     {
-        if (s_programId != 0 && _shaderConfig != nullptr) {
+        if (s_programId != 0 && s_shaderInfo != nullptr) {
             std::unique_lock<std::mutex> lock(shaderMapMutex);
-            shaderMap[s_code]->programIds.push_back(s_programId);
+            s_shaderInfo->programIds.push_back(s_programId);
             s_programId = 0;
         }
         if (_shaderConfig != nullptr) delete _shaderConfig;
@@ -494,14 +494,21 @@ public:
     }
     unsigned RefreshProgramId() {
         if (s_shaderInfo) {
-            std::unique_lock<std::mutex> lock(shaderMapMutex);
-            if (s_shaderInfo->programIds.empty()) {
-                lock.unlock();
-                s_programId = ShaderEffect::programIdForShaderCode(_shaderConfig, this);
-            } else {
-                s_programId = s_shaderInfo->programIds.back();
-                s_shaderInfo->programIds.pop_back();
+            while (true) {
+                unsigned candidate = 0;
+                {
+                    std::unique_lock<std::mutex> lock(shaderMapMutex);
+                    if (s_shaderInfo->programIds.empty()) break;
+                    candidate = s_shaderInfo->programIds.back();
+                    s_shaderInfo->programIds.pop_back();
+                }
+                if (glIsProgram(candidate)) {
+                    s_programId = candidate;
+                    return s_programId;
+                }
             }
+            // Pool exhausted or all entries were stale: recompile in this context.
+            s_programId = ShaderEffect::programIdForShaderCode(_shaderConfig, this);
         }
         return s_programId;
     }
@@ -573,6 +580,13 @@ bool ShaderEffect::SetGLContext(ShaderRenderCache *cache) {
         if (!cache->contextHandle) return false;
     }
     if (!mgr.MakeCurrent(cache->contextHandle)) {
+        cache->s_shadersInit = false;
+        cache->s_vertexArrayId = 0;
+        cache->s_vertexBufferId = 0;
+        cache->s_fbId = 0;
+        cache->s_rbId = 0;
+        cache->s_rbTex = 0;
+        cache->s_audioTex = 0;
         mgr.ReleaseContext(cache->contextHandle);
         cache->contextHandle = nullptr;
         return false;
@@ -583,15 +597,6 @@ bool ShaderEffect::SetGLContext(ShaderRenderCache *cache) {
 void ShaderEffect::UnsetGLContext(ShaderRenderCache* cache) {
     auto& mgr = GLContextManager::Instance();
     mgr.DoneCurrent(cache->contextHandle);
-#if !defined(_WIN32)
-    // macOS/Linux: return context to pool after each frame so other threads
-    // can acquire it.  The per-thread context cache (contextHandle) is
-    // re-acquired at the start of the next frame; pool contexts share no
-    // state so GL resources (FBOs, textures) owned by the cache remain valid.
-    mgr.ReleaseContext(cache->contextHandle);
-    cache->contextHandle = nullptr;
-#endif
-    // Windows: keep context cached in ShaderRenderCache for reuse (pool grows on demand)
 }
 
 void ShaderEffect::Render(Effect* eff, const SettingsMap& SettingsMap, RenderBuffer& buffer)
@@ -998,16 +1003,17 @@ unsigned ShaderEffect::programIdForShaderCode(ShaderConfig* cfg, ShaderRenderCac
     if (iter != ShaderRenderCache::shaderMap.cend()) {
         shaderInfo = (*iter).second;
         while (!shaderInfo->programIds.empty()) {
-            unsigned programId = shaderInfo->programIds.front();
+            unsigned candidate = shaderInfo->programIds.front();
             shaderInfo->programIds.pop_front();
-            if (!glIsProgram(programId)) {
-                spdlog::error("ShaderEffect::programIdForShaderCode() - program id {} is not a shader program!", programId);
-            } else {
-                //spdlog::debug("ShaderEffect::programIdForShaderCode() - shader program {} unchanged -- id {}", (const char*)cfg->GetFilename().c_str(), programId);
-                cache->SetProgramId(programId, shaderInfo);
-                return programId;
+            lock.unlock();
+            if (glIsProgram(candidate)) {
+                cache->SetProgramId(candidate, shaderInfo);
+                return candidate;
             }
+            spdlog::warn("ShaderEffect::programIdForShaderCode() - program id {} invalid in this context, recompiling", candidate);
+            lock.lock();
         }
+        if (!lock.owns_lock()) lock.lock();
     }
 
     lock.unlock();
