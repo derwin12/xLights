@@ -1,13 +1,18 @@
 import SwiftUI
 
 // J-32.5 — Transferable payload for Visualize drag-drop. Uses
-// a String ProxyRepresentation so we don't need to register a
-// custom UTType in Info.plist (an exported UTType triggers a
-// "Type Declaration Issues" warning when the plist entry is
-// missing). The bridge refuses any model name it doesn't
-// recognise, so a stray text drop from outside the sheet is a
-// no-op rather than a corruption hazard.
-struct VisualizeModelDrag: Codable, Transferable {
+// a String ProxyRepresentation so the transferred bytes are
+// just the model name. NOT Codable — Swift's combined
+// Codable+Transferable conformance auto-registers a custom
+// UTType derived from the bundle ID + struct name ("org.
+// xlights.iPad.visualizeModelDrag"), which then trips the
+// "Type Declaration Issues" plist warning. ProxyRepresentation
+// alone routes everything through `public.utf8-plain-text`.
+//
+// The bridge refuses any model name it doesn't recognise, so a
+// stray text drop from outside the sheet is a no-op rather
+// than a corruption hazard.
+struct VisualizeModelDrag: Transferable {
     let name: String
     static var transferRepresentation: some TransferRepresentation {
         ProxyRepresentation(
@@ -377,9 +382,9 @@ struct ControllerVisualizeView: View {
                         modelDragPreview(entry.name)
                     }
                     .dropDestination(for: VisualizeModelDrag.self) { payloads, _ in
-                        handleDrop(payloads: payloads,
-                                    section: section,
-                                    afterModel: entry.name)
+                        return handleDrop(payloads: payloads,
+                                           section: section,
+                                           afterModel: entry.name)
                     }
                     .contextMenu {
                         Button {
@@ -432,17 +437,17 @@ struct ControllerVisualizeView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                     .dropDestination(for: VisualizeModelDrag.self) { payloads, _ in
-                        handleDrop(payloads: payloads,
-                                    section: section,
-                                    afterModel: nil)
+                        return handleDrop(payloads: payloads,
+                                           section: section,
+                                           afterModel: nil)
                     }
             }
         } header: {
             portHeader(section)
                 .dropDestination(for: VisualizeModelDrag.self) { payloads, _ in
-                    handleDrop(payloads: payloads,
-                                section: section,
-                                afterModel: nil)
+                    return handleDrop(payloads: payloads,
+                                       section: section,
+                                       afterModel: nil)
                 }
         } footer: {
             if !section.valid, !section.invalidReason.isEmpty {
@@ -565,8 +570,8 @@ struct ControllerVisualizeView: View {
     }
 
     private func openProtocolPicker(section: PortSection) {
-        let options = (viewModel.document.availableProtocols(forController: controllerName,
-                                                              kind: section.kind) as? [String]) ?? []
+        let options = viewModel.document.availableProtocols(forController: controllerName,
+                                                             kind: section.kind)
         guard !options.isEmpty else {
             portEditError = "No protocols are available for this port."
             return
