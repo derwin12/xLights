@@ -11,6 +11,8 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.09  May ??, 2026
+    -bug (dkulp)                Shader effect (Windows): return the GL context to the pool every frame
+                                instead of pinning one per ShaderRenderCache.
     -enh (cybercop23)           Enhance "Paste Effects" on model context menu to automatically insert the needed
                                 layers when pasting multi-layer effects so the paste does not bleed into
                                 subsequent models or groups. Also adds "Copy Layers/SubModels to Models" option
