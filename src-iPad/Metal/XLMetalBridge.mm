@@ -71,6 +71,7 @@
     std::set<std::string> _extraSelectedModels;  // J-4 — multi-select secondary set
     std::string _selectedGroupName;        // J-6 — sidebar group sync (members tinted)
     std::string _selectedViewObjectName;   // J-6 — sidebar object sync (handles drawn)
+    std::string _selectedControllerName;   // J-31 — Controllers tab sync (members tinted)
     BOOL _showLayoutGrid;            // J-2 — Layout Editor 2D grid overlay
     BOOL _showLayoutBoundingBox;     // J-2 — Layout Editor canvas bbox
     BOOL _layoutOverlaysSeeded;      // first draw seeds from rgbeffects state
@@ -284,6 +285,14 @@ static std::unique_ptr<xlImage> LoadImageFile(const std::string& path, int& outW
         _selectedGroupName.clear();
     } else {
         _selectedGroupName = name.UTF8String;
+    }
+}
+
+- (void)setSelectedController:(NSString*)name {
+    if (name == nil || name.length == 0) {
+        _selectedControllerName.clear();
+    } else {
+        _selectedControllerName = name.UTF8String;
     }
 }
 
@@ -2240,6 +2249,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
 
     rctx->GetModelManager().AddModel(m);
     rctx->MarkLayoutModelDirty(m->GetName());
+    rctx->GetModelManager().RecalcStartChannels();
 
     // Start the placement `BeginCreate` session so subsequent
     // `dragHandle` calls size the model as the user drags. If the
@@ -2399,6 +2409,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
         }
     }
 
+    rctx->GetModelManager().RecalcStartChannels();
     return names;
 }
 
@@ -2521,6 +2532,7 @@ float ReadAlignReference(Model* model, const std::string& edge) {
     }
 
     rctx->MarkLayoutModelDirty(m->GetName());
+    rctx->GetModelManager().RecalcStartChannels();
     return YES;
 }
 
@@ -3026,6 +3038,21 @@ float ReadAlignReference(Model* model, const std::string& edge) {
                     } else {
                         selectedGroupMembers.insert(m);
                     }
+                }
+            }
+        }
+        // J-31 — Controllers tab sidebar sync. Same tint bucket
+        // as group members; selection drives which models on the
+        // active preview belong to the picked controller. Models
+        // ride the same `selectedGroupMembers` set so a single
+        // tint rule handles both surfaces.
+        if (_isLayoutEditor && !_selectedControllerName.empty()) {
+            for (Model* m : ctx->GetModelsForActivePreview()) {
+                if (!m) continue;
+                if (m->GetDisplayAs() == DisplayAsType::ModelGroup) continue;
+                if (m->GetDisplayAs() == DisplayAsType::SubModel) continue;
+                if (m->GetControllerName() == _selectedControllerName) {
+                    selectedGroupMembers.insert(m);
                 }
             }
         }

@@ -2005,6 +2005,339 @@ typedef NS_ENUM(NSInteger, XLEffectBracketState) {
                          outB:(CGFloat*)outB
     NS_SWIFT_NAME(bracketColor(forState:outR:outG:outB:));
 
+#pragma mark - J-31 — Controllers (Layout Editor sidebar)
+
+// Phase J-31 — list of every configured controller from the
+// active output manager, in declared order. Each dictionary
+// carries the canonical column data mirroring desktop's
+// Controllers tab grid (Name / Type / IP / Channels / Vendor /
+// Model / Variant / Active state) plus capability booleans the
+// SwiftUI side uses to gate Upload / Visualize actions to
+// open-source firmware controllers only.
+//
+// Each dictionary:
+//   @"name"          — NSString
+//   @"type"          — NSString (Column1: NULL, E1.31, ArtNet, …)
+//   @"ip"            — NSString (resolved IP / device address)
+//   @"universes"     — NSString (Column3: universe range string)
+//   @"channels"      — NSString (Column4: "N [start-end]")
+//   @"vendor"        — NSString
+//   @"model"         — NSString
+//   @"variant"       — NSString
+//   @"active"        — NSString ("Active" / "Inactive" / "xLights Only")
+//   @"autoLayout"    — NSNumber (BOOL)
+//   @"autoSize"      — NSNumber (BOOL)
+//   @"description"   — NSString
+//   @"caps.openSourceFirmware" — NSNumber (BOOL); when YES, the
+//                      iPad surfaces Upload / Visualize actions
+//                      in the long-press menu. nil-caps
+//                      controllers default to NO.
+- (NSArray<NSDictionary*>*)controllersListSummary;
+
+// Phase J-31 — full editable detail for a specific controller.
+// Same shape as `controllersListSummary` rows; surfaces extra
+// fields (`url` for Open action, `pingDescription`) that the
+// detail pane reads. Returns nil when the controller doesn't
+// exist.
+- (nullable NSDictionary<NSString*, id>*)controllerDetailForName:(NSString*)name;
+
+// Phase J-31 — model names assigned to `controllerName`. Used
+// by the Controllers tab's detail pane (member list). Canvas-
+// side tinting goes through `XLMetalBridge.setSelectedController:`
+// instead, which mirrors the existing `setSelectedGroup:` path.
+- (NSArray<NSString*>*)modelNamesForController:(NSString*)controllerName;
+
+// Phase J-31 — editable property descriptors for a controller.
+// Mirrors `perTypePropertiesForModel:` shape: NSArray<NSDictionary>
+// where each entry is a descriptor dict with keys
+// `key` / `label` / `kind` (int / double / bool / enum / string
+// / header) plus kind-specific extras. Returns an empty array
+// when the controller doesn't exist.
+//
+// Covers the base `ControllerPropertyAdapter` surface (Name,
+// Description, Id, Active, AutoLayout/Upload/Size,
+// FullxLightsControl, DefaultBrightness, SuppressDuplicates,
+// Monitor, Vendor/Model/Variant cascade) plus Ethernet
+// (Multicast, IP, FPPProxy, Protocol, ForceLocalIP, Priority,
+// Managed) and Null (Channels). Serial-specific properties
+// (Port / Speed / I2C / SPI / Prefix / Postfix) are deferred —
+// they need a follow-up turn for the sub-protocol switches.
+// `ControllerCaps::GetExtraPropertyDefs()` extras land as
+// String / Enum descriptors at the tail with `ControllerExtra.`
+// key prefix.
+- (NSArray<NSDictionary*>*)controllerPropertiesForName:(NSString*)name;
+
+// Phase J-31 — commit a single controller property. Returns NO
+// for: unknown controller, validation failure (e.g. duplicate
+// name), unknown key, or wrong value type. Marks the
+// `_controllersDirty` flag on success so `SaveLayoutChanges()`
+// rewrites `xlights_networks.xml`.
+- (BOOL)setControllerProperty:(NSString*)key
+                 onController:(NSString*)name
+                        value:(id)value;
+
+// Phase J-31.3 — add a new controller. `type` is one of
+// `"Ethernet"` / `"Serial"` / `"Null"`; mirrors the three
+// `OnButtonAddController…Click` entry points on desktop's Setup
+// tab. The OutputManager auto-assigns a unique name. Returns
+// the new name on success; nil on bad `type` or no
+// OutputManager.
+- (nullable NSString*)addControllerOfType:(NSString*)type;
+
+// Phase J-31.3 — delete by name. Returns YES on success, NO
+// when the controller doesn't exist. Marks
+// `_controllersDirty`.
+- (BOOL)deleteController:(NSString*)name;
+
+// Phase J-31.5 — reorder. Controller order determines auto-
+// computed start channels, so drag-and-drop on the sidebar
+// list calls this with the desired 0-indexed destination.
+// Returns NO when the name doesn't exist or the destination
+// is out of range. Marks `_controllersDirty` on success.
+- (BOOL)moveController:(NSString*)name toIndex:(int)destIndex;
+
+// Phase J-31.6 — push the show's pixel-string / model
+// configuration to a physical controller via its HTTP API.
+// Mirrors desktop's `xLightsFrame::UploadOutputToController`:
+// recalculates model start channels, constructs the
+// vendor-specific `BaseController` via factory, verifies
+// connection, calls `SetOutputs`. Blocking — call from a
+// detached Task.
+//
+// Returns NSDictionary:
+//   @"success"     — NSNumber (BOOL)
+//   @"message"     — NSString (user-facing result string)
+//   @"log"         — NSString (any messages the upload's UI
+//                    callbacks captured along the way)
+- (NSDictionary*)uploadOutputForController:(NSString*)name;
+
+// Phase J-31.6 — push the show's universe-input configuration
+// (which DMX universes the controller should listen on) to
+// the device. Mirrors desktop's
+// `xLightsFrame::UploadInputToController`. Same return shape
+// as the output upload.
+- (NSDictionary*)uploadInputForController:(NSString*)name;
+
+// Phase J-31.4 — controller network discovery. Runs the cross-
+// protocol scanner (FPP / ArtNet / Twinkly / Pixlite / DDP) on
+// the **calling thread** — Swift wraps it in `Task.detached`
+// to keep the UI responsive (typical run is 5–10s). Auto-adds
+// each freshly-discovered ethernet controller whose name +
+// protocol + IP are all unique; collects every other hit into
+// a mismatches array the SwiftUI side resolves via
+// `applyDiscoveryMismatch:action:`.
+//
+// Returns:
+//   @"added"           — NSNumber (count of newly-added controllers)
+//   @"already"         — NSNumber (count whose IP + name matched an existing one)
+//   @"addedNames"      — NSArray<NSString> of new controller names
+//   @"mismatches"      — NSArray<NSDictionary>; each entry self-contained
+//                        with everything needed to apply a choice:
+//     For kind="ip-update":
+//       @"id", @"kind"="ip-update",
+//       @"existingName", @"existingIP", @"discoveredIP",
+//       @"protocol", @"vendor", @"model", @"variant",
+//       @"discoveredName"     — fallback when user picks Add New
+//     For kind="rename":
+//       @"id", @"kind"="rename",
+//       @"existingName", @"existingIP", @"discoveredName"
+- (NSDictionary*)runControllerDiscovery;
+
+// Phase J-31.7 — resolve a discovery mismatch. The `descriptor`
+// is one of the dicts from `runControllerDiscovery`'s
+// `mismatches` array; the action is one of:
+//   "update"   — (ip-update) write discoveredIP onto the
+//                existing controller named existingName.
+//   "add-new"  — (ip-update) create a new ControllerEthernet
+//                using the discovered scalars and add it
+//                alongside the existing one. Name is auto-
+//                uniquified.
+//   "rename"   — (rename) write discoveredName onto the
+//                existing controller named existingName,
+//                and rewrite every model's controllerName
+//                that referenced it.
+//   "skip"     — leave everything as-is.
+// Returns YES on success (including "skip", which is always
+// successful by definition). Marks `_controllersDirty` when
+// any state actually changed.
+- (BOOL)applyDiscoveryMismatch:(NSDictionary*)descriptor
+                         action:(NSString*)action;
+
+// Phase J-32.1 — wiring view ("Visualize" on desktop).
+// Constructs a `UDController` for the named controller and
+// serializes its port-by-port model assignment graph into a
+// nested NSDictionary the SwiftUI sheet renders directly.
+// Returns nil if the controller doesn't exist.
+//
+// Returns NSDictionary:
+//   @"name", @"ip", @"vendor", @"model", @"variant"   — controller identity
+//   @"valid"          — NSNumber (BOOL) overall UDController::IsValid()
+//   @"errorMessage"   — NSString (UDController::Check result, may be empty)
+//   @"ports"          — NSArray<NSDictionary>; each entry:
+//     @"kind"           — "pixel" | "serial" | "pwm" | "virtualMatrix" | "ledPanelMatrix"
+//     @"port"           — NSNumber port index (1-based for pixel/serial)
+//     @"name"           — NSString port label ("Pixel Port 3", "DMX Out 1", …)
+//     @"protocol"       — NSString
+//     @"valid"          — NSNumber BOOL
+//     @"invalidReason"  — NSString (may be empty)
+//     @"isSmartRemotePort" — NSNumber BOOL
+//     @"smartRemoteCount" — NSNumber
+//     @"startChannel"   — NSNumber (absolute show channel)
+//     @"endChannel"     — NSNumber
+//     @"channels"       — NSNumber
+//     @"pixels"         — NSNumber (channels / channelsPerPixel)
+//     @"models"         — NSArray<NSDictionary>; each entry:
+//       @"name", @"label"
+//       @"string"            — NSNumber (0 for primary string)
+//       @"startChannel", @"endChannel", @"channels"  — NSNumber
+//       @"smartRemote"       — NSNumber (0 = no SR, 1-N for A-…)
+//       @"smartRemoteLetter" — NSString ("" or "A".."P")
+//       @"smartRemoteType"   — NSString
+//       @"universe"          — NSNumber
+//       @"universeStartChannel" — NSNumber
+//       @"protocol"          — NSString (per-model override)
+//       @"valid"             — NSNumber BOOL
+//       @"invalidReason"     — NSString
+//   @"noConnection"    — NSArray<NSDictionary> of model-shape entries
+//                        for models claiming this controller but having
+//                        no port assignment (or unreachable port).
+//   @"totals":
+//     @"models", @"channels", @"pixelPorts", @"serialPorts"  — NSNumber
+- (nullable NSDictionary*)wiringForController:(NSString*)name;
+
+// Phase J-32.2 — protocols the user can choose for a port of
+// `kind` ("pixel" / "serial") on the named controller. Filtered
+// through `ControllerCaps` when available (falls back to the
+// full type catalogue when the vendor/model has no caps entry).
+// Used by the Visualize sheet's protocol picker.
+- (NSArray<NSString*>*)availableProtocolsForController:(NSString*)name
+                                                  kind:(NSString*)kind;
+
+// Phase J-32.2 — write `protocol` onto every model on the
+// specified port (1-based, matches UDController). When the caps
+// don't allow simultaneous-different protocols across ports of
+// the same kind, the protocol is applied to EVERY port of that
+// kind (mirrors desktop's `SupportsMultipleSimultaneousOutputProtocols`
+// branch in ControllerModelDialog::OnPopupCommand for
+// CONTROLLER_PROTOCOL). Returns NO when:
+//   - controller name doesn't exist
+//   - kind isn't "pixel" / "serial"
+//   - protocol is not in the caps-filtered list
+//   - no models on the port (nothing to write — UI shouldn't
+//     have offered the picker for an empty port anyway).
+- (BOOL)setPortProtocolOnController:(NSString*)name
+                                kind:(NSString*)kind
+                                port:(int)port
+                            protocol:(NSString*)protocol
+    NS_SWIFT_NAME(setPortProtocol(onController:kind:port:protocol:));
+
+// Phase J-32.3 — return the controller-connection state for the
+// named model in the shape the Visualize "Edit Controller
+// Properties" sheet edits. The "*Active" flags are CTRL_PROPS
+// bits — when OFF, the corresponding value is ignored at upload
+// time and the controller falls back to its own defaults.
+//
+// Returns NSDictionary:
+//   @"brightnessActive"    — NSNumber BOOL
+//   @"brightness"          — NSNumber Int (0..100)
+//   @"gammaActive"         — NSNumber BOOL
+//   @"gamma"               — NSNumber Float
+//   @"colorOrderActive"    — NSNumber BOOL
+//   @"colorOrderIndex"     — NSNumber Int (index into colorOrderOptions)
+//   @"colorOrder"          — NSString (e.g. "RGB", "GRB")
+//   @"colorOrderOptions"   — NSArray<NSString>
+//   @"groupCountActive"    — NSNumber BOOL
+//   @"groupCount"          — NSNumber Int
+//   @"startNullsActive"    — NSNumber BOOL
+//   @"startNulls"          — NSNumber Int
+//   @"endNullsActive"      — NSNumber BOOL
+//   @"endNulls"            — NSNumber Int
+//   @"dmxChannel"          — NSNumber Int (serial-port only)
+//   @"useSmartRemote"      — NSNumber BOOL (USE_SMART_REMOTE flag)
+//   @"smartRemote"         — NSNumber Int (0=none, 1..N for A..)
+//   @"smartRemoteType"     — NSString
+//   @"smartRemoteTypeOptions" — NSArray<NSString>
+//   @"srMaxCascade"        — NSNumber Int
+//   @"srCascadeOnPort"     — NSNumber BOOL
+// Returns nil if the model can't be resolved.
+- (nullable NSDictionary*)controllerConnectionForModel:(NSString*)modelName;
+
+// Phase J-32.4 — controller-level smart-remote capabilities for
+// the named controller's caps. Used by the SR picker to know
+// how many letters to show and which SR types are valid.
+//
+// Returns:
+//   @"supportsSmartRemotes" — NSNumber BOOL
+//   @"maxRemotes"           — NSNumber Int (1-based count, e.g. 16 for "A".."P")
+//   @"types"                — NSArray<NSString>
+- (NSDictionary*)smartRemoteCapabilitiesForController:(NSString*)name;
+
+// Phase J-32.5 — assign a model to a port on a controller.
+// Mirrors desktop's `DropModelFromModelsPaneOnModel` /
+// `DropFromModels` chain-aware drop:
+//   - Sets the model's controllerName / port / protocol
+//     (auto-picked from caps when the port is empty, or
+//     inherited from the existing model chain).
+//   - Pixel ports: when `afterModel` is set, chains the model
+//     immediately after it via `modelChain = ">{afterModel}"`
+//     and reparents any model that had been chained off
+//     `afterModel`. When `afterModel` is nil + the port is
+//     non-empty, the model lands at the END of the chain.
+//   - Serial ports: walks DMX-channel chain instead of the
+//     `modelChain` string (matches desktop's rhs=true serial
+//     branch). Drop-at-end picks the next channel past the
+//     current last model.
+//   - Smart-remote inheritance: when dropping after a model,
+//     the new model picks up that model's smart-remote ID. When
+//     dropping on an empty port, SR is preserved at 0 unless
+//     the caller asks otherwise via `smartRemote >= 1`.
+//   - `smartRemote == -1` means "inherit from afterModel or
+//     leave alone"; `>= 0` overrides explicitly.
+//   - Recalcs start channels at the end so the canvas + the
+//     wiring sheet repaint with the new ranges.
+// Returns NO when the model / controller doesn't exist or the
+// port kind is unsupported.
+- (BOOL)assignModelToController:(NSString*)modelName
+                  controllerName:(NSString*)controllerName
+                            kind:(NSString*)portKind
+                            port:(int)port
+                      afterModel:(nullable NSString*)afterModelName
+                     smartRemote:(int)smartRemote
+    NS_SWIFT_NAME(assignModel(_:toController:kind:port:afterModel:smartRemote:));
+
+// Phase J-32.5 — remove a model's controller assignment so it
+// returns to the "No Connection" bucket / models pane. Clears
+// `controllerName`, `controllerPort`, `modelChain`, and any
+// model chained off this one re-resolves to whichever model
+// (if any) preceded the removed one on its port.
+- (BOOL)removeModelFromController:(NSString*)modelName
+    NS_SWIFT_NAME(removeModelFromController(_:));
+
+// Phase J-32.6 — caps-reported max port counts for the named
+// controller. Used by the "Move to Port" picker to know how
+// many pixel / serial ports to show. Falls back to {0, 0} when
+// caps aren't available — the picker then hides itself.
+//
+// Returns:
+//   @"maxPixelPort"  — NSNumber Int
+//   @"maxSerialPort" — NSNumber Int
+- (NSDictionary*)portCountsForController:(NSString*)name;
+
+// Phase J-32.7 — wiring export. Wraps `UDController::ExportAsCSV`
+// and `ExportAsJSON` from src-core/. Returns nil when the
+// controller doesn't exist or the export fails.
+//
+// CSV: a single string with `\n`-separated rows, header line
+// included. Cells that contain commas / quotes are
+// double-quoted. Suitable to drop straight into a temp file +
+// share via UIActivityViewController.
+//
+// JSON: the same JSON document desktop's "Export JSON" produces;
+// the recipient is expected to be another JSON-aware tool, not
+// xLights itself.
+- (nullable NSString*)exportWiringCSVForController:(NSString*)name;
+- (nullable NSString*)exportWiringJSONForController:(NSString*)name;
+
 @end
 
 NS_ASSUME_NONNULL_END

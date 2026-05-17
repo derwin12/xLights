@@ -6,20 +6,22 @@ import UniformTypeIdentifiers
 /// yet have a controller editor and surfacing the tab with no UI
 /// behind it would be a regression in clarity.
 enum LayoutSidebarTab: String, CaseIterable, Identifiable {
-    case models, groups, objects
+    case models, groups, objects, controllers
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .models: return "Models"
-        case .groups: return "Groups"
-        case .objects: return "Objects"
+        case .models:      return "Models"
+        case .groups:      return "Groups"
+        case .objects:     return "Objects"
+        case .controllers: return "Controllers"
         }
     }
     var systemImage: String {
         switch self {
-        case .models: return "cube"
-        case .groups: return "square.stack.3d.up"
-        case .objects: return "scribble.variable"
+        case .models:      return "cube"
+        case .groups:      return "square.stack.3d.up"
+        case .objects:     return "scribble.variable"
+        case .controllers: return "network"
         }
     }
 }
@@ -110,6 +112,17 @@ struct LayoutEditorView: View {
     /// Persists per-session via @State; clamped to [0.2, 0.8] by the
     /// divider's drag handler so neither pane vanishes.
     @State private var sidebarTopFraction: CGFloat = 0.45
+    /// Persisted width for the LayoutEditor's left sidebar
+    /// (Models / Groups / Objects / Controllers + property pane).
+    /// `NavigationSplitView` doesn't natively persist the user's
+    /// drag width across launches; we observe the rendered width
+    /// via a GeometryReader and write it back here, then feed it
+    /// to `navigationSplitViewColumnWidth(min:ideal:max:)` on the
+    /// next show. Default 380 (wider than the previous 320
+    /// default — the sidebar lists model names + channel range +
+    /// SR badge and was wrapping at the old width).
+    @AppStorage("layoutEditor.sidebarWidth")
+    private var sidebarStoredWidth: Double = 380
     /// J-5 — Groups roster. The selection itself lives on the
     /// view model (`layoutEditorSelectedGroup`) so PreviewPaneView
     /// can sync it to the canvas tint.
@@ -121,6 +134,42 @@ struct LayoutEditorView: View {
     @State private var modelFilter: String = ""
     @State private var groupFilter: String = ""
     @State private var objectFilter: String = ""
+    /// J-31 — Controllers tab filter + cached list. The cache is
+    /// rebuilt on `.task` / `.onChange(of: showFolderLoaded)` /
+    /// after layout-save (controllers are stored in the output
+    /// manager, not rgbeffects.xml).
+    @State private var controllerFilter: String = ""
+    @State private var controllerRows: [[String: Any]] = []
+    /// J-31 — placeholder alert message for Upload / Visualize
+    /// actions until their real flows ship. Non-nil values surface
+    /// an alert; the user dismisses to clear.
+    @State private var pendingControllerActionAlert: String? = nil
+    /// J-32.1 — Visualize sheet target. Set from the long-press
+    /// menu or the controller-detail Visualize button; bound to
+    /// a `.sheet(item:)` that presents the read-only wiring view.
+    @State private var visualizeControllerPayload: ControllerVisualizePayload? = nil
+    /// J-31.3 — Delete Controller confirmation target.
+    @State private var pendingDeleteControllerName: String? = nil
+    /// J-31.4 — Controller discovery state. `running` gates the
+    /// menu item + drives the progress overlay; `resultMessage`
+    /// surfaces the completion alert when non-nil.
+    @State private var controllerDiscoveryRunning: Bool = false
+    @State private var controllerDiscoveryResult: String? = nil
+    /// J-31.7 — mismatches surfaced by discovery that need a
+    /// per-fixture user decision (IP update vs add new vs skip /
+    /// rename vs skip). Non-empty values present the resolution
+    /// sheet; empty / nil hide it.
+    @State private var pendingDiscoveryMismatches: [[String: Any]] = []
+    /// J-31.6 — Controller upload state. A single "Upload" action
+    /// pushes both input universes (when the fixture supports it)
+    /// and output / pixel-string config. Confirmation alert fires
+    /// before any HTTP traffic; the progress overlay covers the
+    /// 5–30s upload itself; the result alert surfaces the
+    /// success/failure of each leg plus any log output the
+    /// uploaders captured.
+    @State private var pendingUploadConfirmName: String? = nil
+    @State private var uploadRunning: Bool = false
+    @State private var uploadResult: String? = nil
 
     /// J-7 (group CRUD) — sheet visibility flags + targets.
     @State private var newGroupSheetVisible: Bool = false
@@ -369,7 +418,10 @@ struct LayoutEditorView: View {
         @Bindable var vm = viewModel
         NavigationSplitView {
             sidebar
-                .navigationSplitViewColumnWidth(min: 240, ideal: 320, max: 420)
+                .navigationSplitViewColumnWidth(
+                    min: 280,
+                    ideal: sidebarStoredWidth,
+                    max: 560)
         } detail: {
             canvas
         }
@@ -626,6 +678,30 @@ struct LayoutEditorView: View {
         } message: {
             Text(saveErrorMessage ?? "")
         }
+        .modifier(ControllerActionAlertModifier(
+            message: $pendingControllerActionAlert))
+        .modifier(ControllerDeleteAlertModifier(
+            pendingName: $pendingDeleteControllerName,
+            onConfirm: { name in handleDeleteController(name) }))
+        .modifier(ControllerDiscoveryModifier(
+            running: $controllerDiscoveryRunning,
+            result: $controllerDiscoveryResult))
+        .modifier(ControllerUploadModifier(
+            pendingConfirmName: $pendingUploadConfirmName,
+            running: $uploadRunning,
+            result: $uploadResult,
+            onConfirm: { name in startControllerUpload(name: name) }))
+        .modifier(DiscoveryMismatchModifier(
+            mismatches: $pendingDiscoveryMismatches,
+            onApply: { choices in applyDiscoveryMismatches(choices) }))
+        .modifier(ControllerVisualizeModifier(
+            payload: $visualizeControllerPayload,
+            viewModel: viewModel,
+            onTapModel: { modelName in
+                visualizeControllerPayload = nil
+                sidebarTab = .models
+                viewModel.layoutSelectSingle(modelName)
+            }))
         // J-3 (touch UX) — delete-model confirmation. Triggered by
         // the trash icon in the inline action bar. The delete is
         // an in-memory mutation through the bridge; user must still
@@ -674,6 +750,17 @@ struct LayoutEditorView: View {
                 sidebarDivider(totalHeight: total)
                 propertyPane
                     .frame(maxHeight: .infinity)
+            }
+            // Persist the actual rendered column width so the
+            // next launch starts wherever the user dragged it.
+            // `NavigationSplitView` doesn't expose its divider
+            // position, so we read it off the sidebar's frame and
+            // gate on a 2pt threshold to avoid thrashing
+            // UserDefaults on every layout pass.
+            .onChange(of: geo.size.width) { _, newWidth in
+                if abs(newWidth - sidebarStoredWidth) > 2 {
+                    sidebarStoredWidth = Double(newWidth)
+                }
             }
         }
     }
@@ -860,7 +947,416 @@ struct LayoutEditorView: View {
                     ContentUnavailableView.search(text: objectFilter)
                 }
             }
+        case .controllers:
+            controllersList
         }
+    }
+
+    @ViewBuilder
+    private var controllersList: some View {
+        List(selection: controllerListBinding) {
+            Section {
+                ForEach(filteredControllerRows.indices, id: \.self) { i in
+                    let row = filteredControllerRows[i]
+                    let name = (row["name"] as? String) ?? "—"
+                    controllerRow(row: row, name: name)
+                        .tag(name)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                pendingDeleteControllerName = name
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                        // J-31.5 — disallow drag-reorder while a
+                        // filter is active. The filter masks the
+                        // real list order; reordering filtered
+                        // items would silently scramble the
+                        // hidden ones.
+                        .moveDisabled(!controllerFilter
+                            .trimmingCharacters(in: .whitespaces)
+                            .isEmpty)
+                }
+                .onMove { source, destination in
+                    handleReorderControllers(source: source,
+                                              destination: destination)
+                }
+            } header: {
+                HStack(spacing: 6) {
+                    Text("Controllers (\(filteredControllerRows.count)\(controllerRows.count != filteredControllerRows.count ? " of \(controllerRows.count)" : ""))")
+                    Spacer()
+                    Menu {
+                        Button {
+                            handleAddController(type: "Ethernet")
+                        } label: {
+                            Label("Ethernet", systemImage: "network")
+                        }
+                        Button {
+                            handleAddController(type: "Serial")
+                        } label: {
+                            Label("Serial", systemImage: "cable.connector")
+                        }
+                        Button {
+                            handleAddController(type: "Null")
+                        } label: {
+                            Label("Null", systemImage: "circle.slash")
+                        }
+                        Divider()
+                        Button {
+                            startControllerDiscovery()
+                        } label: {
+                            Label("Discover…", systemImage: "antenna.radiowaves.left.and.right")
+                        }
+                        .disabled(controllerDiscoveryRunning)
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                    }
+                    .accessibilityLabel("Add controller")
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .overlay {
+            if controllerRows.isEmpty {
+                ContentUnavailableView {
+                    Label("No controllers", systemImage: "network")
+                } description: {
+                    Text("Tap + above to add an Ethernet, Serial, or Null controller.")
+                }
+            } else if filteredControllerRows.isEmpty {
+                ContentUnavailableView.search(text: controllerFilter)
+            }
+        }
+    }
+
+    /// J-31.3 — Add Controller. The bridge auto-assigns a unique
+    /// name; we refresh the cache, select the new controller, and
+    /// mark the show dirty so Save lights up.
+    private func handleAddController(type: String) {
+        guard let newName = viewModel.document.addController(ofType: type) else { return }
+        refreshModelList()
+        NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                        object: nil)
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        // Switch sidebar focus to the new controller so its
+        // detail pane opens immediately for renaming / wiring.
+        viewModel.layoutEditorSelectedController = newName
+    }
+
+    /// J-31.3 — Delete Controller. Confirmed via alert before the
+    /// bridge call. Clears selection if the deleted controller
+    /// was the selected one.
+    private func handleDeleteController(_ name: String) {
+        guard viewModel.document.deleteController(name) else { return }
+        if viewModel.layoutEditorSelectedController == name {
+            viewModel.layoutEditorSelectedController = nil
+        }
+        refreshModelList()
+        NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                        object: nil)
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+    }
+
+    /// J-31.6 — Start a controller upload. Runs input + output
+    /// uploads in sequence; either leg is skipped when the
+    /// fixture's caps don't advertise support, so a controller
+    /// that only supports output upload just gets the output
+    /// pass. Both legs are blocking HTTP calls — `Task.detached`
+    /// keeps the UI responsive and the progress overlay covers
+    /// the wait.
+    private func startControllerUpload(name: String) {
+        guard !uploadRunning else { return }
+        uploadRunning = true
+        let doc = viewModel.document
+        // Read the caps once on the main thread; the detached task
+        // shouldn't touch the bridge property summary while the
+        // bridge is busy running blocking HTTP.
+        let detail = doc.controllerDetail(forName: name) as [String: Any]?
+        let supportsOutput =
+            ((detail?["caps.supportsUpload"] as? NSNumber)?.boolValue) ?? false
+        let supportsInput =
+            ((detail?["caps.supportsInputOnlyUpload"] as? NSNumber)?.boolValue) ?? false
+
+        Task.detached {
+            var sections: [String] = []
+            var anySuccess = false
+            var anyFailure = false
+
+            if supportsInput {
+                let raw = doc.uploadInput(forController: name) as NSDictionary
+                let ok  = (raw["success"] as? NSNumber)?.boolValue ?? false
+                let msg = (raw["message"] as? String) ?? ""
+                let log = (raw["log"]     as? String) ?? ""
+                sections.append("Input upload: \(msg)" +
+                                 (log.isEmpty ? "" : "\n\(log.trimmingCharacters(in: .whitespacesAndNewlines))"))
+                if ok { anySuccess = true } else { anyFailure = true }
+            }
+            if supportsOutput {
+                let raw = doc.uploadOutput(forController: name) as NSDictionary
+                let ok  = (raw["success"] as? NSNumber)?.boolValue ?? false
+                let msg = (raw["message"] as? String) ?? ""
+                let log = (raw["log"]     as? String) ?? ""
+                sections.append("Output upload: \(msg)" +
+                                 (log.isEmpty ? "" : "\n\(log.trimmingCharacters(in: .whitespacesAndNewlines))"))
+                if ok { anySuccess = true } else { anyFailure = true }
+            }
+            if !supportsInput && !supportsOutput {
+                sections.append("This controller's caps don't advertise input or output upload support.")
+            }
+
+            let headline: String
+            if anySuccess && !anyFailure {
+                headline = "Upload complete."
+            } else if anySuccess && anyFailure {
+                headline = "Upload partially complete — some operations failed."
+            } else {
+                headline = "Upload failed."
+            }
+            let full = ([headline] + sections).joined(separator: "\n\n")
+
+            await MainActor.run {
+                uploadRunning = false
+                uploadResult = full
+            }
+        }
+    }
+
+    /// J-31.5 — Reorder controllers via drag-and-drop. SwiftUI's
+    /// `onMove` semantic: `destination` is the index where the
+    /// moved item should land in the new array AS-IF the source
+    /// had already been removed. Translate to the bridge's
+    /// `MoveController(toIndex:)` (final 0-indexed position of
+    /// the moved controller).
+    private func handleReorderControllers(source: IndexSet,
+                                           destination: Int) {
+        guard let from = source.first else { return }
+        guard from >= 0, from < filteredControllerRows.count else { return }
+        let name = (filteredControllerRows[from]["name"] as? String) ?? ""
+        if name.isEmpty { return }
+        // SwiftUI's destination → final-index mapping: when
+        // destination is past the source, subtract 1 because the
+        // source slot is gone after removal.
+        let finalIndex = (destination > from) ? destination - 1 : destination
+        guard viewModel.document.moveController(name,
+                                                  to: Int32(finalIndex)) else {
+            return
+        }
+        refreshModelList()
+        NotificationCenter.default.post(name: .layoutEditorModelMoved,
+                                        object: nil)
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+    }
+
+    /// J-31.4 — Network controller discovery. Runs the synchronous
+    /// bridge sweep on a detached Task so the UI stays responsive
+    /// (typical sweep is 5–10s). Shows a progress overlay while
+    /// running and a result alert on completion.
+    private func startControllerDiscovery() {
+        guard !controllerDiscoveryRunning else { return }
+        controllerDiscoveryRunning = true
+        // `nonisolated(unsafe)` capture of the document is safe
+        // because runControllerDiscovery is documented to run on
+        // the calling thread and touches only OutputManager
+        // members the main thread isn't simultaneously editing
+        // (the sidebar list refresh happens after we hop back).
+        let doc = viewModel.document
+        Task.detached {
+            let raw = doc.runControllerDiscovery() as NSDictionary
+            let added   = (raw["added"]   as? NSNumber)?.intValue ?? 0
+            let already = (raw["already"] as? NSNumber)?.intValue ?? 0
+            let names   = (raw["addedNames"] as? [String]) ?? []
+            // Coerce keys to String — ObjC NSDictionary bridges
+            // to `[AnyHashable: Any]`, the descriptor renderer
+            // needs string keys.
+            let rawMismatches = (raw["mismatches"] as? NSArray) ?? []
+            let mismatches: [[String: Any]] = rawMismatches.compactMap { entry in
+                guard let dict = entry as? NSDictionary else { return nil }
+                var out: [String: Any] = [:]
+                for (k, v) in dict {
+                    if let key = k as? String { out[key] = v }
+                }
+                return out
+            }
+            await MainActor.run {
+                controllerDiscoveryRunning = false
+                refreshModelList()
+                hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+                if added == 0 && already == 0 && mismatches.isEmpty {
+                    controllerDiscoveryResult = "No controllers found. Make sure the iPad is on the same Wi-Fi network as your controllers, then try again."
+                } else if added == 0 && mismatches.isEmpty {
+                    controllerDiscoveryResult = "Discovery complete — all \(already) responding controllers are already in your show."
+                } else {
+                    // If there are conflicts to resolve, present
+                    // the resolution sheet FIRST. The auto-add
+                    // summary is folded into a follow-up alert
+                    // after the user finishes resolving.
+                    if !mismatches.isEmpty {
+                        pendingDiscoveryMismatches = mismatches
+                    } else {
+                        controllerDiscoveryResult =
+                            "Added \(added) controller\(added == 1 ? "" : "s")." +
+                            ((already > 0) ? " \(already) other\(already == 1 ? " was" : "s were") already in the show." : "") +
+                            (names.isEmpty ? "" : "\n\n• " + names.joined(separator: "\n• "))
+                        if let first = names.first {
+                            viewModel.layoutEditorSelectedController = first
+                        }
+                    }
+                    // Stash the auto-add summary so we can append
+                    // it to the mismatch-resolution completion
+                    // alert later.
+                    discoveryAutoAddSummary = (added, already, names)
+                }
+            }
+        }
+    }
+
+    /// J-31.7 — auto-add summary stashed for the post-resolution
+    /// completion alert. Tuple lives at view scope but isn't
+    /// part of @State because it's only used as a transient
+    /// stash across the async boundary.
+    @State private var discoveryAutoAddSummary: (added: Int, already: Int, names: [String]) =
+        (0, 0, [])
+
+    /// J-31.7 — apply the user's mismatch choices in bulk. Each
+    /// entry's `id` matches the descriptor; the bridge applies
+    /// the action and returns NO on failure (e.g. a target
+    /// controller got deleted between discovery and resolve).
+    private func applyDiscoveryMismatches(_ choices: [(descriptor: [String: Any], action: String)]) {
+        var applied = 0
+        var skipped = 0
+        var failed = 0
+        for c in choices {
+            if c.action == "skip" { skipped += 1; continue }
+            if viewModel.document.applyDiscoveryMismatch(c.descriptor, action: c.action) {
+                applied += 1
+            } else {
+                failed += 1
+            }
+        }
+        pendingDiscoveryMismatches = []
+        refreshModelList()
+        hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+        // Build the completion alert: auto-added + resolved.
+        var parts: [String] = []
+        let summary = discoveryAutoAddSummary
+        if summary.added > 0 {
+            parts.append("Auto-added \(summary.added) controller\(summary.added == 1 ? "" : "s").")
+        }
+        if summary.already > 0 {
+            parts.append("\(summary.already) other\(summary.already == 1 ? " was" : "s were") already in the show.")
+        }
+        if applied > 0 {
+            parts.append("Resolved \(applied) mismatch\(applied == 1 ? "" : "es").")
+        }
+        if skipped > 0 {
+            parts.append("Skipped \(skipped).")
+        }
+        if failed > 0 {
+            parts.append("\(failed) mismatch\(failed == 1 ? "" : "es") could not be applied (target may have been edited mid-resolve).")
+        }
+        if !summary.names.isEmpty {
+            parts.append("Added:\n• " + summary.names.joined(separator: "\n• "))
+        }
+        controllerDiscoveryResult = parts.joined(separator: "\n\n")
+        if let first = summary.names.first {
+            viewModel.layoutEditorSelectedController = first
+        }
+        discoveryAutoAddSummary = (0, 0, [])
+    }
+
+    /// One sidebar row per controller. Shows name + a secondary
+    /// line with Type / IP / Vendor / Model so the user can
+    /// identify the fixture without opening the detail pane.
+    private func controllerRow(row: [String: Any], name: String) -> some View {
+        let type   = (row["type"]   as? String) ?? ""
+        let ip     = (row["ip"]     as? String) ?? ""
+        let vendor = (row["vendor"] as? String) ?? ""
+        let model  = (row["model"]  as? String) ?? ""
+        let active = (row["active"] as? String) ?? ""
+        let osf    = ((row["caps.openSourceFirmware"] as? NSNumber)?.boolValue) ?? false
+
+        var secondaryParts: [String] = []
+        if !type.isEmpty   { secondaryParts.append(type) }
+        if !ip.isEmpty     { secondaryParts.append(ip) }
+        if !vendor.isEmpty || !model.isEmpty {
+            let vm = [vendor, model].filter { !$0.isEmpty }.joined(separator: " ")
+            if !vm.isEmpty { secondaryParts.append(vm) }
+        }
+        let secondary = secondaryParts.joined(separator: " · ")
+
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(name)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if osf {
+                    Image(systemName: "checkmark.shield")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                        .help("Open-source firmware — Upload + Visualize supported")
+                }
+                Spacer(minLength: 0)
+                if !active.isEmpty {
+                    Text(active)
+                        .font(.caption2)
+                        .foregroundStyle(active == "Active" ? .green : .secondary)
+                }
+            }
+            if !secondary.isEmpty {
+                Text(secondary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        // J-31 — long-press context menu (Open / Upload /
+        // Visualize). The latter two are gated on OSF caps; Open
+        // is always available since plenty of non-OSF controllers
+        // also expose a web UI at the same IP.
+        .contextMenu {
+            controllerContextMenu(row: row, name: name, osf: osf)
+        }
+    }
+
+    @ViewBuilder
+    private func controllerContextMenu(row: [String: Any], name: String, osf: Bool) -> some View {
+        let ip = (row["ip"] as? String) ?? ""
+        if !ip.isEmpty {
+            Button {
+                if let url = URL(string: "http://\(ip)/") {
+                    UIApplication.shared.open(url)
+                }
+            } label: {
+                Label("Open \(ip)", systemImage: "safari")
+            }
+        }
+        if osf {
+            Button {
+                pendingUploadConfirmName = name
+            } label: {
+                Label("Upload", systemImage: "icloud.and.arrow.up")
+            }
+            Button {
+                visualizeControllerPayload = ControllerVisualizePayload(controllerName: name)
+            } label: {
+                Label("Visualize", systemImage: "rectangle.connected.to.line.below")
+            }
+        }
+        Divider()
+        Button(role: .destructive) {
+            pendingDeleteControllerName = name
+        } label: {
+            Label("Delete Controller", systemImage: "trash")
+        }
+    }
+
+    private var controllerListBinding: Binding<String?> {
+        Binding(
+            get: { viewModel.layoutEditorSelectedController },
+            set: { viewModel.layoutEditorSelectedController = $0 }
+        )
     }
 
     /// Bottom half: scrollable property editor bound to the
@@ -906,6 +1402,8 @@ struct LayoutEditorView: View {
             return viewModel.layoutEditorSelectedGroup.map { "Group: \($0)" } ?? "No group selected"
         case .objects:
             return viewModel.layoutEditorSelectedObject.map { "Object: \($0)" } ?? "No object selected"
+        case .controllers:
+            return viewModel.layoutEditorSelectedController.map { "Controller: \($0)" } ?? "No controller selected"
         }
     }
 
@@ -1124,6 +1622,74 @@ struct LayoutEditorView: View {
                     body: "View objects (meshes, images, gridlines, terrain, rulers) are decorative elements that don't take channels. Tap one to inspect its position and size."
                 )
             }
+        case .controllers:
+            if let name = viewModel.layoutEditorSelectedController,
+               let detail = viewModel.document.controllerDetail(forName: name) as [String: Any]? {
+                let osf = ((detail["caps.openSourceFirmware"] as? NSNumber)?.boolValue) ?? false
+                let ip = (detail["ip"] as? String) ?? ""
+                let httpURL: URL? = ip.isEmpty ? nil : URL(string: "http://\(ip)/")
+                let rawDescriptors = viewModel.document.controllerProperties(forName: name)
+                let descriptors: [[String: Any]] = rawDescriptors.compactMap { entry in
+                    var out: [String: Any] = [:]
+                    for (k, v) in entry {
+                        if let key = k as? String { out[key] = v }
+                    }
+                    return out.isEmpty ? nil : out
+                }
+                LayoutEditorControllerDetailView(
+                    name: name,
+                    descriptors: descriptors,
+                    token: summaryToken,
+                    models: (viewModel.document.modelNames(forController: name) as [String]),
+                    openSourceFirmware: osf,
+                    httpURL: httpURL,
+                    onTapModel: { modelName in
+                        sidebarTab = .models
+                        viewModel.layoutSelectSingle(modelName)
+                    },
+                    onOpenURL: { url in
+                        UIApplication.shared.open(url)
+                    },
+                    onUpload: {
+                        pendingUploadConfirmName = name
+                    },
+                    onVisualize: {
+                        visualizeControllerPayload = ControllerVisualizePayload(controllerName: name)
+                    },
+                    commit: { key, value in
+                        commitControllerProperty(name: name, key: key, value: value)
+                    })
+            } else {
+                emptyPropertyHint(
+                    title: "Pick a controller",
+                    body: "Tap a controller in the list above to see its IP, channel range, and the models assigned to it. Long-press for upload / visualize actions on open-source firmware controllers."
+                )
+            }
+        }
+    }
+
+    /// J-31 — commit a controller property edit. The bridge
+    /// validates (unique name, type matches) and returns NO on
+    /// rejection; on success it marks the show dirty so the Save
+    /// button re-enables.
+    private func commitControllerProperty(name: String, key: String, value: Any) {
+        let ok = viewModel.document.setControllerProperty(key,
+                                                            onController: name,
+                                                            value: value)
+        if ok {
+            summaryToken &+= 1
+            hasUnsavedChanges = viewModel.document.hasUnsavedLayoutChanges()
+            // Name changes have to update the selection so the
+            // detail pane stays anchored on the renamed controller
+            // and the sidebar row reflects the new label.
+            if key == "Name", let newName = value as? String,
+               !newName.isEmpty, newName != name {
+                viewModel.layoutEditorSelectedController = newName
+            }
+            // Vendor / Model / Variant cascade — the bridge auto-
+            // resets the downstream pickers; bumping the controller
+            // row cache surfaces the fresh option lists.
+            refreshModelList()
         }
     }
 
@@ -1221,11 +1787,29 @@ struct LayoutEditorView: View {
         return objectNames.filter { $0.localizedCaseInsensitiveContains(q) }
     }
 
+    /// J-31 — filtered Controllers list. Searches by name +
+    /// vendor + model + IP so power-users can find a fixture by
+    /// any of its identifying fields.
+    private var filteredControllerRows: [[String: Any]] {
+        let q = controllerFilter.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return controllerRows }
+        return controllerRows.filter { row in
+            for key in ["name", "vendor", "model", "ip"] {
+                if let s = row[key] as? String,
+                   s.localizedCaseInsensitiveContains(q) {
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
     private var currentFilterBinding: Binding<String> {
         switch sidebarTab {
-        case .models:  return $modelFilter
-        case .groups:  return $groupFilter
-        case .objects: return $objectFilter
+        case .models:      return $modelFilter
+        case .groups:      return $groupFilter
+        case .objects:     return $objectFilter
+        case .controllers: return $controllerFilter
         }
     }
 
@@ -1699,6 +2283,24 @@ struct LayoutEditorView: View {
         modelNames = viewModel.document.modelsInActiveLayoutGroup()
         groupNames = viewModel.document.modelGroupsInActiveLayoutGroup()
         objectNames = viewModel.document.viewObjectsInActiveLayoutGroup()
+        // J-31 — controllers refresh. The list is small (<100 in
+        // realistic shows) and ObjC bridging is cheap, so reload
+        // unconditionally rather than tracking dirty state.
+        // ObjC bridges `NSArray<NSDictionary*>` as
+        // `[[AnyHashable: Any]]`; coerce keys to String so the
+        // sidebar reads them by literal key.
+        let rawControllers = viewModel.document.controllersListSummary()
+        controllerRows = rawControllers.compactMap { entry in
+            var out: [String: Any] = [:]
+            for (k, v) in entry {
+                if let key = k as? String { out[key] = v }
+            }
+            return out.isEmpty ? nil : out
+        }
+        if let sel = viewModel.layoutEditorSelectedController,
+           !controllerRows.contains(where: { ($0["name"] as? String) == sel }) {
+            viewModel.layoutEditorSelectedController = nil
+        }
         // If the previously-selected model isn't in the new list,
         // clear selection so the side panel doesn't show stale data.
         if let sel = viewModel.layoutEditorSelectedModel,
@@ -6876,6 +7478,304 @@ private struct AddViewObjectSheet: View {
 ///
 /// Factored out as a ViewModifier so LayoutEditorView's body
 /// chain stays under the Swift type-checker's complexity budget.
+/// J-31 — Controllers Upload / Visualize placeholder alert.
+/// Extracted into a modifier so the outer body's modifier chain
+/// stays within Swift's type-checker budget.
+private struct ControllerActionAlertModifier: ViewModifier {
+    @Binding var message: String?
+
+    func body(content: Content) -> some View {
+        content.alert("Controller action",
+                       isPresented: Binding(
+                            get: { message != nil },
+                            set: { if !$0 { message = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(message ?? "")
+        }
+    }
+}
+
+/// J-31.3 — Delete-controller confirmation. Same extraction
+/// pattern as the placeholder alert above; the destructive
+/// action runs the supplied closure with the controller name
+/// before clearing the binding.
+private struct ControllerDeleteAlertModifier: ViewModifier {
+    @Binding var pendingName: String?
+    let onConfirm: (_ name: String) -> Void
+
+    func body(content: Content) -> some View {
+        content.alert("Delete \(pendingName ?? "")?",
+                       isPresented: Binding(
+                            get: { pendingName != nil },
+                            set: { if !$0 { pendingName = nil } })) {
+            Button("Delete", role: .destructive) {
+                if let name = pendingName { onConfirm(name) }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Removes this controller from the show's network configuration. Models assigned to it keep their controller name field but will need re-assignment to render. Undo isn't supported for controller deletion.")
+        }
+    }
+}
+
+/// J-31.6 — Controller-upload flow: confirmation alert → progress
+/// overlay → result alert. All three legs ride in one modifier
+/// so the outer LayoutEditorView body chain stays inside Swift's
+/// type-checker budget.
+private struct ControllerUploadModifier: ViewModifier {
+    @Binding var pendingConfirmName: String?
+    @Binding var running: Bool
+    @Binding var result: String?
+    let onConfirm: (_ name: String) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            // Confirmation alert (pre-upload).
+            .alert("Upload to \(pendingConfirmName ?? "")?",
+                    isPresented: Binding(
+                        get: { pendingConfirmName != nil },
+                        set: { if !$0 { pendingConfirmName = nil } })) {
+                Button("Upload") {
+                    if let name = pendingConfirmName { onConfirm(name) }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("Pushes the show's current model + universe configuration to the controller. Make sure the iPad is on the same network as the controller. The upload typically takes 5–30 seconds and will briefly interrupt any active output.")
+            }
+            // In-flight progress overlay.
+            .overlay {
+                if running {
+                    ZStack {
+                        Color.black.opacity(0.35).ignoresSafeArea()
+                        VStack(spacing: 14) {
+                            ProgressView().controlSize(.large)
+                            Text("Uploading…").font(.headline)
+                            Text("Pushing input + output configuration over HTTP. 5–30 seconds.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 18)
+                        }
+                        .padding(24)
+                        .background(.regularMaterial,
+                                     in: RoundedRectangle(cornerRadius: 14))
+                        .frame(maxWidth: 320)
+                    }
+                    .transition(.opacity)
+                }
+            }
+            // Result alert (post-upload).
+            .alert("Controller Upload",
+                    isPresented: Binding(
+                        get: { result != nil },
+                        set: { if !$0 { result = nil } })) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(result ?? "")
+            }
+    }
+}
+
+/// J-31.7 — Modifier wrapper for the mismatch sheet. Extracted
+/// so the outer body chain stays under the type-checker budget.
+private struct DiscoveryMismatchModifier: ViewModifier {
+    @Binding var mismatches: [[String: Any]]
+    let onApply: (_ choices: [(descriptor: [String: Any], action: String)]) -> Void
+
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: Binding(
+                get: { !mismatches.isEmpty },
+                set: { if !$0 { mismatches = [] } })) {
+            DiscoveryMismatchResolveSheet(
+                mismatches: mismatches,
+                onApply: onApply,
+                onCancel: { mismatches = [] })
+        }
+    }
+}
+
+/// J-31.7 — Discovery mismatch resolution sheet. The user sees
+/// every conflict the discovery sweep found, picks an action
+/// per fixture (defaults to "Update IP" for ip-update conflicts
+/// and "Rename" for rename conflicts so the common case is one
+/// tap), then Apply commits them in bulk. Cancel applies
+/// "skip" to all.
+private struct DiscoveryMismatchResolveSheet: View {
+    let mismatches: [[String: Any]]
+    let onApply: (_ choices: [(descriptor: [String: Any], action: String)]) -> Void
+    let onCancel: () -> Void
+
+    @State private var actions: [String: String] = [:]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section(footer: Text("Discovery found controllers whose name or IP doesn't quite match an existing fixture. Pick what to do with each.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)) {
+                    ForEach(mismatches.indices, id: \.self) { i in
+                        let m = mismatches[i]
+                        mismatchRow(m: m)
+                    }
+                }
+            }
+            .navigationTitle("Resolve \(mismatches.count) Mismatch\(mismatches.count == 1 ? "" : "es")")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Skip All") {
+                        onCancel()
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Apply") {
+                        let choices: [(descriptor: [String: Any], action: String)] =
+                            mismatches.compactMap { m in
+                                guard let id = m["id"] as? String else { return nil }
+                                let action = actions[id] ?? defaultAction(for: m)
+                                return (m, action)
+                            }
+                        onApply(choices)
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .onAppear { seedDefaults() }
+    }
+
+    @ViewBuilder
+    private func mismatchRow(m: [String: Any]) -> some View {
+        let id = (m["id"] as? String) ?? ""
+        let kind = (m["kind"] as? String) ?? ""
+        let existingName = (m["existingName"] as? String) ?? ""
+        let existingIP = (m["existingIP"] as? String) ?? ""
+        VStack(alignment: .leading, spacing: 6) {
+            if kind == "ip-update" {
+                let newIP = (m["discoveredIP"] as? String) ?? ""
+                Text("Existing IP differs")
+                    .font(.subheadline.weight(.semibold))
+                Text("\(existingName) is configured at \(existingIP). A controller with the same name and protocol is now responding at \(newIP).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("", selection: actionBinding(id: id,
+                                                     defaultValue: "update")) {
+                    Text("Update IP to \(newIP)").tag("update")
+                    Text("Add as a new controller").tag("add-new")
+                    Text("Skip").tag("skip")
+                }
+                .pickerStyle(.menu)
+            } else if kind == "rename" {
+                let newName = (m["discoveredName"] as? String) ?? ""
+                Text("Existing name differs")
+                    .font(.subheadline.weight(.semibold))
+                Text("\(existingName) at \(existingIP) is responding as \(newName).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("", selection: actionBinding(id: id,
+                                                     defaultValue: "rename")) {
+                    Text("Rename to \(newName)").tag("rename")
+                    Text("Skip").tag("skip")
+                }
+                .pickerStyle(.menu)
+            } else {
+                Text("Unknown mismatch kind: \(kind)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func defaultAction(for m: [String: Any]) -> String {
+        let kind = (m["kind"] as? String) ?? ""
+        if kind == "ip-update" { return "update" }
+        if kind == "rename"    { return "rename" }
+        return "skip"
+    }
+
+    private func seedDefaults() {
+        for m in mismatches {
+            guard let id = m["id"] as? String else { continue }
+            if actions[id] == nil { actions[id] = defaultAction(for: m) }
+        }
+    }
+
+    private func actionBinding(id: String, defaultValue: String) -> Binding<String> {
+        Binding(
+            get: { actions[id] ?? defaultValue },
+            set: { actions[id] = $0 })
+    }
+}
+
+/// J-31.4 — Discovery progress overlay + result alert. Bundles
+/// both into a single modifier so the outer body chain stays
+/// within Swift's type-checker budget (same pattern as the
+/// other Controllers modifiers above).
+private struct ControllerDiscoveryModifier: ViewModifier {
+    @Binding var running: Bool
+    @Binding var result: String?
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if running {
+                    ZStack {
+                        Color.black.opacity(0.35)
+                            .ignoresSafeArea()
+                        VStack(spacing: 14) {
+                            ProgressView()
+                                .controlSize(.large)
+                            Text("Discovering controllers…")
+                                .font(.headline)
+                            Text("Scanning the local network for FPP, ArtNet, Twinkly, Pixlite, and DDP devices. This usually takes 5–10 seconds.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 18)
+                        }
+                        .padding(24)
+                        .background(.regularMaterial,
+                                     in: RoundedRectangle(cornerRadius: 14))
+                        .frame(maxWidth: 320)
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .alert("Controller Discovery",
+                    isPresented: Binding(
+                        get: { result != nil },
+                        set: { if !$0 { result = nil } })) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(result ?? "")
+            }
+    }
+}
+
+/// J-32.1 — Controllers Visualize sheet wrapped as a modifier so
+/// the outer LayoutEditorView body stays under Swift's type-
+/// checker budget (same pattern as the other Controllers
+/// modifiers above).
+private struct ControllerVisualizeModifier: ViewModifier {
+    @Binding var payload: ControllerVisualizePayload?
+    let viewModel: SequencerViewModel
+    let onTapModel: (String) -> Void
+
+    func body(content: Content) -> some View {
+        content.sheet(item: $payload) { p in
+            ControllerVisualizeView(
+                controllerName: p.controllerName,
+                viewModel: viewModel,
+                onTapModel: onTapModel,
+                onDismiss: { payload = nil })
+        }
+    }
+}
+
 /// J-30 — bundle of two `fileImporter` modifiers (image bitmaps
 /// + DMX `.obj` meshes) so they ride into the LayoutEditorView
 /// body as a single `.modifier(...)`. Keeps the outer chain
@@ -6953,6 +7853,23 @@ private struct SidebarSelectionMutex: ViewModifier {
                     viewModel.terrainEditTarget = nil
                 }
             }
+            .onChange(of: viewModel.layoutEditorSelectedController) { _, newSel in
+                guard newSel != nil else { return }
+                // J-31 — picking a controller clears the other
+                // sidebar selections so the canvas tint reflects
+                // exactly one surface at a time. Mirrors the
+                // group / object cases above.
+                if viewModel.layoutEditorSelectedModel != nil ||
+                   !viewModel.layoutEditorSelection.isEmpty {
+                    viewModel.layoutSelectSingle(nil)
+                }
+                if viewModel.layoutEditorSelectedGroup != nil {
+                    viewModel.layoutEditorSelectedGroup = nil
+                }
+                if viewModel.layoutEditorSelectedObject != nil {
+                    viewModel.layoutEditorSelectedObject = nil
+                }
+            }
             .onChange(of: sidebarTab) { _, newTab in
                 // Explicit tab switch drops the leaving tab's
                 // selection so the canvas tint reflects where the
@@ -6961,18 +7878,28 @@ private struct SidebarSelectionMutex: ViewModifier {
                 case .models:
                     viewModel.layoutEditorSelectedGroup = nil
                     viewModel.layoutEditorSelectedObject = nil
+                    viewModel.layoutEditorSelectedController = nil
                 case .groups:
                     if viewModel.layoutEditorSelectedModel != nil ||
                        !viewModel.layoutEditorSelection.isEmpty {
                         viewModel.layoutSelectSingle(nil)
                     }
                     viewModel.layoutEditorSelectedObject = nil
+                    viewModel.layoutEditorSelectedController = nil
                 case .objects:
                     if viewModel.layoutEditorSelectedModel != nil ||
                        !viewModel.layoutEditorSelection.isEmpty {
                         viewModel.layoutSelectSingle(nil)
                     }
                     viewModel.layoutEditorSelectedGroup = nil
+                    viewModel.layoutEditorSelectedController = nil
+                case .controllers:
+                    if viewModel.layoutEditorSelectedModel != nil ||
+                       !viewModel.layoutEditorSelection.isEmpty {
+                        viewModel.layoutSelectSingle(nil)
+                    }
+                    viewModel.layoutEditorSelectedGroup = nil
+                    viewModel.layoutEditorSelectedObject = nil
                 }
                 // J-20.6 — mirror tab state to the view model so
                 // the canvas can gate VO picks (don't snag the
@@ -7845,6 +8772,230 @@ private struct LayoutEditorBackgroundPropertiesView: View {
 /// visible) → per-type → Appearance → Dimensions → Size/Location.
 /// Per-type section opens by default since that's the unique
 /// surface for this object.
+/// J-31 — Controllers tab detail pane. Now descriptor-driven and
+/// fully editable: name, description, active state, vendor /
+/// model / variant cascade, all the desktop's base toggles
+/// (AutoLayout / AutoUpload / AutoSize / FullxLightsControl /
+/// SuppressDuplicates / Monitor / DefaultBrightness /
+/// DefaultGamma), plus Ethernet-specific (Multicast / IP /
+/// FPPProxy / Protocol / Priority / Managed read-only) and
+/// Null-specific (Channels). Renders descriptors via the same
+/// kind-dispatch pattern the model per-type panel uses.
+private struct LayoutEditorControllerDetailView: View {
+    let name: String
+    let descriptors: [[String: Any]]
+    let token: Int
+    let models: [String]
+    let openSourceFirmware: Bool
+    let httpURL: URL?
+    let onTapModel: (String) -> Void
+    let onOpenURL: (URL) -> Void
+    let onUpload: () -> Void
+    let onVisualize: () -> Void
+    let commit: (_ key: String, _ value: Any) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text(name)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if openSourceFirmware {
+                    Image(systemName: "checkmark.shield")
+                        .foregroundStyle(.green)
+                        .font(.caption)
+                }
+                Spacer()
+            }
+
+            HStack(spacing: 10) {
+                if let url = httpURL {
+                    Button {
+                        onOpenURL(url)
+                    } label: {
+                        Label("Open", systemImage: "safari")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                if openSourceFirmware {
+                    Button {
+                        onUpload()
+                    } label: {
+                        Label("Upload", systemImage: "icloud.and.arrow.up")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    Button {
+                        onVisualize()
+                    } label: {
+                        Label("Visualize",
+                               systemImage: "rectangle.connected.to.line.below")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+
+            Divider()
+
+            ForEach(Array(descriptors.enumerated()), id: \.offset) { _, d in
+                ControllerDescriptorRow(
+                    descriptor: d,
+                    namePrefix: name,
+                    token: token,
+                    commit: commit)
+            }
+
+            Divider()
+
+            HStack {
+                Text("Models")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(models.count)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if models.isEmpty {
+                Text("No models are assigned to this controller.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(models, id: \.self) { m in
+                    Button {
+                        onTapModel(m)
+                    } label: {
+                        HStack {
+                            Image(systemName: "cube")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                            Text(m)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundStyle(.secondary)
+                                .font(.caption2)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+}
+
+/// J-31 — render one controller-property descriptor. Mirrors
+/// `LayoutEditorPropertiesView.typeDescriptorRow` but lives at
+/// module scope so the Controllers tab can reuse it without
+/// piping closures through the inner view.
+private struct ControllerDescriptorRow: View {
+    let descriptor: [String: Any]
+    let namePrefix: String
+    let token: Int
+    let commit: (_ key: String, _ value: Any) -> Void
+
+    var body: some View {
+        let key = descriptor["key"] as? String ?? ""
+        let label = descriptor["label"] as? String ?? key
+        let kind = descriptor["kind"] as? String ?? ""
+        let enabled = (descriptor["enabled"] as? Bool) ?? true
+        if kind == "header" {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+        } else {
+            HStack(alignment: .firstTextBaseline) {
+                Text(label)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 130, alignment: .leading)
+                Spacer(minLength: 8)
+                control(kind: kind, key: key)
+                    .disabled(!enabled)
+                    .opacity(enabled ? 1.0 : 0.5)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func control(kind: String, key: String) -> some View {
+        switch kind {
+        case "int":
+            let v = (descriptor["value"] as? NSNumber)?.doubleValue ?? 0
+            let minV = (descriptor["min"] as? NSNumber)?.doubleValue
+            let maxV = (descriptor["max"] as? NSNumber)?.doubleValue
+            let lo = Int((minV ?? 0).rounded())
+            let hi = Int((maxV ?? Double(Int32.max)).rounded())
+            LayoutEditorIntSpin(
+                id: "\(namePrefix).ctrl.\(key).\(token)",
+                initial: Int(v.rounded()),
+                range: lo...hi,
+                commit: { commit(key, NSNumber(value: $0)) })
+                .frame(maxWidth: 150, alignment: .trailing)
+        case "double":
+            let v = (descriptor["value"] as? NSNumber)?.doubleValue ?? 0
+            let minV = (descriptor["min"] as? NSNumber)?.doubleValue ?? 0
+            let maxV = (descriptor["max"] as? NSNumber)?.doubleValue ?? 0
+            let stepV = (descriptor["step"] as? NSNumber)?.doubleValue ?? 0.1
+            let precision = (descriptor["precision"] as? NSNumber)?.intValue ?? 2
+            LayoutEditorDoubleSpin(
+                id: "\(namePrefix).ctrl.\(key).\(token)",
+                initial: v, range: minV...maxV, step: stepV, precision: precision,
+                commit: { commit(key, NSNumber(value: $0)) })
+                .frame(maxWidth: 160, alignment: .trailing)
+        case "bool":
+            let v = (descriptor["value"] as? Bool) ?? false
+            Toggle("", isOn: Binding(
+                get: { v },
+                set: { commit(key, NSNumber(value: $0)) }))
+                .labelsHidden()
+                .controlSize(.mini)
+        case "enum":
+            let idx = (descriptor["value"] as? NSNumber)?.intValue ?? 0
+            let opts = (descriptor["options"] as? [String]) ?? []
+            Menu {
+                ForEach(Array(opts.enumerated()), id: \.offset) { i, label in
+                    Button {
+                        commit(key, NSNumber(value: i))
+                    } label: {
+                        HStack {
+                            Text(label)
+                            if i == idx {
+                                Spacer()
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Text(idx >= 0 && idx < opts.count ? opts[idx] : "—")
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 200, alignment: .trailing)
+            }
+            .menuStyle(.button)
+            .controlSize(.mini)
+        case "string":
+            let v = descriptor["value"] as? String ?? ""
+            LayoutEditorStringField(
+                id: "\(namePrefix).ctrl.\(key).\(token)",
+                initial: v,
+                commit: { commit(key, $0 as NSString) })
+                .frame(maxWidth: 200, alignment: .trailing)
+        default:
+            Text("?").foregroundStyle(.tertiary)
+        }
+    }
+}
+
 private struct LayoutEditorObjectPropertiesView: View {
     @Environment(SequencerViewModel.self) var viewModel
     let objectName: String

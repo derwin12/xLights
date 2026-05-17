@@ -483,8 +483,15 @@ public:
                !_deletedViewObjects.empty() ||
                !_renamedGroups.empty() ||
                !_renamedViewObjects.empty() ||
-               !_renamedModels.empty();
+               !_renamedModels.empty() ||
+               _controllersDirty;
     }
+    // J-31 — Controllers tab edits live in xlights_networks.xml,
+    // not rgbeffects.xml. Track them with a single flag (no
+    // per-controller dirty granularity needed today —
+    // `OutputManager::Save()` rewrites the entire networks file).
+    void MarkControllersDirty() { _controllersDirty = true; }
+    bool AreControllersDirty() const { return _controllersDirty; }
     bool SaveLayoutChanges();
     // Clear the dirty set without writing to disk — used after a
     // Discard Changes that has rolled back every in-memory edit
@@ -502,6 +509,7 @@ public:
         _renamedGroups.clear();
         _renamedViewObjects.clear();
         _renamedModels.clear();
+        _controllersDirty = false;
     }
 
     // Phase J-2 — layout undo. Snapshot the common-properties
@@ -658,6 +666,11 @@ private:
     // "Default" means the top-level `<settings>` element;
     // anything else maps into `<layoutGroups>`.
     std::set<std::string> _dirtyBackgroundGroups;
+
+    // J-31 — Controllers tab edit tracking. Single coarse flag —
+    // `OutputManager::Save()` rewrites the entire networks file
+    // so per-controller granularity buys nothing.
+    bool _controllersDirty = false;
 
     // J-2 — undo stack for layout edits. Bounded to 100 entries.
     std::deque<LayoutUndoEntry> _layoutUndoStack;

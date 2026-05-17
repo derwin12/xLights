@@ -100,6 +100,14 @@ NS_ASSUME_NONNULL_BEGIN
 // natural geometric extent). Empty / nil clears.
 - (void)setSelectedGroup:(nullable NSString*)name;
 
+// Phase J-31 — Controllers tab sidebar sync. Mirrors
+// `setSelectedGroup:` but matches by each model's
+// `GetControllerName()`. When set, every model assigned to the
+// named controller renders in the group-member tint so the user
+// sees which models live on the selected controller. Empty /
+// nil clears.
+- (void)setSelectedController:(nullable NSString*)name;
+
 // Phase J-6 (sidebar canvas sync) — ViewObject selection. View
 // objects (Mesh / Image / Gridlines / Terrain / Ruler) aren't
 // Models, so they need their own selection slot. When set, the

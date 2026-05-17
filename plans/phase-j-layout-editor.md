@@ -376,6 +376,588 @@ work. Model rename and copy/paste / reset menus are J-3+ as well.
   on `SequencerViewModel`). Per-op (drag = single undo entry,
   recorded on touch-down state).
 
+### J-31 — Controllers tab in Layout Editor ✓ 2026-05-16
+
+User-requested addition once J-30 closed out. Instead of a
+separate top-level Controllers tab (which would live in the
+`future-controllers-tab.md` plan), the iPad gets a 4th tab on
+the Layout Editor sidebar (Models / Groups / Objects /
+**Controllers**). Tapping a controller shows its detail in the
+property pane and tints every model assigned to it on the
+canvas. Long-press surfaces Open / Upload / Visualize actions.
+
+**Bridge (`XLSequenceDocument.{h,mm}`):**
+- `controllersListSummary` — NSArray of NSDictionary, one per
+  configured controller (canonical column data: name, type, IP,
+  universes, channels, vendor, model, variant, active state,
+  autoLayout, autoSize, description) plus
+  `caps.openSourceFirmware` boolean.
+- `controllerDetailForName:` — same shape + `longDescription`,
+  `pingDescription`, `url` (HTTP) so the detail pane can
+  surface Open directly.
+- `modelNamesForController:` — assigned models, used both by
+  the detail pane's member list and (indirectly, via the
+  Metal-bridge tint) by the canvas highlight pipeline.
+
+**Metal bridge (`XLMetalBridge.{h,mm}`):**
+- `setSelectedController:` mirrors `setSelectedGroup:`. Selected
+  controller's models ride the same `selectedGroupMembers` tint
+  bucket in `drawModelsForDocument`, so a single rule handles
+  both surfaces. Empty / nil clears.
+
+**SwiftUI (`LayoutEditorView.swift`, `PreviewPaneView.swift`):**
+- New `controllers` case on `LayoutSidebarTab` + new
+  `viewModel.layoutEditorSelectedController` (mutually exclusive
+  with other sidebar selections via `SidebarSelectionMutex`).
+- Sidebar row shows name + secondary line (Type · IP · Vendor
+  Model), an active-state pill, and a green `checkmark.shield`
+  badge when the controller has open-source firmware caps so
+  Upload-/Visualize-eligible fixtures are recognisable at a
+  glance.
+- `LayoutEditorControllerDetailView` renders the read-only
+  property grid + member-model list (tapping a member jumps
+  back to the Models tab + selects).
+- Long-press → context menu with Open `http://<ip>/`, Upload,
+  Visualize. Upload + Visualize are gated on the OSF caps
+  flag; non-OSF controllers show a small explanatory caption
+  instead. Open + Upload + Visualize also surface as buttons
+  in the detail pane so trackpad / Pencil users can reach
+  them without the long-press gesture.
+- Upload + Visualize fire a placeholder alert today
+  (`ControllerActionAlertModifier`); the actual upload /
+  visualize flows are queued as follow-up work.
+- `PreviewPaneView` syncs the controller selection through
+  `bridge.setSelectedController(...)` on every render pass so
+  the canvas tint stays current.
+
+**Why on the Layout panel:** controllers and models are the
+same data graph — a model's `controllerName` ties them
+together. Surfacing controllers on a separate top-level tab
+forces context-switching between panels to figure out
+"what's on this controller?". Keeping them on the Layout
+sidebar means selection-based highlighting is a free byproduct
+of the existing group / object tint pipeline.
+
+**J-31.1 Editable controller properties ✓ 2026-05-16:**
+Detail pane is now descriptor-driven and fully editable.
+Bridge surface mirrors desktop's `ControllerPropertyAdapter`
+hierarchy (Base + Ethernet + Null + ControllerCaps extras).
+Serial-specific properties (Port / Speed / I2C / SPI / Prefix
+/ Postfix) deferred to a follow-up — the sub-protocol switches
+need their own UX pass.
+- **Bridge** (`XLSequenceDocument.{h,mm}`):
+  - `controllerPropertiesForName:` emits the descriptor stream
+    (same `kind` shape as model per-type descriptors: int /
+    double / bool / enum / string / header). Includes
+    Vendor / Model / Variant cascade via
+    `ControllerCaps::GetVendors / GetModels / GetVariants` and
+    a `ControllerExtra.<name>` tail for caps extras.
+  - `setControllerProperty:onController:value:` commits with
+    validation (unique name, type checks) and returns BOOL.
+    Vendor change resets Model + Variant per desktop's cascade
+    rules; Model change resets Variant.
+  - Marks `iPadRenderContext._controllersDirty` on success so
+    the Save button enables.
+- **Render context** (`iPadRenderContext.{h,cpp}`):
+  - New `_controllersDirty` flag + `MarkControllersDirty()` /
+    `AreControllersDirty()` accessors.
+  - `HasDirtyLayoutModels()` and `ClearDirtyLayoutModels()`
+    extended to include the flag.
+  - `SaveLayoutChanges()` now calls `_outputManager.Save()`
+    first when controllers are dirty, then proceeds to the
+    rgbeffects.xml save as before.
+- **SwiftUI** (`LayoutEditorView.swift`):
+  - `LayoutEditorControllerDetailView` now takes the
+    descriptor list + a commit closure + the open-source
+    firmware flag and HTTP URL (for the Open button).
+  - New `ControllerDescriptorRow` renders each descriptor
+    using the same widget set the model per-type panel uses
+    (`LayoutEditorIntSpin` / `LayoutEditorDoubleSpin` / Toggle
+    / Menu / `LayoutEditorStringField`).
+  - `commitControllerProperty` routes the edit through the
+    bridge, bumps the summary token to re-read descriptors,
+    re-anchors the selection to the renamed controller after
+    a Name commit, and refreshes the controller row cache
+    after Vendor / Model cascade resets.
+
+**J-31.2 Serial controller properties ✓ 2026-05-16:**
+ControllerSerial gets the full per-protocol field set, split
+along desktop's FPP / non-FPP fork.
+
+- **FPP-based serial** (`ControllerCaps::GetModel() == "FPP"`):
+  IP + FPP Proxy + Protocol + Port (enum: ttyS0–5, ttyUSB0–5,
+  ttyACM0–5, ttyAMA0, i2c-1, spidev0.0, spidev0.1). The
+  serial port string is composite ("`<ip>:<port>`"); the
+  bridge splits it for display and recomposes on commit, so
+  editing IP and Port independently preserves the other half.
+  - Port prefix `tty*` + non-DMX protocols → Speed enum
+    (baud rates from `SerialOutput::GetPossibleBaudRates()`).
+  - Port prefix `i2c*` → I2C Device enum (`0x00`..`0x7F`).
+    Stored in `_speed` per desktop convention.
+  - Port prefix `spidev*` → SPI Speed (kHz) integer.
+- **Non-FPP serial**: system-discovered Port enum (or
+  freeform text when the host's `GetPossibleSerialPorts()`
+  returns nothing — iPads don't have hardware serial), plus
+  Protocol + Speed. Speed picker is disabled when the
+  protocol's output reports `!AllowsBaudRateSetting()`,
+  matching desktop's grey-out + tooltip.
+- **Generic Serial protocol**: Prefix + Postfix strings
+  appear.
+- **Channels** spinner gated on output type (Channel-count
+  row hidden for `OUTPUT_LOR_OPT`) and read-only when
+  AutoSize is on. Max clamped via
+  `SerialOutput::GetMaxChannels()` ∩
+  `ControllerCaps::GetMaxSerialPortChannels()`.
+- Shared `IP` / `FPPProxy` / `Protocol` setter keys now
+  dispatch on the concrete controller type (Ethernet first,
+  then Serial) so the same descriptor key works on either.
+
+**J-31.3 Add / Delete Controller ✓ 2026-05-16:**
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`):
+  - `addControllerOfType:` accepts `"Ethernet"` / `"Serial"` /
+    `"Null"` and mirrors desktop's three
+    `OnButtonAddController…Click` handlers — instantiate via
+    the matching subclass ctor, `OutputManager::AddController`
+    (which auto-uniquifies the name), mark
+    `_controllersDirty`, return the new name.
+  - `deleteController:` looks up by name, calls
+    `OutputManager::DeleteController`, marks dirty. Returns
+    NO when the name doesn't exist.
+
+- **SwiftUI** (`LayoutEditorView.swift`):
+  - Controllers sidebar header gets a `+` menu with three
+    items (Ethernet / Serial / Null icons). Tapping creates
+    the controller, refreshes the row cache, and selects
+    the new row so its detail pane opens immediately for
+    renaming + wiring.
+  - Delete reachable two ways: swipe-trailing on the sidebar
+    row (matches the existing Group / Object pattern) and a
+    "Delete Controller…" entry on the long-press menu and
+    detail pane.
+  - Confirmation alert is extracted into a new
+    `ControllerDeleteAlertModifier` so the outer body's
+    chain stays under Swift's type-checker budget (same
+    extraction pattern as `ControllerActionAlertModifier` and
+    `PerTypeFilePickers`).
+
+**J-31.4 Network controller discovery ✓ 2026-05-16:**
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`): `runControllerDiscovery`
+  constructs a `Discovery` instance with a default no-op
+  `DiscoveryDelegate`, calls the five `PrepareDiscovery` hooks
+  (FPP / ArtNet / Twinkly / Pixlite16 / DDP) the desktop's
+  `PrepareAllControllerDiscovery` does, runs `Discover()`
+  synchronously, then walks results and adds any whose IP
+  isn't already in the OutputManager. Each new controller is
+  uniquified (`EnsureUniqueId` + `EnsureUniqueName`); FPP-class
+  fixtures default to "xLights Only" + Vendor = "FPP" so they
+  don't accidentally start outputting before the user
+  configures them, matching desktop behaviour at
+  `TabSetup.cpp:1526`. Returns
+  `{"added": N, "already": M, "addedNames": [...]}`.
+- **Deferred**: the desktop's mismatch-resolution flow (when a
+  discovered controller has the same name but a different IP
+  than an existing one) requires per-fixture confirm dialogs.
+  Those aren't a single background sweep — they need their own
+  UX iteration. The iPad's first cut adds only the
+  no-conflict hits and reports `already` for matches.
+- **SwiftUI** (`LayoutEditorView.swift`): new "Discover…" item
+  on the `+` menu beneath an enabled-state divider. Tapping
+  spawns a `Task.detached` that calls the bridge sweep,
+  shows a `ControllerDiscoveryModifier` progress overlay
+  (dimmed background + `ProgressView` + "5–10 seconds" hint)
+  while running, and on completion surfaces a result alert
+  ("No controllers found" / "Added N controllers…" / "all
+  already in your show"). First newly-added controller becomes
+  the sidebar selection so the user can immediately rename or
+  wire it.
+
+**J-31.5 Controller reorder ✓ 2026-05-16:**
+
+Controllers in `OutputManager`'s list have a meaningful order:
+auto-assigned start channels chain from the first to the last,
+so reordering changes the channel layout. Drag-to-reorder on
+the sidebar makes this directly editable on iPad.
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`): `moveController:
+  toIndex:` validates name + range, calls
+  `OutputManager::MoveController(c, destIndex)` (0-indexed
+  destination matching desktop's API), marks
+  `_controllersDirty`.
+- **SwiftUI** (`LayoutEditorView.swift`):
+  - `.onMove` on the Controllers ForEach. Translates SwiftUI's
+    "destination is the index AFTER source removal" semantic
+    into the bridge's "final 0-indexed position of the moved
+    item" — subtract 1 from destination when moving downward.
+  - Reorder uses iPadOS's implicit long-press-and-drag
+    gesture — no EditMode toggle, no visible drag handles.
+    Long-press without movement still fires the row's
+    context menu; long-press + horizontal/vertical movement
+    begins the reorder. Matches Files / Reminders / Numbers.
+    (Earlier revision had an `arrow.up.arrow.down` toggle
+    that flipped EditMode; user pointed out drag-reorder
+    already worked without it, and EditMode also disables
+    tap-to-select, so the toggle was redundant + harmful —
+    stripped.)
+  - Reorder is gated when a sidebar filter is active via
+    `.moveDisabled(...)` on the rows: moving filtered items
+    would silently scramble the hidden ones.
+
+**J-31.6 Controller upload ✓ 2026-05-16:**
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`):
+  - `uploadOutputForController:` and
+    `uploadInputForController:` each mirror desktop's
+    `xLightsFrame::UploadOutputToController` /
+    `UploadInputToController`. Both:
+    - Look up the controller's `ControllerCaps` and refuse
+      when the caps don't advertise upload support.
+    - Refuse when the IP is empty or `MULTICAST`.
+    - Call `ModelManager::RecalcStartChannels()` so the
+      upload reflects current model assignments (same
+      `RecalcModels` step the desktop does pre-upload).
+    - Construct a `BaseController` subclass via
+      `BaseController::CreateBaseController(controller, ip)`,
+      check `IsConnected()`, then call `SetOutputs` (output
+      leg) or `SetInputUniverses` (input leg) with an iPad-
+      specific `UICallbacks` impl.
+    - Return `{success, message, log}`.
+  - New private C++ class `iPadUploadCallbacks` implements
+    `UICallbacks`. Default-yes for confirmation prompts (the
+    user already authorized by tapping Upload), defensive
+    stubs for file / directory / number prompts (not
+    reachable from the FPP / WLED / ESPixelStick code paths
+    we support today), and concatenates progress messages
+    into a `captured` log string the bridge returns to Swift.
+  - `BuildControllerSummary` now also exposes
+    `caps.supportsUpload` and `caps.supportsInputOnlyUpload`
+    so SwiftUI can pick the right buttons + skip non-
+    supported legs.
+
+- **SwiftUI** (`LayoutEditorView.swift`):
+  - **Single "Upload…" button** on both the sidebar long-
+    press menu and the detail-pane action row (user
+    feedback: separate Input / Output buttons annoyed
+    users). Tapping pre-confirms via an alert that names
+    the controller, then runs **both** legs sequentially in
+    a `Task.detached`. Either leg is skipped when the
+    fixture's caps don't advertise that capability — a
+    controller that only supports output upload just gets
+    the output pass.
+  - `ControllerUploadModifier` bundles the confirmation
+    alert + the in-flight progress overlay (dim background,
+    `ProgressView`, "5–30 seconds" hint) + the result alert
+    into a single modifier so the outer body chain stays
+    inside Swift's type-checker budget.
+  - Result alert shows per-leg success / failure plus any
+    log output the uploaders captured along the way (FPP
+    instances in particular emit a lot of progress text).
+
+**J-31.7 Discovery mismatch resolution ✓ 2026-05-16:**
+
+The discovery sweep can find controllers that almost match
+an existing fixture but differ in IP or name. Desktop fires a
+modal confirm dialog per conflict. The iPad takes a bulk-
+resolution approach: collect every conflict into a list,
+present them in a single sheet, let the user pick an action
+per fixture, then apply them all.
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`):
+  - `runControllerDiscovery` now classifies each result:
+    auto-add (no conflict), already-known (exact IP + name
+    match), or **mismatch** (one of two kinds — `ip-update`
+    when name+protocol match but IP differs and the existing
+    IP isn't a hostname; `rename` when IP matches but name
+    differs).
+  - Each mismatch is captured as a self-contained NSDictionary
+    with everything needed to resolve it (`existingName`,
+    `existingIP`, `discoveredIP` / `discoveredName`, plus
+    `protocol`/`vendor`/`model`/`variant` for the "add new"
+    branch). No bridge-side state — the sheet hands back the
+    same dict.
+  - `applyDiscoveryMismatch:action:` takes the descriptor +
+    action (`"update"`, `"add-new"`, `"rename"`, `"skip"`).
+    For `rename`, also rewrites every model's
+    `controllerName` so existing assignments stay valid
+    (mirrors desktop's `renames` map walk in
+    `TabSetup.cpp:1602`).
+- **SwiftUI** (`LayoutEditorView.swift`):
+  - `DiscoveryMismatchResolveSheet` lists every mismatch with
+    a default action pre-selected (Update IP / Rename) plus
+    Add New / Skip alternates. Apply commits the user's
+    choices in bulk via the bridge.
+  - Bundled into `DiscoveryMismatchModifier` so the body
+    chain stays in budget.
+  - Discovery completion now waits on mismatches before
+    showing the result alert; the alert merges auto-add
+    counts with resolution outcomes ("Auto-added 2…
+    Resolved 1 mismatch… Skipped 1.").
+
+**J-31.8 Start-channel recalc on mutation ✓ 2026-05-16:**
+
+Desktop fires `WORK_CALCULATE_START_CHANNELS` via the
+`OutputModelManager` work queue after every model or controller
+mutation that can shift channel ranges. iPad has no work queue,
+so every bridge mutator that affects channels has to call
+`ModelManager::RecalcStartChannels()` inline. The cost is one
+walk of the model graph (cheap, idempotent), so the bridge
+calls it at the end of each mutating path.
+
+- **`XLSequenceDocument.mm`** — private helper
+  `recalcModelStartChannels` wraps the call. Invoked from:
+  - Controller mutations: `moveController:toIndex:` (reorder),
+    `addControllerOfType:`, `deleteController:`,
+    `setControllerProperty:onController:value:` (any successful
+    change), `applyDiscoveryMismatch:action:` (all success
+    branches).
+  - Model mutations: `setLayoutModelProperty:` (after any
+    successful change — covers `modelStartChannel`,
+    `controllerName`, `stringType`, `active`, dimension /
+    string-count edits, `cc.*` connection fields, etc),
+    `deleteModel:`, `renameModel:to:` (model chain references
+    re-resolve), `deleteVertexAtIndex:`, `insertVertexInSegment:`,
+    `setCustomModelData:width:height:depth:locations:`.
+- **`XLMetalBridge.mm`** — geometry-side mutators that affect
+  channel counts call `rctx->GetModelManager().RecalcStartChannels()`
+  directly:
+  - `createModelOfType:` (new model gets channels assigned).
+  - `importXmodelFromPath:` (after the import loop completes
+    so multi-model imports run one recalc).
+  - `appendVertexToPolyline:` (polyline grows nodes per
+    segment → channel count changes).
+- Geometry-only mutations that DON'T change channel counts
+  (handle drags via `endHandleDragForDocument:`, vertex moves,
+  group property edits) skip the recalc.
+- Swift side: `handleReorderControllers`,
+  `handleAddController`, and `handleDeleteController` post
+  `.layoutEditorModelMoved` after the bridge call so the canvas
+  repaints with the new channel-derived label / tint state.
+
+A real work-queue equivalent (batched dirty flag + flush) was
+considered but skipped: a single user-driven mutation calls
+recalc once, so the cost is the same; batching only helps for
+bulk paths (undo replay, multi-model import) where the cost is
+still well under perceptual threshold for realistic show
+sizes. Revisit if undo replay or import-many becomes
+noticeably laggy.
+
+**Resize / sidebar-stretch bug ✓ 2026-05-16:**
+`MTKView` configured with `isPaused = true` +
+`enableSetNeedsDisplay = true` only renders on explicit
+requests. The Layout / House / Model preview panes pushed the
+new drawable size to the bridge in `drawableSizeWillChange`
+but didn't request a redraw, so resizing the sidebar (or
+hide/show) left the previous render stretched to the new
+bounds. The camera projection used for hit-testing then
+disagreed with what the user was seeing; taps landed at the
+wrong cells until something else triggered a redraw. Fix:
+add an explicit `view.setNeedsDisplay()` in the delegate's
+`drawableSizeWillChange` so the resize kicks an immediate
+re-render.
+
+### J-32 — Controllers Visualize (wiring view) ✓ 2026-05-16
+
+Desktop's `ControllerModelDialog` (4800 lines of wxDialog) shows
+the per-port wiring graph for a controller: which models are on
+which pixel/serial/PWM/virtual-matrix port, smart-remote
+assignments, channel ranges, and per-port property edits
+(brightness / gamma / colour order / group count / nulls).
+It's also where models get drag-dropped onto ports.
+
+iPad parity is broken into seven sub-phases so each lands
+independently. The underlying data is already wx-free —
+`UDController` (`src-core/controllers/`) walks the show and
+produces the port-by-port tree, and `UDController::Check`
+provides the validity decisions. The desktop dialog's custom
+`BaseCMObject` rendering is wx-only; SwiftUI rebuilds the view
+with a sectioned list.
+
+**J-32.1 Read-only wiring sheet ✓ 2026-05-16:**
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`):
+  - `wiringForController:` constructs a `UDController` for the
+    named controller and serializes its port tree into a
+    nested NSDictionary. Iterates pixel → serial → PWM →
+    virtual matrix → LED panel matrix in 1-based port order
+    (the desktop's display order). Per-port entry carries
+    kind, port number, display label, protocol, validity +
+    invalid reason, smart-remote count, channel range, pixel
+    count, and a model list. Per-model entry carries name,
+    string index (for multi-string models), absolute start +
+    end channels, channel count, smart-remote 1-based index +
+    its letter ("A".."P"), smart-remote type, universe info,
+    per-model protocol override, and the model-level
+    `UDControllerPortModel::Check` validity result.
+  - "No connection" bucket lists models that claim the
+    controller via `controllerName` but aren't on a port —
+    each entry uses `Model::GetFirstChannel` / `GetLastChannel`
+    as a fallback channel range since there's no `UDControllerPortModel`
+    to ask.
+  - Top-level dict carries controller identity, overall
+    `UDController::IsValid()` + check message, and totals
+    (model count, channel count, port counts).
+- **SwiftUI** (`ControllerVisualizeView.swift`, new file):
+  - `ControllerVisualizePayload` (Identifiable wrapper)
+    drives `.sheet(item:)` from the long-press menu and the
+    detail-pane Visualize button.
+  - Sheet is a NavigationStack with a sectioned `List`:
+    - Controller summary section (IP, vendor / model /
+      variant, totals, top-level error message if any).
+    - One section per port. Header shows port name +
+      protocol pill + channel range. Footer surfaces the
+      `UDControllerPort::Check` reason when invalid.
+    - Each model row shows a smart-remote badge (letter "A"
+      bubble) or a plain dot for "no SR", the model name,
+      a multi-string sub-label when `string > 0`, an
+      invalid-reason caption when present, and the channel
+      range + count on the right.
+    - "No Connection" section at the bottom when non-empty.
+  - Tap a model row → dismiss sheet, switch to Models tab,
+    `viewModel.layoutSelectSingle(modelName)` selects it on
+    the canvas. Mirrors the existing "Tap to jump from
+    controller models list" affordance.
+- **Wire-up** (`LayoutEditorView.swift`):
+  - New `@State visualizeControllerPayload` replaces the
+    placeholder alert at both call sites (long-press menu +
+    `LayoutEditorControllerDetailView`'s Visualize button).
+  - `ControllerVisualizeModifier` (private ViewModifier) hosts
+    the `.sheet(item:)` so the outer body chain stays in
+    type-checker budget (same pattern as the other
+    Controllers modifiers).
+
+**J-32.2 Per-port protocol picker ✓ 2026-05-16:**
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`):
+  - `availableProtocolsForController:kind:` returns caps-
+    filtered pixel / serial protocols (falls back to the
+    full `GetAllPixelTypes` / `GetAllSerialTypes` catalogue
+    when caps are missing).
+  - `setPortProtocolOnController:kind:port:protocol:` walks
+    every model on the port (or every port of that kind when
+    `caps->SupportsMultipleSimultaneousOutputProtocols()`
+    is false — Falcon F16 et al.) and writes the new
+    protocol via `Model::SetControllerProtocol`. Refuses
+    protocols outside the caps-filtered list. Recalcs start
+    channels.
+- **SwiftUI**: Port header becomes a Menu when the port kind
+  is pixel/serial. "Set Protocol…" opens a
+  `.confirmationDialog` with the caps-filtered protocol list;
+  selection fires the bridge call and bumps the load token.
+
+**J-32.3 Per-model controller-property edits ✓ 2026-05-16:**
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`):
+  - `controllerConnectionForModel:` returns the model's
+    ControllerConnection state in the shape the Visualize
+    edit sheet consumes: `*Active` flags + values for
+    Brightness / Gamma / Color Order / Group Count / Start
+    Nulls / End Nulls plus the DMX Channel int for serial
+    ports. Color order also returns its options list +
+    current 0-based index.
+  - Writes route through the existing `setLayoutModelProperty:
+    cc.*` keys — no new setters needed.
+- **SwiftUI** (`ModelControllerPropertiesSheet.swift`, new):
+  - Form-style sheet with one section per property. Each
+    pixel-side row has an "Override controller default"
+    toggle that flips the `*Active` flag; when off the
+    value row is disabled. DMX Channel row is unconditional.
+  - Reuses `EditableNumberField` for numeric entries.
+  - Launched from a Visualize model-row context menu
+    ("Edit Controller Properties…").
+
+**J-32.4 Smart remote assignment ✓ 2026-05-16:**
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`):
+  - `controllerConnectionForModel:` extended to include
+    `useSmartRemote` / `smartRemote` (0=none, 1..N for
+    A..letter) / `smartRemoteType` / `smartRemoteTypeOptions`
+    / `srMaxCascade` / `srCascadeOnPort`.
+  - `smartRemoteCapabilitiesForController:` returns
+    `supportsSmartRemotes` (caps gate) plus `maxRemotes`
+    (count for the letter picker) and the caps-filtered
+    SR types list.
+  - Writes again route through `setLayoutModelProperty:`
+    `cc.useSmartRemote` / `cc.smartRemoteIndex` /
+    `cc.smartRemoteTypeIndex` / `cc.srMaxCascade` /
+    `cc.srCascadeOnPort` (all pre-existing).
+- **SwiftUI** (`ModelSmartRemoteSheet.swift`, new):
+  - "Use Smart Remote" toggle that gates the rest of the
+    form. When on, a grid of letter buttons (8 per row)
+    surfaces the SR selection visually. Type picker + max
+    cascade stepper + cascade-on-port toggle complete the
+    set.
+  - Launched from a pixel-port model-row context menu
+    ("Set Smart Remote…").
+
+**J-32.5 Drag-drop model assignment ✓ 2026-05-16:**
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`):
+  - `assignModelToController:controllerName:kind:port:
+    afterModel:smartRemote:` mirrors desktop's
+    `DropModelFromModelsPaneOnModel`:
+    - Sets `controllerName` / `controllerPort`.
+    - Auto-picks a protocol from caps for an empty port,
+      inherits from `afterModel` otherwise.
+    - For pixel: rebuilds the model chain (`modelChain =
+      ">{afterModel}"`); any model previously chained off
+      `afterModel` re-anchors onto the dropped model.
+    - For serial: pushes downstream DMX channel offsets
+      forward when the insert would overlap (matches
+      desktop's serial rhs=true branch).
+    - Smart-remote inheritance: `-1` = inherit from
+      afterModel, `>= 0` = explicit override.
+    - Recalcs start channels.
+  - `removeModelFromController:` clears controller name +
+    port + chain, and rewrites any downstream chain that
+    referenced the removed model.
+- **SwiftUI** (`ControllerVisualizeView.swift`):
+  - `VisualizeModelDrag` (Codable + Transferable) keyed off
+    a custom UTType so the drop handlers only accept drags
+    that originated in the sheet.
+  - Each model row is `.draggable` + a `.dropDestination`
+    for inserting AFTER it. Port headers + the "Drop a
+    model here…" placeholder are `.dropDestination`s for
+    inserting at the END (or first model) of the port.
+    "No Connection" header is a `.dropDestination` for
+    unassign-by-drop.
+  - Context menu adds "Remove from Controller" (uses the
+    same bridge method as the No-Connection drop).
+
+**J-32.6 Move / Set start channel ✓ 2026-05-16:**
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`):
+  - `portCountsForController:` returns caps `GetMaxPixelPort`
+    + `GetMaxSerialPort` for the port-picker UI.
+- **SwiftUI** (`ControllerVisualizeMoveSheets.swift`, new):
+  - `MoveToPortSheet` — pixel / serial port list. Tapping a
+    port invokes `assignModel` with `afterModel: nil` (drop
+    at end). Hides itself when caps are unavailable.
+  - `SetStartChannelSheet` — raw text input with the
+    accepted-form footer (absolute / `@Model:1` / `1:1` /
+    `>Model:1` / `!Controller:1`). Commits via
+    `setLayoutModelProperty key="modelStartChannel"`.
+  - Context-menu entries for port-attached AND No-Connection
+    rows. "Assign to Port…" replaces "Move to Port…" on No-
+    Connection rows for clarity.
+
+**J-32.7 Wiring export (CSV / JSON) ✓ 2026-05-16:**
+
+- **Bridge** (`XLSequenceDocument.{h,mm}`):
+  - `exportWiringCSVForController:` builds a CSV string from
+    `UDController::ExportAsCSV` with port absolute / channels
+    / pixels + model description / absolute / channels /
+    pixels flags. RFC-4180 quoting on cells that contain
+    commas / quotes / newlines.
+  - `exportWiringJSONForController:` wraps
+    `UDController::ExportAsJSON` directly (already a JSON
+    string with desktop's schema).
+- **SwiftUI**: Visualize toolbar gets a share menu (square-
+  and-arrow-up) with `ShareLink` entries for CSV and JSON.
+  Strings ride through SwiftUI's `Transferable` String
+  conformance — iOS surfaces "Save to Files", "Mail", etc.
+  automatically.
+
 ### J-30 — DMX model configuration ✓ 2026-05-15
 
 Promoted out of `future-custom-models.md` Phase V because hitting

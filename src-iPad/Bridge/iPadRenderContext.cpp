@@ -444,19 +444,35 @@ bool iPadRenderContext::SaveModelStates() {
 }
 
 bool iPadRenderContext::SaveLayoutChanges() {
-    if (_dirtyLayoutModels.empty() &&
-        _dirtyLayoutViewObjects.empty() &&
-        _createdGroups.empty() &&
-        _deletedGroups.empty() &&
-        _createdViewObjects.empty() &&
-        _deletedViewObjects.empty() &&
-        _dirtyBackgroundGroups.empty() &&
-        _renamedGroups.empty() &&
-        _renamedViewObjects.empty() &&
-        _renamedModels.empty()) {
+    const bool hasLayoutDirt =
+        !_dirtyLayoutModels.empty() ||
+        !_dirtyLayoutViewObjects.empty() ||
+        !_createdGroups.empty() ||
+        !_deletedGroups.empty() ||
+        !_createdViewObjects.empty() ||
+        !_deletedViewObjects.empty() ||
+        !_dirtyBackgroundGroups.empty() ||
+        !_renamedGroups.empty() ||
+        !_renamedViewObjects.empty() ||
+        !_renamedModels.empty();
+    if (!hasLayoutDirt && !_controllersDirty) {
         return true;
     }
     if (_showDir.empty()) return false;
+
+    // J-31 — Controllers tab edits live in xlights_networks.xml.
+    // Save them first; if the layout side has no other changes,
+    // we're done.
+    if (_controllersDirty) {
+        if (!_outputManager.Save()) {
+            spdlog::warn("iPadRenderContext::SaveLayoutChanges: OutputManager::Save() failed");
+            // Continue to layout save — partial saves are still
+            // useful, and the dirty flag stays set until success.
+        } else {
+            _controllersDirty = false;
+        }
+        if (!hasLayoutDirt) return true;
+    }
 
     std::string rgbPath = _showDir + "/xlights_rgbeffects.xml";
     if (!ObtainAccessToURL(rgbPath, true)) {

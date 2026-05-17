@@ -329,6 +329,12 @@ class SequencerViewModel {
     /// accordingly.
     var layoutEditorSelectedGroup: String? = nil
     var layoutEditorSelectedObject: String? = nil
+    /// J-31 — Controllers tab selection. Drives the canvas tint
+    /// (via `XLMetalBridge.setSelectedController:`) so every
+    /// model assigned to this controller renders in the group-
+    /// member colour. Cleared when switching to a non-controllers
+    /// sidebar tab.
+    var layoutEditorSelectedController: String? = nil
 
     /// J-20.6 — active sidebar tab in the Layout Editor, mirrored
     /// from `LayoutEditorView`'s `@State sidebarTab`. Lives on the

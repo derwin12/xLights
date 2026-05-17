@@ -277,6 +277,15 @@ struct PreviewPaneView: UIViewRepresentable {
                     context.coordinator.lastPushedObject = newObject
                     uiView.setNeedsDisplay()
                 }
+                // J-31 — Controllers tab sidebar selection. Drives
+                // the same group-member tint so models on the
+                // selected controller stand out on the canvas.
+                let newCtrl = viewModel.layoutEditorSelectedController ?? ""
+                if context.coordinator.lastPushedController != newCtrl {
+                    bridge.setSelectedController(viewModel.layoutEditorSelectedController)
+                    context.coordinator.lastPushedController = newCtrl
+                    uiView.setNeedsDisplay()
+                }
                 // Grid + canvas-bbox overlays. Bridge holds the last-
                 // pushed value and repaints on change.
                 if bridge.showLayoutGrid() != settings.showLayoutGrid {
@@ -339,6 +348,7 @@ struct PreviewPaneView: UIViewRepresentable {
         // nothing relevant changed.
         var lastPushedGroup: String = ""
         var lastPushedObject: String = ""
+        var lastPushedController: String = ""
         /// J-2 — true while a one-finger pan started on the
         /// LayoutEditor's selected model and is dragging the model
         /// rather than the camera. Set in .began, cleared in .ended.
@@ -1593,6 +1603,15 @@ struct PreviewPaneView: UIViewRepresentable {
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
             let scale = view.contentScaleFactor
             bridge?.setDrawableSize(size, scale: scale)
+            // The MTKView is configured with `isPaused = true` +
+            // `enableSetNeedsDisplay = true` so it only renders
+            // on explicit redraw requests. Without this kick,
+            // resizing the sidebar (or hide/show) leaves the
+            // last-rendered texture stretched to fit the new
+            // drawable until the user taps something — which
+            // misaligns the camera projection used for hit-
+            // testing, so taps land at the wrong cells.
+            view.setNeedsDisplay()
         }
 
         func draw(in view: MTKView) {

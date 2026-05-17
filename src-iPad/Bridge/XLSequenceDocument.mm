@@ -64,6 +64,25 @@
 #include "models/ThreePointScreenLocation.h"
 #include "models/ControllerConnection.h"
 #include "controllers/ControllerCaps.h"
+#include "outputs/Controller.h"
+#include "outputs/OutputManager.h"
+#include "outputs/ControllerEthernet.h"
+#include "outputs/ControllerNull.h"
+#include "outputs/ControllerSerial.h"
+#include "outputs/SerialOutput.h"
+#include "outputs/Output.h"
+#include "discovery/Discovery.h"
+#include "controllers/FPP.h"
+#include "outputs/ArtNetOutput.h"
+#include "outputs/TwinklyOutput.h"
+#include "outputs/DDPOutput.h"
+#include "controllers/Pixlite16.h"
+#include "controllers/BaseController.h"
+#include "controllers/ControllerUploadData.h"
+#include "controllers/ExportSettings.h"
+#include "models/Pixels.h"
+#include "render/UICallbacks.h"
+#include "utils/ip_utils.h"
 #include "models/ImageModel.h"
 #include "models/LabelModel.h"
 #include "models/MultiPointModel.h"
@@ -138,6 +157,8 @@
 - (NSDictionary<NSString*, id>*)extrasFor:(Model*)m;
 - (NSDictionary<NSString*, id>*)controllerConnectionFor:(Model*)m;
 - (std::string)joinIndexedNames:(NSArray<NSString*>*)names;
+- (void)recalcModelStartChannels;
+- (void)reworkAndRecalcStartChannels;
 @end
 
 @implementation XLSequenceDocument {
@@ -3726,6 +3747,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
 
     if (changed) {
         _context->MarkLayoutModelDirty(std::string([name UTF8String]));
+        [self recalcModelStartChannels];
     }
     return changed;
 }
@@ -3777,6 +3799,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     m->GetModelScreenLocation().SelectSegment(-1);
     m->Reinitialize();
     _context->MarkLayoutModelDirty(modelName.UTF8String);
+    [self recalcModelStartChannels];
     return YES;
 }
 
@@ -3792,6 +3815,7 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
     m->InsertHandle(static_cast<int>(segmentIndex), 1.0f, 1);
     m->Reinitialize();
     _context->MarkLayoutModelDirty(modelName.UTF8String);
+    [self recalcModelStartChannels];
     return YES;
 }
 
@@ -3825,7 +3849,9 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
 - (BOOL)deleteModel:(NSString*)modelName {
     if (!_context || !modelName || modelName.length == 0) return NO;
     _context->AbortRender(5000);
-    return _context->GetModelManager().Delete(modelName.UTF8String) ? YES : NO;
+    if (!_context->GetModelManager().Delete(modelName.UTF8String)) return NO;
+    [self recalcModelStartChannels];
+    return YES;
 }
 
 - (BOOL)renameModel:(NSString*)oldName to:(NSString*)newName {
@@ -3859,6 +3885,9 @@ static std::optional<HEADER_INFO_TYPES> headerTypeFromString(NSString* key) {
             _context->MarkLayoutModelDirty(name);
         }
     }
+    // ModelChain references (`@OldName`) on downstream models
+    // need to be re-resolved against the new name.
+    [self recalcModelStartChannels];
     return YES;
 }
 
@@ -4089,6 +4118,7 @@ static NSDictionary<NSString*, NSDictionary<NSString*, NSString*>*>* faceStateTo
     cm->SetCustomDepth(d);
     cm->SetCustomData(data);
     _context->MarkLayoutModelDirty(std::string(modelName.UTF8String));
+    [self recalcModelStartChannels];
     return YES;
 }
 
@@ -11433,6 +11463,2039 @@ static int parseDMXColorRed(const std::string& hex) {
     if (outR) *outR = (CGFloat)pc.r / 255.0;
     if (outG) *outG = (CGFloat)pc.g / 255.0;
     if (outB) *outB = (CGFloat)pc.b / 255.0;
+}
+
+#pragma mark - J-31 — Controllers list
+
+static NSDictionary* BuildControllerSummary(const Controller* c) {
+    NSString* name      = [NSString stringWithUTF8String:c->GetName().c_str()];
+    NSString* type      = [NSString stringWithUTF8String:c->GetType().c_str()];
+    NSString* ip        = [NSString stringWithUTF8String:c->GetIP().c_str()];
+    NSString* universes = [NSString stringWithUTF8String:c->GetColumn3Label().c_str()];
+    NSString* channels  = [NSString stringWithUTF8String:c->GetColumn4Label().c_str()];
+    NSString* vendor    = [NSString stringWithUTF8String:c->GetVendor().c_str()];
+    NSString* model     = [NSString stringWithUTF8String:c->GetModel().c_str()];
+    NSString* variant   = [NSString stringWithUTF8String:c->GetVariant().c_str()];
+    NSString* active    = [NSString stringWithUTF8String:c->GetColumn8Label().c_str()];
+    NSString* desc      = [NSString stringWithUTF8String:c->GetDescription().c_str()];
+
+    // OpenSourceFirmware gate. ControllerCaps may be null when the
+    // vendor/model isn't in the iPad's bundled XML, in which case
+    // we fail closed and don't surface Upload / Visualize.
+    BOOL osf = NO;
+    BOOL supportsUpload = NO;
+    BOOL supportsInputUpload = NO;
+    ControllerCaps* caps = ControllerCaps::GetControllerConfig(c);
+    if (caps) {
+        osf = caps->OpenSourceFirmware() ? YES : NO;
+        supportsUpload = caps->SupportsUpload() ? YES : NO;
+        supportsInputUpload = caps->SupportsInputOnlyUpload() ? YES : NO;
+    }
+    return @{
+        @"name":         name,
+        @"type":         type,
+        @"ip":           ip,
+        @"universes":    universes,
+        @"channels":     channels,
+        @"vendor":       vendor,
+        @"model":        model,
+        @"variant":      variant,
+        @"active":       active,
+        @"autoLayout":   @(c->IsAutoLayout() ? YES : NO),
+        @"autoSize":     @(c->IsAutoSize()   ? YES : NO),
+        @"description":  desc,
+        @"caps.openSourceFirmware":     @(osf),
+        @"caps.supportsUpload":         @(supportsUpload),
+        @"caps.supportsInputOnlyUpload":@(supportsInputUpload),
+    };
+}
+
+- (NSArray<NSDictionary*>*)controllersListSummary {
+    NSMutableArray<NSDictionary*>* out = [NSMutableArray array];
+    if (!_context) return out;
+    for (Controller* c : _context->GetOutputManager().GetControllers()) {
+        if (!c) continue;
+        [out addObject:BuildControllerSummary(c)];
+    }
+    return out;
+}
+
+- (nullable NSDictionary<NSString*, id>*)controllerDetailForName:(NSString*)name {
+    if (!_context || !name) return nil;
+    Controller* c = _context->GetOutputManager().GetController(name.UTF8String);
+    if (!c) return nil;
+    NSMutableDictionary* d = [BuildControllerSummary(c) mutableCopy];
+    // Detail-only extras the list pane doesn't need.
+    d[@"longDescription"] = [NSString stringWithUTF8String:c->GetLongDescription().c_str()];
+    d[@"pingDescription"] = [NSString stringWithUTF8String:c->GetPingDescription().c_str()];
+    // Construct a `http://<ip>/` URL for the Open action. The
+    // long-press menu surfaces this even on non-OSF controllers
+    // since plenty of fixtures still have a web UI.
+    if (c->GetIP().size() > 0) {
+        d[@"url"] = [NSString stringWithFormat:@"http://%s/",
+                      c->GetIP().c_str()];
+    }
+    return d;
+}
+
+- (NSArray<NSString*>*)modelNamesForController:(NSString*)controllerName {
+    NSMutableArray<NSString*>* out = [NSMutableArray array];
+    if (!_context || !controllerName || !_context->HasModelManager()) return out;
+    const std::string target = controllerName.UTF8String;
+    auto& mgr = _context->GetModelManager();
+    for (const auto& it : mgr) {
+        Model* m = it.second;
+        if (!m) continue;
+        if (m->GetDisplayAs() == DisplayAsType::ModelGroup) continue;
+        if (m->GetDisplayAs() == DisplayAsType::SubModel) continue;
+        if (m->GetControllerName() == target) {
+            [out addObject:[NSString stringWithUTF8String:m->GetName().c_str()]];
+        }
+    }
+    return out;
+}
+
+#pragma mark - J-31 — Controllers editable property descriptors
+
+// J-31 — `Active` enum: index→string lookup matching desktop's
+// `ACTIVETYPENAMES`. Order is load-bearing.
+static NSArray<NSString*>* ControllerActiveOptions() {
+    return @[@"Active", @"Inactive", @"xLights Only"];
+}
+static int EncodeControllerActive(const Controller* c) {
+    switch (c->GetActive()) {
+        case Controller::ACTIVESTATE::ACTIVE:               return 0;
+        case Controller::ACTIVESTATE::INACTIVE:             return 1;
+        case Controller::ACTIVESTATE::ACTIVEINXLIGHTSONLY:  return 2;
+    }
+    return 0;
+}
+
+// Encode a string into its index in `options`; returns -1 if
+// missing (sheet will show the picker's first option).
+static int IndexOfString(NSArray<NSString*>* options, const std::string& v) {
+    NSString* needle = [NSString stringWithUTF8String:v.c_str()];
+    NSUInteger i = [options indexOfObject:needle];
+    return (i == NSNotFound) ? -1 : (int)i;
+}
+
+// J-31 — Serial-protocol picker options, mirroring desktop's
+// `GetSerialProtocols` filter on `ControllerCaps::GetInputProtocols`.
+// When caps are missing the full static list desktop initialises
+// in `InitialiseSerialTypes` is returned.
+static NSArray<NSString*>* SerialProtocolOptions(const ControllerSerial* ser) {
+    NSMutableArray<NSString*>* out = [NSMutableArray array];
+    ControllerCaps* caps = ControllerCaps::GetControllerConfig(ser);
+    if (caps) {
+        for (const auto& proto : caps->GetInputProtocols()) {
+            if (proto == "dmx")              [out addObject:@(OUTPUT_DMX)];
+            else if (proto == "lor")         [out addObject:@(OUTPUT_LOR)];
+            else if (proto == "lor optimised")[out addObject:@(OUTPUT_LOR_OPT)];
+            else if (proto == "opendmx")     [out addObject:@(OUTPUT_OPENDMX)];
+            else if (proto == "pixelnet")    [out addObject:@(OUTPUT_PIXELNET)];
+            else if (proto == "openpixelnet")[out addObject:@(OUTPUT_OPENPIXELNET)];
+            else if (proto == "renard")      [out addObject:@(OUTPUT_RENARD)];
+            else if (proto == "dlight")      [out addObject:@(OUTPUT_DLIGHT)];
+            else if (proto == "generic serial") [out addObject:@(OUTPUT_GENERICSERIAL)];
+            else if (proto == "ddp-input") {
+                for (const auto& sp : caps->GetSerialProtocols()) {
+                    [out addObject:[NSString stringWithUTF8String:sp.c_str()]];
+                }
+            }
+        }
+    }
+    if (out.count == 0) {
+        [out addObjectsFromArray:@[@(OUTPUT_DMX), @(OUTPUT_LOR), @(OUTPUT_LOR_OPT),
+                                    @(OUTPUT_OPENDMX), @(OUTPUT_PIXELNET),
+                                    @(OUTPUT_OPENPIXELNET), @(OUTPUT_RENARD),
+                                    @(OUTPUT_DLIGHT), @(OUTPUT_GENERICSERIAL)]];
+    }
+    return out;
+}
+
+// J-31 — Serial baud-rate picker. Pulled from
+// `SerialOutput::GetPossibleBaudRates()` so the list stays in
+// sync with whatever desktop offers across rebuilds.
+static NSArray<NSString*>* SerialBaudOptions() {
+    NSMutableArray<NSString*>* out = [NSMutableArray array];
+    for (const auto& v : SerialOutput::GetPossibleBaudRates()) {
+        [out addObject:[NSString stringWithUTF8String:v.c_str()]];
+    }
+    return out;
+}
+
+// J-31 — Serial port picker (non-FPP path). Pulled from
+// `SerialOutput::GetPossibleSerialPorts()`.
+static NSArray<NSString*>* SerialPortOptions() {
+    NSMutableArray<NSString*>* out = [NSMutableArray array];
+    for (const auto& v : SerialOutput::GetPossibleSerialPorts()) {
+        [out addObject:[NSString stringWithUTF8String:v.c_str()]];
+    }
+    return out;
+}
+
+// J-31 — FPP serial port enum (ttyS0-5 / ttyUSB0-5 / ttyACM0-5 /
+// ttyAMA0 / i2c-1 / spidev0.0 / spidev0.1). Mirrors desktop
+// `ControllerSerialPropertyAdapter::AddProperties` FPP branch
+// (lines 122-133).
+static NSArray<NSString*>* FppPortOptions() {
+    NSMutableArray<NSString*>* out = [NSMutableArray array];
+    for (int x = 0; x < 6; ++x) [out addObject:[NSString stringWithFormat:@"ttyS%d", x]];
+    for (int x = 0; x < 6; ++x) [out addObject:[NSString stringWithFormat:@"ttyUSB%d", x]];
+    for (int x = 0; x < 6; ++x) [out addObject:[NSString stringWithFormat:@"ttyACM%d", x]];
+    [out addObject:@"ttyAMA0"];
+    [out addObject:@"i2c-1"];
+    [out addObject:@"spidev0.0"];
+    [out addObject:@"spidev0.1"];
+    return out;
+}
+
+// J-31 — I2C device address picker (0x00..0x7F).
+static NSArray<NSString*>* I2cDeviceOptions() {
+    NSMutableArray<NSString*>* out = [NSMutableArray array];
+    for (int x = 0; x < 128; ++x) {
+        [out addObject:[NSString stringWithFormat:@"0x%02X", x]];
+    }
+    return out;
+}
+
+static bool StringStartsWith(const std::string& s, const std::string& prefix) {
+    return s.size() >= prefix.size()
+        && s.compare(0, prefix.size(), prefix) == 0;
+}
+
+// Build the ethernet-protocol picker options from
+// `ControllerCaps::GetInputProtocols()` when present; falls back
+// to the desktop's hard-coded protocol set.
+static NSArray<NSString*>* EthernetProtocolOptions(const ControllerEthernet* eth) {
+    NSMutableArray<NSString*>* out = [NSMutableArray array];
+    ControllerCaps* caps = ControllerCaps::GetControllerConfig(eth);
+    if (caps) {
+        for (const auto& proto : caps->GetInputProtocols()) {
+            if (proto == "e131")        [out addObject:@(OUTPUT_E131)];
+            else if (proto == "zcpp")   [out addObject:@(OUTPUT_ZCPP)];
+            else if (proto == "artnet") [out addObject:@(OUTPUT_ARTNET)];
+            else if (proto == "kinet")  [out addObject:@(OUTPUT_KINET)];
+            else if (proto == "ddp")    [out addObject:@(OUTPUT_DDP)];
+            else if (proto == "opc")    [out addObject:@(OUTPUT_OPC)];
+            else if (proto == "player only") [out addObject:@(OUTPUT_PLAYER_ONLY)];
+            else if (proto == "twinkly") [out addObject:@(OUTPUT_TWINKLY)];
+        }
+    }
+    if (out.count == 0) {
+        // No caps definition for this fixture — surface the
+        // common set so the picker isn't blank.
+        [out addObjectsFromArray:@[@(OUTPUT_E131), @(OUTPUT_ARTNET),
+                                    @(OUTPUT_DDP),  @(OUTPUT_OPC),
+                                    @(OUTPUT_ZCPP), @(OUTPUT_KINET),
+                                    @(OUTPUT_TWINKLY)]];
+    }
+    return out;
+}
+
+static NSMutableDictionary* CtrlIntProp(NSString* key, NSString* label,
+                                          int value, int minV, int maxV) {
+    return [@{
+        @"key": key, @"label": label, @"kind": @"int",
+        @"value": @(value), @"min": @(minV), @"max": @(maxV),
+    } mutableCopy];
+}
+static NSMutableDictionary* CtrlDoubleProp(NSString* key, NSString* label,
+                                             double value, double minV, double maxV,
+                                             double step, int precision) {
+    return [@{
+        @"key": key, @"label": label, @"kind": @"double",
+        @"value": @(value), @"min": @(minV), @"max": @(maxV),
+        @"step": @(step), @"precision": @(precision),
+    } mutableCopy];
+}
+static NSMutableDictionary* CtrlBoolProp(NSString* key, NSString* label, BOOL value) {
+    return [@{
+        @"key": key, @"label": label, @"kind": @"bool",
+        @"value": @(value ? YES : NO),
+    } mutableCopy];
+}
+static NSMutableDictionary* CtrlEnumProp(NSString* key, NSString* label,
+                                           int index, NSArray<NSString*>* options) {
+    return [@{
+        @"key": key, @"label": label, @"kind": @"enum",
+        @"value": @(index), @"options": options,
+    } mutableCopy];
+}
+static NSMutableDictionary* CtrlStringProp(NSString* key, NSString* label,
+                                             NSString* _Nullable value, BOOL editable) {
+    return [@{
+        @"key": key, @"label": label, @"kind": @"string",
+        @"value": value ?: @"",
+        @"enabled": @(editable),
+    } mutableCopy];
+}
+static NSMutableDictionary* CtrlHeader(NSString* key, NSString* label) {
+    return [@{
+        @"key": key, @"label": label, @"kind": @"header",
+    } mutableCopy];
+}
+
+static NSArray<NSString*>* StdListToNSArray(const std::list<std::string>& list) {
+    NSMutableArray<NSString*>* out = [NSMutableArray array];
+    for (const auto& s : list) {
+        [out addObject:[NSString stringWithUTF8String:s.c_str()]];
+    }
+    return out;
+}
+
+- (NSArray<NSDictionary*>*)controllerPropertiesForName:(NSString*)name {
+    NSMutableArray<NSDictionary*>* out = [NSMutableArray array];
+    if (!_context || !name) return out;
+    Controller* c = _context->GetOutputManager().GetController(name.UTF8String);
+    if (!c) return out;
+
+    // === Base properties ===
+    [out addObject:CtrlStringProp(@"Name", @"Name",
+                                    [NSString stringWithUTF8String:c->GetName().c_str()],
+                                    YES)];
+    [out addObject:CtrlStringProp(@"Description", @"Description",
+                                    [NSString stringWithUTF8String:c->GetDescription().c_str()],
+                                    YES)];
+    [out addObject:CtrlIntProp(@"Id", @"Id", c->GetId(), 0, 65535)];
+    [out addObject:CtrlEnumProp(@"Active", @"Active",
+                                  EncodeControllerActive(c),
+                                  ControllerActiveOptions())];
+    [out addObject:CtrlBoolProp(@"AutoLayout", @"Auto Layout Models",
+                                  c->IsAutoLayout() ? YES : NO)];
+    [out addObject:CtrlBoolProp(@"AutoUpload", @"Auto Upload Configuration",
+                                  c->IsAutoUpload() ? YES : NO)];
+    [out addObject:CtrlBoolProp(@"AutoSize", @"Auto Size",
+                                  c->IsAutoSize() ? YES : NO)];
+    [out addObject:CtrlBoolProp(@"FullxLightsControl", @"Full xLights Control",
+                                  c->IsFullxLightsControl() ? YES : NO)];
+    [out addObject:CtrlIntProp(@"DefaultBrightnessUnderFullxLightsControl",
+                                 @"Default Port Brightness",
+                                 c->GetDefaultBrightnessUnderFullControl(), 0, 100)];
+    [out addObject:CtrlDoubleProp(@"DefaultGammaUnderFullxLightsControl",
+                                    @"Default Port Gamma",
+                                    (double)c->GetDefaultGammaUnderFullControl(),
+                                    0.1, 5.0, 0.1, 2)];
+    [out addObject:CtrlBoolProp(@"SuppressDuplicates", @"Suppress Duplicate Frames",
+                                  c->IsSuppressDuplicateFrames() ? YES : NO)];
+    [out addObject:CtrlBoolProp(@"Monitor", @"Monitor",
+                                  c->IsMonitoring() ? YES : NO)];
+
+    // === Vendor / Model / Variant cascade ===
+    [out addObject:CtrlHeader(@"ControllerVendorHeader", @"Hardware")];
+    auto const vendors = ControllerCaps::GetVendors(c->GetType());
+    NSArray<NSString*>* vendorOpts = StdListToNSArray(vendors);
+    int vendorIdx = IndexOfString(vendorOpts, c->GetVendor());
+    [out addObject:CtrlEnumProp(@"Vendor", @"Vendor",
+                                  std::max(0, vendorIdx),
+                                  vendorOpts)];
+    auto const models = ControllerCaps::GetModels(c->GetType(), c->GetVendor());
+    NSArray<NSString*>* modelOpts = StdListToNSArray(models);
+    if (modelOpts.count > 0) {
+        int modelIdx = IndexOfString(modelOpts, c->GetModel());
+        [out addObject:CtrlEnumProp(@"Model", @"Model",
+                                      std::max(0, modelIdx),
+                                      modelOpts)];
+    }
+    auto const variants = ControllerCaps::GetVariants(
+        c->GetType(), c->GetVendor(), c->GetModel());
+    NSArray<NSString*>* variantOpts = StdListToNSArray(variants);
+    if (variantOpts.count > 0) {
+        int variantIdx = IndexOfString(variantOpts, c->GetVariant());
+        [out addObject:CtrlEnumProp(@"Variant", @"Variant",
+                                      std::max(0, variantIdx),
+                                      variantOpts)];
+    }
+
+    // === Subclass-specific ===
+    if (auto* eth = dynamic_cast<ControllerEthernet*>(c)) {
+        [out addObject:CtrlHeader(@"ControllerNetworkHeader", @"Network")];
+        const std::string ip = eth->GetIP();
+        [out addObject:CtrlBoolProp(@"Multicast", @"Multicast",
+                                      ip == "MULTICAST" ? YES : NO)];
+        [out addObject:CtrlStringProp(@"IP", @"IP Address",
+                                        [NSString stringWithUTF8String:ip.c_str()],
+                                        ip != "MULTICAST")];
+        [out addObject:CtrlStringProp(@"FPPProxy", @"FPP Proxy IP/Hostname",
+                                        [NSString stringWithUTF8String:eth->GetControllerFPPProxy().c_str()],
+                                        YES)];
+        NSArray<NSString*>* protoOpts = EthernetProtocolOptions(eth);
+        int protoIdx = IndexOfString(protoOpts, eth->GetProtocol());
+        [out addObject:CtrlEnumProp(@"Protocol", @"Protocol",
+                                      std::max(0, protoIdx),
+                                      protoOpts)];
+        [out addObject:CtrlIntProp(@"Priority", @"Priority",
+                                     eth->GetPriority(), 0, 100)];
+        NSMutableDictionary* managed = CtrlBoolProp(@"Managed", @"Managed",
+                                                      eth->IsManaged() ? YES : NO);
+        managed[@"enabled"] = @NO;   // matches desktop read-only state
+        [out addObject:managed];
+    } else if (auto* nul = dynamic_cast<ControllerNull*>(c)) {
+        [out addObject:CtrlHeader(@"ControllerNullHeader", @"Output")];
+        [out addObject:CtrlIntProp(@"Channels", @"Channels",
+                                     nul->GetChannels(), 1, 1000000)];
+    } else if (auto* ser = dynamic_cast<ControllerSerial*>(c)) {
+        ControllerCaps* serCaps = ControllerCaps::GetControllerConfig(ser);
+        const std::string protocol = ser->GetProtocol();
+        const int speed = ser->GetSpeed();
+        const bool isFPP = (serCaps && serCaps->GetModel() == "FPP");
+        [out addObject:CtrlHeader(@"ControllerSerialHeader",
+                                    isFPP ? @"FPP Serial" : @"Serial")];
+
+        if (isFPP) {
+            // FPP encodes the port as "<ip>:<portName>". Split for
+            // the UI so the two halves are independently editable;
+            // the setter recomposes on commit.
+            std::string port = ser->GetPort();
+            std::string ip;
+            std::string portStr = port;
+            if (const auto colon = port.find(":"); colon != std::string::npos) {
+                ip = port.substr(0, colon);
+                portStr = port.substr(colon + 1);
+            }
+            [out addObject:CtrlStringProp(@"IP", @"IP Address",
+                                            [NSString stringWithUTF8String:ip.c_str()],
+                                            YES)];
+            [out addObject:CtrlStringProp(@"FPPProxy", @"FPP Proxy IP/Hostname",
+                                            [NSString stringWithUTF8String:ser->GetControllerFPPProxy().c_str()],
+                                            YES)];
+
+            NSArray<NSString*>* protoOpts = SerialProtocolOptions(ser);
+            int protoIdx = IndexOfString(protoOpts, protocol);
+            [out addObject:CtrlEnumProp(@"Protocol", @"Protocol",
+                                          std::max(0, protoIdx), protoOpts)];
+
+            NSArray<NSString*>* portOpts = FppPortOptions();
+            int portIdx = IndexOfString(portOpts, portStr);
+            [out addObject:CtrlEnumProp(@"Port", @"Port",
+                                          std::max(0, portIdx), portOpts)];
+
+            if (StringStartsWith(portStr, "tty")) {
+                if (protocol != OUTPUT_DMX && protocol != OUTPUT_OPENDMX
+                    && protocol != OUTPUT_PIXELNET && protocol != OUTPUT_OPENPIXELNET) {
+                    NSArray<NSString*>* speeds = SerialBaudOptions();
+                    NSString* speedStr = [NSString stringWithFormat:@"%d", speed];
+                    int sidx = IndexOfString(speeds, speedStr.UTF8String);
+                    [out addObject:CtrlEnumProp(@"Speed", @"Speed",
+                                                  std::max(0, sidx), speeds)];
+                }
+            } else if (StringStartsWith(portStr, "i2c")) {
+                NSArray<NSString*>* i2cs = I2cDeviceOptions();
+                NSString* i2cStr = [NSString stringWithFormat:@"0x%02X", speed];
+                int iidx = IndexOfString(i2cs, i2cStr.UTF8String);
+                [out addObject:CtrlEnumProp(@"I2CDevice", @"I2C Device",
+                                              std::max(0, iidx), i2cs)];
+            } else if (StringStartsWith(portStr, "spidev")) {
+                [out addObject:CtrlIntProp(@"SPISpeed", @"Speed (kHz)",
+                                             speed, 0, 999999)];
+            }
+        } else {
+            // Non-FPP serial: system-discovered ports + freeform
+            // baud-rate picker. iPads don't have hardware serial
+            // ports, but a show config loaded from desktop may
+            // already have one defined; surface it as editable so
+            // the user can at least adjust the protocol / speed.
+            NSArray<NSString*>* portOpts = SerialPortOptions();
+            int portIdx = IndexOfString(portOpts, ser->GetPort());
+            if (portOpts.count == 0) {
+                // Fall back to a freeform string when the host
+                // can't enumerate any system serial ports.
+                [out addObject:CtrlStringProp(@"Port", @"Port",
+                                                [NSString stringWithUTF8String:ser->GetPort().c_str()],
+                                                YES)];
+            } else {
+                [out addObject:CtrlEnumProp(@"Port", @"Port",
+                                              std::max(0, portIdx), portOpts)];
+            }
+
+            NSArray<NSString*>* protoOpts = SerialProtocolOptions(ser);
+            int protoIdx = IndexOfString(protoOpts, protocol);
+            [out addObject:CtrlEnumProp(@"Protocol", @"Protocol",
+                                          std::max(0, protoIdx), protoOpts)];
+
+            NSArray<NSString*>* speeds = SerialBaudOptions();
+            NSString* speedStr = [NSString stringWithFormat:@"%d", speed];
+            int sidx = IndexOfString(speeds, speedStr.UTF8String);
+            NSMutableDictionary* speedProp = CtrlEnumProp(
+                @"Speed", @"Speed",
+                std::max(0, sidx), speeds);
+            // Some serial protocols fix the baud rate — disable the
+            // picker in that case (matches desktop's grey-out).
+            SerialOutput* sout = ser->GetSerialOutput();
+            if (sout && !sout->AllowsBaudRateSetting()) {
+                speedProp[@"enabled"] = @NO;
+            }
+            [out addObject:speedProp];
+        }
+
+        if (protocol == OUTPUT_GENERICSERIAL) {
+            [out addObject:CtrlStringProp(@"Prefix", @"Prefix",
+                                            [NSString stringWithUTF8String:ser->GetSaveablePreFix().c_str()],
+                                            YES)];
+            [out addObject:CtrlStringProp(@"Postfix", @"Postfix",
+                                            [NSString stringWithUTF8String:ser->GetSaveablePostFix().c_str()],
+                                            YES)];
+        }
+
+        // Channels — gated to read-only when AutoSize is on,
+        // matching desktop's grey-out + tooltip.
+        SerialOutput* sout = ser->GetSerialOutput();
+        if (sout && sout->GetType() != OUTPUT_LOR_OPT) {
+            int maxCh = sout->GetMaxChannels();
+            if (serCaps) {
+                maxCh = std::min(maxCh, serCaps->GetMaxSerialPortChannels());
+            }
+            if (maxCh <= 0) maxCh = 1000000;
+            NSMutableDictionary* chProp = CtrlIntProp(
+                @"Channels", @"Channels",
+                ser->GetFirstOutput() ? (int)ser->GetFirstOutput()->GetChannels() : 0,
+                1, maxCh);
+            if (ser->IsAutoSize()) chProp[@"enabled"] = @NO;
+            [out addObject:chProp];
+        }
+    }
+
+    // === ControllerCaps extra properties ===
+    if (ControllerCaps* caps = ControllerCaps::GetControllerConfig(c)) {
+        auto const extras = caps->GetExtraPropertyDefs();
+        if (!extras.empty()) {
+            [out addObject:CtrlHeader(@"ControllerExtraHeader", @"Capabilities")];
+            for (const auto& def : extras) {
+                NSString* key = [NSString stringWithFormat:@"ControllerExtra.%s",
+                                   def.name.c_str()];
+                NSString* label = [NSString stringWithUTF8String:def.label.c_str()];
+                std::string cur = c->GetExtraProperty(def.name, def.defaultValue);
+                if (def.type == "Enum" && !def.values.empty()) {
+                    NSMutableArray<NSString*>* options = [NSMutableArray array];
+                    for (const auto& v : def.values) {
+                        [options addObject:[NSString stringWithUTF8String:v.c_str()]];
+                    }
+                    int idx = IndexOfString(options, cur);
+                    [out addObject:CtrlEnumProp(key, label,
+                                                  std::max(0, idx), options)];
+                } else {
+                    [out addObject:CtrlStringProp(key, label,
+                                                    [NSString stringWithUTF8String:cur.c_str()],
+                                                    YES)];
+                }
+            }
+        }
+    }
+
+    return out;
+}
+
+- (BOOL)setControllerProperty:(NSString*)key
+                 onController:(NSString*)name
+                        value:(id)value {
+    if (!_context || !key || !name) return NO;
+    Controller* c = _context->GetOutputManager().GetController(name.UTF8String);
+    if (!c) return NO;
+    const std::string k = key.UTF8String;
+    BOOL changed = NO;
+
+    if (k == "Name") {
+        if (![value isKindOfClass:[NSString class]]) return NO;
+        std::string newName = [(NSString*)value UTF8String];
+        // Trim whitespace — matches desktop's
+        // `event.GetValue().GetString().Trim(true).Trim(false)`.
+        auto trim = [](std::string s) {
+            const std::string ws = " \t\r\n";
+            const auto a = s.find_first_not_of(ws);
+            const auto b = s.find_last_not_of(ws);
+            if (a == std::string::npos) return std::string();
+            return s.substr(a, b - a + 1);
+        };
+        newName = trim(newName);
+        if (newName.empty() || newName == NO_CONTROLLER) return NO;
+        if (newName == c->GetName()) return NO;  // no change
+        // Reject if another controller already has this name.
+        if (_context->GetOutputManager().GetController(newName) != nullptr) return NO;
+        c->SetName(newName);
+        changed = YES;
+    } else if (k == "Description") {
+        if (![value isKindOfClass:[NSString class]]) return NO;
+        c->SetDescription([(NSString*)value UTF8String]);
+        changed = YES;
+    } else if (k == "Id") {
+        if (![value isKindOfClass:[NSNumber class]]) return NO;
+        int v = [(NSNumber*)value intValue];
+        if (c->GetId() != v) { c->SetId(v); changed = YES; }
+    } else if (k == "Active") {
+        if (![value isKindOfClass:[NSNumber class]]) return NO;
+        int idx = [(NSNumber*)value intValue];
+        NSArray* opts = ControllerActiveOptions();
+        if (idx >= 0 && idx < (int)opts.count) {
+            c->SetActive([(NSString*)opts[idx] UTF8String]);
+            changed = YES;
+        }
+    } else if (k == "AutoLayout") {
+        BOOL v = [(NSNumber*)value boolValue];
+        if (c->IsAutoLayout() != (bool)v) {
+            c->SetAutoLayout(v); changed = YES;
+        }
+    } else if (k == "AutoUpload") {
+        BOOL v = [(NSNumber*)value boolValue];
+        if (c->IsAutoUpload() != (bool)v) {
+            c->SetAutoUpload(v); changed = YES;
+        }
+    } else if (k == "AutoSize") {
+        BOOL v = [(NSNumber*)value boolValue];
+        if (c->IsAutoSize() != (bool)v) {
+            c->SetAutoSize(v, nullptr); changed = YES;
+        }
+    } else if (k == "FullxLightsControl") {
+        BOOL v = [(NSNumber*)value boolValue];
+        if (c->IsFullxLightsControl() != (bool)v) {
+            c->SetFullxLightsControl(v); changed = YES;
+        }
+    } else if (k == "DefaultBrightnessUnderFullxLightsControl") {
+        int v = [(NSNumber*)value intValue];
+        if (c->GetDefaultBrightnessUnderFullControl() != v) {
+            c->SetDefaultBrightnessUnderFullControl(v); changed = YES;
+        }
+    } else if (k == "DefaultGammaUnderFullxLightsControl") {
+        double v = [(NSNumber*)value doubleValue];
+        if (std::fabs((double)c->GetDefaultGammaUnderFullControl() - v) > 1e-4) {
+            c->SetDefaultGammaUnderFullControl((float)v); changed = YES;
+        }
+    } else if (k == "SuppressDuplicates") {
+        BOOL v = [(NSNumber*)value boolValue];
+        if (c->IsSuppressDuplicateFrames() != (bool)v) {
+            c->SetSuppressDuplicateFrames(v); changed = YES;
+        }
+    } else if (k == "Monitor") {
+        BOOL v = [(NSNumber*)value boolValue];
+        if (c->IsMonitoring() != (bool)v) {
+            c->SetMonitoring(v); changed = YES;
+        }
+    } else if (k == "Vendor") {
+        // Vendor change cascades to Model + Variant: desktop resets
+        // Model + Variant when vendor changes, picking sensible
+        // defaults only when there's exactly one option each.
+        int idx = [(NSNumber*)value intValue];
+        auto const vendors = ControllerCaps::GetVendors(c->GetType());
+        auto it = vendors.begin();
+        std::advance(it, idx);
+        if (idx >= 0 && it != vendors.end()) {
+            c->SetVendor(*it);
+            auto models = ControllerCaps::GetModels(c->GetType(), *it);
+            if (models.size() == 2) {
+                c->SetModel(models.back());
+                auto variants = ControllerCaps::GetVariants(
+                    c->GetType(), *it, models.front());
+                c->SetVariant(variants.size() == 2 ? variants.back() : "");
+            } else {
+                c->SetModel("");
+                c->SetVariant("");
+            }
+            changed = YES;
+        }
+    } else if (k == "Model") {
+        int idx = [(NSNumber*)value intValue];
+        auto const models = ControllerCaps::GetModels(c->GetType(), c->GetVendor());
+        auto it = models.begin();
+        std::advance(it, idx);
+        if (idx >= 0 && it != models.end()) {
+            c->SetModel(*it);
+            auto variants = ControllerCaps::GetVariants(
+                c->GetType(), c->GetVendor(), *it);
+            c->SetVariant(variants.empty() ? "" : variants.front());
+            changed = YES;
+        }
+    } else if (k == "Variant") {
+        int idx = [(NSNumber*)value intValue];
+        auto const variants = ControllerCaps::GetVariants(
+            c->GetType(), c->GetVendor(), c->GetModel());
+        auto it = variants.begin();
+        std::advance(it, idx);
+        if (idx >= 0 && it != variants.end()) {
+            c->SetVariant(*it);
+            changed = YES;
+        }
+    }
+    // Ethernet-specific
+    else if (k == "Multicast") {
+        auto* eth = dynamic_cast<ControllerEthernet*>(c);
+        if (!eth) return NO;
+        BOOL v = [(NSNumber*)value boolValue];
+        if (v && eth->GetIP() != "MULTICAST") {
+            eth->SetIP("MULTICAST"); changed = YES;
+        } else if (!v && eth->GetIP() == "MULTICAST") {
+            eth->SetIP("");  // user must enter a real IP next
+            changed = YES;
+        }
+    } else if (k == "IP") {
+        // Shared between Ethernet (direct IP string) and Serial
+        // (FPP "<ip>:<port>" composite). Dispatch on the concrete
+        // type — Ethernet first since it's the simpler case.
+        if (auto* eth = dynamic_cast<ControllerEthernet*>(c)) {
+            if (![value isKindOfClass:[NSString class]]) return NO;
+            std::string v = [(NSString*)value UTF8String];
+            if (eth->GetIP() != v) { eth->SetIP(v); changed = YES; }
+        } else if (auto* ser = dynamic_cast<ControllerSerial*>(c)) {
+            if (![value isKindOfClass:[NSString class]]) return NO;
+            std::string ip = [(NSString*)value UTF8String];
+            std::string currentPort = ser->GetPort();
+            std::string tail;
+            if (const auto colon = currentPort.find(":");
+                colon != std::string::npos) {
+                tail = currentPort.substr(colon + 1);
+            } else {
+                tail = currentPort;
+            }
+            const std::string composed = ip + ":" + tail;
+            if (ser->GetPort() != composed) {
+                ser->SetPort(composed); changed = YES;
+            }
+        } else {
+            return NO;
+        }
+    } else if (k == "FPPProxy") {
+        if (auto* eth = dynamic_cast<ControllerEthernet*>(c)) {
+            if (![value isKindOfClass:[NSString class]]) return NO;
+            std::string v = [(NSString*)value UTF8String];
+            if (eth->GetControllerFPPProxy() != v) {
+                eth->SetFPPProxy(v); changed = YES;
+            }
+        } else if (auto* ser = dynamic_cast<ControllerSerial*>(c)) {
+            if (![value isKindOfClass:[NSString class]]) return NO;
+            std::string v = [(NSString*)value UTF8String];
+            if (ser->GetControllerFPPProxy() != v) {
+                ser->SetFPPProxy(v); changed = YES;
+            }
+        } else {
+            return NO;
+        }
+    } else if (k == "Protocol") {
+        if (auto* eth = dynamic_cast<ControllerEthernet*>(c)) {
+            NSArray<NSString*>* opts = EthernetProtocolOptions(eth);
+            int idx = [(NSNumber*)value intValue];
+            if (idx >= 0 && idx < (int)opts.count) {
+                std::string newProto = [opts[idx] UTF8String];
+                if (eth->GetProtocol() != newProto) {
+                    eth->SetProtocol(newProto); changed = YES;
+                }
+            }
+        } else if (auto* ser = dynamic_cast<ControllerSerial*>(c)) {
+            NSArray<NSString*>* opts = SerialProtocolOptions(ser);
+            int idx = [(NSNumber*)value intValue];
+            if (idx < 0 || idx >= (int)opts.count) return NO;
+            std::string newProto = [opts[idx] UTF8String];
+            if (ser->GetProtocol() != newProto) {
+                ser->SetProtocol(newProto); changed = YES;
+            }
+        } else {
+            return NO;
+        }
+    } else if (k == "Priority") {
+        auto* eth = dynamic_cast<ControllerEthernet*>(c);
+        if (!eth) return NO;
+        int v = [(NSNumber*)value intValue];
+        if (eth->GetPriority() != v) { eth->SetPriority(v); changed = YES; }
+    }
+    // Null-specific
+    else if (k == "Channels") {
+        // Two controller subclasses surface a `Channels` key. Try
+        // Null first, then Serial — they don't conflict because
+        // each fixture is one type.
+        auto* nul = dynamic_cast<ControllerNull*>(c);
+        if (nul) {
+            int v = [(NSNumber*)value intValue];
+            if (nul->GetChannels() != v) {
+                nul->SetChannelSize(v);
+                changed = YES;
+            }
+        } else if (auto* ser = dynamic_cast<ControllerSerial*>(c)) {
+            int v = [(NSNumber*)value intValue];
+            if (ser->GetChannels() != v) {
+                ser->SetChannels(v);
+                changed = YES;
+            }
+        } else {
+            return NO;
+        }
+    }
+    // Serial-specific. `IP` / `FPPProxy` / `Protocol` are handled
+    // up in the shared dispatcher because they overlap with
+    // Ethernet keys; the remaining knobs (Port / Speed / I2CDevice
+    // / SPISpeed / Prefix / Postfix) are unique to Serial.
+    else if (k == "Port") {
+        auto* ser = dynamic_cast<ControllerSerial*>(c);
+        if (!ser) return NO;
+        std::string newVal;
+        if ([value isKindOfClass:[NSNumber class]]) {
+            ControllerCaps* serCaps = ControllerCaps::GetControllerConfig(ser);
+            const bool isFPP = (serCaps && serCaps->GetModel() == "FPP");
+            NSArray<NSString*>* opts = isFPP ? FppPortOptions()
+                                              : SerialPortOptions();
+            int idx = [(NSNumber*)value intValue];
+            if (idx < 0 || idx >= (int)opts.count) return NO;
+            newVal = [opts[idx] UTF8String];
+            if (isFPP) {
+                // Re-attach the current IP prefix when present.
+                std::string current = ser->GetPort();
+                if (const auto colon = current.find(":");
+                    colon != std::string::npos) {
+                    newVal = current.substr(0, colon + 1) + newVal;
+                }
+            }
+        } else if ([value isKindOfClass:[NSString class]]) {
+            newVal = [(NSString*)value UTF8String];
+        } else {
+            return NO;
+        }
+        if (ser->GetPort() != newVal) {
+            ser->SetPort(newVal); changed = YES;
+        }
+    } else if (k == "Speed") {
+        auto* ser = dynamic_cast<ControllerSerial*>(c);
+        if (!ser) return NO;
+        NSArray<NSString*>* opts = SerialBaudOptions();
+        int idx = [(NSNumber*)value intValue];
+        if (idx < 0 || idx >= (int)opts.count) return NO;
+        int baud = std::atoi([opts[idx] UTF8String]);
+        if (ser->GetSpeed() != baud) {
+            ser->SetSpeed(baud); changed = YES;
+        }
+    } else if (k == "I2CDevice") {
+        auto* ser = dynamic_cast<ControllerSerial*>(c);
+        if (!ser) return NO;
+        NSArray<NSString*>* opts = I2cDeviceOptions();
+        int idx = [(NSNumber*)value intValue];
+        if (idx < 0 || idx >= (int)opts.count) return NO;
+        int addr = (int)std::strtoul([opts[idx] UTF8String], nullptr, 16);
+        if (ser->GetSpeed() != addr) {
+            ser->SetSpeed(addr); changed = YES;
+        }
+    } else if (k == "SPISpeed") {
+        auto* ser = dynamic_cast<ControllerSerial*>(c);
+        if (!ser) return NO;
+        int v = [(NSNumber*)value intValue];
+        if (ser->GetSpeed() != v) {
+            ser->SetSpeed(v); changed = YES;
+        }
+    } else if (k == "Prefix") {
+        auto* ser = dynamic_cast<ControllerSerial*>(c);
+        if (!ser) return NO;
+        if (![value isKindOfClass:[NSString class]]) return NO;
+        std::string v = [(NSString*)value UTF8String];
+        if (ser->GetSaveablePreFix() != v) {
+            ser->SetPrefix(v); changed = YES;
+        }
+    } else if (k == "Postfix") {
+        auto* ser = dynamic_cast<ControllerSerial*>(c);
+        if (!ser) return NO;
+        if (![value isKindOfClass:[NSString class]]) return NO;
+        std::string v = [(NSString*)value UTF8String];
+        if (ser->GetSaveablePostFix() != v) {
+            ser->SetPostfix(v); changed = YES;
+        }
+    }
+    // ControllerCaps extras — key shape `ControllerExtra.<name>`.
+    else if (k.rfind("ControllerExtra.", 0) == 0) {
+        ControllerCaps* caps = ControllerCaps::GetControllerConfig(c);
+        if (!caps) return NO;
+        const std::string propName = k.substr(strlen("ControllerExtra."));
+        for (const auto& def : caps->GetExtraPropertyDefs()) {
+            if (def.name != propName) continue;
+            std::string newVal;
+            if (def.type == "Enum") {
+                if (![value isKindOfClass:[NSNumber class]]) return NO;
+                int idx = [(NSNumber*)value intValue];
+                if (idx < 0 || idx >= (int)def.values.size()) return NO;
+                newVal = def.values[idx];
+            } else {
+                if (![value isKindOfClass:[NSString class]]) return NO;
+                newVal = [(NSString*)value UTF8String];
+            }
+            const std::string cur = c->GetExtraProperty(def.name, def.defaultValue);
+            if (cur != newVal) {
+                c->SetExtraProperty(def.name, newVal);
+                changed = YES;
+            }
+            break;
+        }
+        if (!changed) return NO;
+    } else {
+        spdlog::warn("setControllerProperty: unknown key '{}' for controller '{}'",
+                     k, name.UTF8String);
+        return NO;
+    }
+
+    if (changed) {
+        [self recalcModelStartChannels];
+        _context->MarkControllersDirty();
+    }
+    return changed;
+}
+
+#pragma mark - J-31.3 — Controllers add / delete
+
+- (nullable NSString*)addControllerOfType:(NSString*)type {
+    if (!_context || !type) return nil;
+    auto& om = _context->GetOutputManager();
+    Controller* c = nullptr;
+    NSString* t = type;
+    if ([t isEqualToString:@"Ethernet"]) {
+        c = new ControllerEthernet(&om);
+    } else if ([t isEqualToString:@"Serial"]) {
+        c = new ControllerSerial(&om);
+    } else if ([t isEqualToString:@"Null"]) {
+        c = new ControllerNull(&om);
+    } else {
+        return nil;
+    }
+    om.AddController(c, -1);
+    [self recalcModelStartChannels];
+    _context->MarkControllersDirty();
+    return [NSString stringWithUTF8String:c->GetName().c_str()];
+}
+
+- (BOOL)deleteController:(NSString*)name {
+    if (!_context || !name) return NO;
+    auto& om = _context->GetOutputManager();
+    if (!om.GetController(name.UTF8String)) return NO;
+    om.DeleteController(name.UTF8String);
+    [self recalcModelStartChannels];
+    _context->MarkControllersDirty();
+    return YES;
+}
+
+- (BOOL)moveController:(NSString*)name toIndex:(int)destIndex {
+    if (!_context || !name) return NO;
+    auto& om = _context->GetOutputManager();
+    Controller* c = om.GetController(name.UTF8String);
+    if (!c) return NO;
+    auto controllers = om.GetControllers();
+    if (destIndex < 0 || destIndex >= (int)controllers.size()) return NO;
+    om.MoveController(c, destIndex);
+    [self recalcModelStartChannels];
+    _context->MarkControllersDirty();
+    return YES;
+}
+
+// Desktop fires WORK_CALCULATE_START_CHANNELS via AddASAPWork
+// after every model or controller mutation that can shift
+// channel ranges; iPad has no work queue so the bridge runs
+// the recalc inline at the end of each public mutator. Cheap
+// even for big shows (one walk of the model graph) and
+// idempotent — extra calls are harmless.
+- (void)recalcModelStartChannels {
+    if (_context && _context->HasModelManager()) {
+        _context->GetModelManager().RecalcStartChannels();
+    }
+}
+
+// `Model::SetControllerName` queues WORK_MODELS_REWORK_STARTCHANNELS
+// in addition to WORK_CALCULATE_START_CHANNELS — without that
+// rework, a model whose controllerName was just changed keeps
+// its old start channel (often outside the new controller's
+// range), which makes `UDController::Rescan` silently drop it
+// from any port. Visualize sees the model vanish from the new
+// controller's wiring AND its old controller's wiring (it gets
+// filtered out before either gets a chance to claim it). Call
+// both methods from any flow that reassigns a model to a new
+// controller / port.
+- (void)reworkAndRecalcStartChannels {
+    if (!_context || !_context->HasModelManager()) return;
+    _context->GetModelManager().ReworkStartChannel();
+    _context->GetModelManager().RecalcStartChannels();
+}
+
+#pragma mark - J-31.6 — Controller upload
+
+// Minimal UICallbacks impl for upload. Default-yes for prompts
+// (the user already authorized by tapping Upload), collects any
+// status messages into a log string the bridge returns to
+// Swift. File / directory / text input aren't reachable from
+// the upload code paths we support today (FPP, WLED,
+// ESPixelStick, ESPixelStickV4) — they're stubbed defensively.
+class iPadUploadCallbacks : public UICallbacks {
+public:
+    std::string captured;
+
+    void ShowMessage(const std::string& message,
+                     const std::string& /*caption*/) const override {
+        const_cast<iPadUploadCallbacks*>(this)->captured
+            .append(message).append("\n");
+    }
+    bool PromptYesNo(const std::string& message,
+                     const std::string& /*caption*/) const override {
+        const_cast<iPadUploadCallbacks*>(this)->captured
+            .append("[auto-yes] ").append(message).append("\n");
+        return true;
+    }
+    std::string PromptForDirectory(const std::string& /*message*/,
+                                    const std::string& /*defaultPath*/) const override {
+        return "";
+    }
+    std::string PromptForFile(const std::string& /*message*/,
+                               const std::string& /*wildcard*/,
+                               const std::string& /*defaultPath*/) const override {
+        return "";
+    }
+    long PromptForNumber(const std::string& /*message*/,
+                          const std::string& /*caption*/,
+                          long defaultValue,
+                          long /*min*/, long /*max*/) const override {
+        return defaultValue;
+    }
+    std::string PromptForText(const std::string& /*message*/,
+                                const std::string& /*caption*/,
+                                const std::string& defaultValue) const override {
+        return defaultValue;
+    }
+    ProgressToken BeginProgress(const std::string& message,
+                                 int /*maximum*/) override {
+        captured.append(message).append("\n");
+        return 1;
+    }
+    void UpdateProgress(ProgressToken /*token*/, int /*value*/,
+                         const std::string& newMessage) override {
+        if (!newMessage.empty()) {
+            captured.append(newMessage).append("\n");
+        }
+    }
+    void EndProgress(ProgressToken /*token*/) override {}
+};
+
+// Run either input- or output-upload for the named controller.
+// Returns the standard `{success, message, log}` shape both
+// public methods use.
+- (NSDictionary*)runUpload:(NSString*)name input:(BOOL)isInputUpload {
+    NSMutableDictionary* result = [@{
+        @"success": @NO, @"message": @"", @"log": @"",
+    } mutableCopy];
+    if (!_context || !name) {
+        result[@"message"] = @"Internal error: no render context.";
+        return result;
+    }
+    auto& om = _context->GetOutputManager();
+    Controller* c = om.GetController(name.UTF8String);
+    if (!c) {
+        result[@"message"] = @"Controller not found.";
+        return result;
+    }
+    ControllerCaps* caps = ControllerCaps::GetControllerConfig(c);
+    if (!caps) {
+        result[@"message"] = @"Controller has no capabilities entry; "
+                              @"upload is unavailable.";
+        return result;
+    }
+    if (isInputUpload) {
+        if (!caps->SupportsInputOnlyUpload()) {
+            result[@"message"] = @"This controller does not support "
+                                  @"input upload.";
+            return result;
+        }
+    } else if (!caps->SupportsUpload()) {
+        result[@"message"] = @"This controller does not support "
+                              @"output upload.";
+        return result;
+    }
+    std::string ip = c->GetResolvedIP(true);
+    if (ip.empty() || ip == "MULTICAST") {
+        result[@"message"] = @"This controller's IP isn't set (or is "
+                              @"MULTICAST). Edit the IP in the "
+                              @"property pane before uploading.";
+        return result;
+    }
+
+    // Pre-flight: recompute model start channels so the upload
+    // reflects current model assignments. Matches desktop's
+    // `RecalcModels` call inside `UploadInputToController` /
+    // `UploadOutputToController`.
+    if (_context->HasModelManager()) {
+        _context->GetModelManager().RecalcStartChannels();
+    }
+
+    iPadUploadCallbacks cbs;
+    std::unique_ptr<BaseController> bc(BaseController::CreateBaseController(c, ip));
+    if (!bc) {
+        result[@"message"] = @"Unable to create a connection for this "
+                              @"controller's vendor/model.";
+        result[@"log"] = [NSString stringWithUTF8String:cbs.captured.c_str()];
+        return result;
+    }
+    if (!bc->IsConnected()) {
+        result[@"message"] = [NSString stringWithFormat:
+            @"Could not connect to %s. Verify the IP and that the "
+            @"controller is powered on and on the same network.",
+            ip.c_str()];
+        result[@"log"] = [NSString stringWithUTF8String:cbs.captured.c_str()];
+        return result;
+    }
+    bool ok = false;
+    if (isInputUpload) {
+        ok = bc->SetInputUniverses(c, &cbs);
+    } else {
+        if (!_context->HasModelManager()) {
+            result[@"message"] = @"Models aren't loaded; "
+                                  @"can't compute output channels.";
+            result[@"log"] = [NSString stringWithUTF8String:cbs.captured.c_str()];
+            return result;
+        }
+        ok = bc->SetOutputs(&_context->GetModelManager(), &om, c, &cbs);
+    }
+    result[@"success"] = @(ok);
+    NSString* label = isInputUpload ? @"Input" : @"Output";
+    if (ok) {
+        result[@"message"] = [NSString stringWithFormat:
+            @"%@ upload complete.", label];
+    } else {
+        result[@"message"] = [NSString stringWithFormat:
+            @"%@ upload failed. Check the log for details.", label];
+    }
+    result[@"log"] = [NSString stringWithUTF8String:cbs.captured.c_str()];
+    return result;
+}
+
+- (NSDictionary*)uploadOutputForController:(NSString*)name {
+    return [self runUpload:name input:NO];
+}
+
+- (NSDictionary*)uploadInputForController:(NSString*)name {
+    return [self runUpload:name input:YES];
+}
+
+- (NSDictionary*)runControllerDiscovery {
+    NSMutableArray<NSString*>* addedNames = [NSMutableArray array];
+    NSMutableArray<NSDictionary*>* mismatches = [NSMutableArray array];
+    NSInteger already = 0;
+    if (!_context) {
+        return @{@"added": @0, @"already": @0,
+                 @"addedNames": addedNames, @"mismatches": mismatches};
+    }
+    auto& om = _context->GetOutputManager();
+
+    // Construct a single Discovery instance and register every
+    // protocol scanner desktop's PrepareAllControllerDiscovery
+    // wires up. FPP needs an optional list of forced IPs — we
+    // pass an empty list (the iPad has no "FPPConnectForcedIPs"
+    // preference today; broadcast discovery is enough for the
+    // common case).
+    DiscoveryDelegate defaultDelegate;
+    Discovery discovery(&om, &defaultDelegate);
+    std::list<std::string> emptyForcedAddresses;
+    FPP::PrepareDiscovery(discovery, emptyForcedAddresses);
+    ArtNetOutput::PrepareDiscovery(discovery);
+    TwinklyOutput::PrepareDiscovery(discovery);
+    Pixlite16::PrepareDiscovery(discovery);
+    DDPOutput::PrepareDiscovery(discovery);
+
+    discovery.Discover();
+
+    // Walk each result. Auto-add when there's no conflict;
+    // otherwise capture the conflict for the SwiftUI side to
+    // resolve via `applyDiscoveryMismatch:action:`. Mismatch
+    // classification mirrors desktop's `OnButtonDiscoverClick`
+    // dispatch (TabSetup.cpp:1534):
+    //   • IP exact match + same name → already.
+    //   • IP exact match + different name (single existing
+    //     with same protocol) → rename mismatch.
+    //   • IP doesn't match + same name + same protocol on an
+    //     existing fixture whose IP is a numeric (not hostname)
+    //     address → ip-update mismatch.
+    //   • Neither → auto-add.
+    for (DiscoveredData* d : discovery.GetResults()) {
+        if (!d || !d->controller) continue;
+        ControllerEthernet* eth = d->controller;
+
+        // Existing controller(s) with this IP?
+        auto byIP = om.GetControllers(eth->GetIP());
+        if (!byIP.empty()) {
+            // IP collision. If the names also match, treat as
+            // already-known. If they differ and the protocols
+            // match, surface a rename prompt.
+            ControllerEthernet* existing =
+                dynamic_cast<ControllerEthernet*>(byIP.front());
+            if (existing
+                && existing->GetName() != eth->GetName()
+                && existing->GetProtocol() == eth->GetProtocol()
+                && byIP.size() == 1) {
+                NSString* mid = [[NSUUID UUID] UUIDString];
+                [mismatches addObject:@{
+                    @"id":             mid,
+                    @"kind":           @"rename",
+                    @"existingName":   [NSString stringWithUTF8String:existing->GetName().c_str()],
+                    @"existingIP":     [NSString stringWithUTF8String:existing->GetIP().c_str()],
+                    @"discoveredName": [NSString stringWithUTF8String:eth->GetName().c_str()],
+                }];
+            } else {
+                ++already;
+            }
+            continue;
+        }
+
+        // No IP match — search for a name+protocol match. When
+        // found and the existing IP isn't already a hostname
+        // (which would be authoritative), surface an ip-update
+        // prompt. Existing hostnames are left alone because
+        // desktop treats them as user-managed.
+        ControllerEthernet* nameMatch = nullptr;
+        for (Controller* itc : om.GetControllers()) {
+            auto* other = dynamic_cast<ControllerEthernet*>(itc);
+            if (other
+                && other->GetName() == eth->GetName()
+                && other->GetProtocol() == eth->GetProtocol()) {
+                nameMatch = other;
+                break;
+            }
+        }
+        if (nameMatch != nullptr) {
+            if (ip_utils::IsValidHostname(nameMatch->GetIP())) {
+                // Existing IP is a hostname — assume the user
+                // configured it explicitly; treat as known.
+                ++already;
+                continue;
+            }
+            NSString* mid = [[NSUUID UUID] UUIDString];
+            [mismatches addObject:@{
+                @"id":            mid,
+                @"kind":          @"ip-update",
+                @"existingName":  [NSString stringWithUTF8String:nameMatch->GetName().c_str()],
+                @"existingIP":    [NSString stringWithUTF8String:nameMatch->GetIP().c_str()],
+                @"discoveredIP":  [NSString stringWithUTF8String:eth->GetIP().c_str()],
+                @"discoveredName":[NSString stringWithUTF8String:eth->GetName().c_str()],
+                @"protocol":      [NSString stringWithUTF8String:eth->GetProtocol().c_str()],
+                @"vendor":        [NSString stringWithUTF8String:eth->GetVendor().c_str()],
+                @"model":         [NSString stringWithUTF8String:eth->GetModel().c_str()],
+                @"variant":       [NSString stringWithUTF8String:eth->GetVariant().c_str()],
+            }];
+            continue;
+        }
+
+        // Auto-add path (no conflict).
+        eth->EnsureUniqueId();
+        eth->EnsureUniqueName();
+        if (d->typeId > 0 && d->typeId < 0x80) {
+            eth->SetActive("xLights Only");
+            if (eth->GetVendor().empty()) {
+                eth->SetVendor("FPP");
+            }
+        }
+        om.AddController(eth);
+        [addedNames addObject:[NSString stringWithUTF8String:eth->GetName().c_str()]];
+        d->controller = nullptr;  // ownership now belongs to OutputManager
+    }
+    if (addedNames.count > 0) {
+        _context->MarkControllersDirty();
+    }
+    return @{
+        @"added":      @(addedNames.count),
+        @"already":    @(already),
+        @"addedNames": addedNames,
+        @"mismatches": mismatches,
+    };
+}
+
+- (BOOL)applyDiscoveryMismatch:(NSDictionary*)descriptor
+                         action:(NSString*)action {
+    if (!_context || !descriptor || !action) return NO;
+    auto& om = _context->GetOutputManager();
+    NSString* kind = descriptor[@"kind"];
+    NSString* existingName = descriptor[@"existingName"];
+    if (!kind || !existingName) return NO;
+
+    // "skip" is always a valid no-op — saves the SwiftUI side
+    // from special-casing it before iterating.
+    if ([action isEqualToString:@"skip"]) return YES;
+
+    if ([kind isEqualToString:@"ip-update"]) {
+        NSString* discoveredIP   = descriptor[@"discoveredIP"];
+        NSString* discoveredName = descriptor[@"discoveredName"];
+        if (!discoveredIP) return NO;
+
+        if ([action isEqualToString:@"update"]) {
+            // Find by name; bail if it's been renamed/deleted
+            // since discovery ran (rare but possible).
+            Controller* c = om.GetController(existingName.UTF8String);
+            auto* eth = dynamic_cast<ControllerEthernet*>(c);
+            if (!eth) return NO;
+            eth->SetIP([discoveredIP UTF8String]);
+            [self recalcModelStartChannels];
+            _context->MarkControllersDirty();
+            return YES;
+        } else if ([action isEqualToString:@"add-new"]) {
+            // Reconstruct a ControllerEthernet from the captured
+            // scalars; AddController's `EnsureUniqueName` path
+            // will resolve any name collision.
+            ControllerEthernet* newEth = new ControllerEthernet(&om);
+            if (NSString* p = descriptor[@"protocol"]; p.length > 0) {
+                newEth->SetProtocol([p UTF8String]);
+            }
+            newEth->SetIP([discoveredIP UTF8String]);
+            if (NSString* v = descriptor[@"vendor"]; v.length > 0) {
+                newEth->SetVendor([v UTF8String]);
+            }
+            if (NSString* m = descriptor[@"model"]; m.length > 0) {
+                newEth->SetModel([m UTF8String]);
+            }
+            if (NSString* v = descriptor[@"variant"]; v.length > 0) {
+                newEth->SetVariant([v UTF8String]);
+            }
+            if (discoveredName.length > 0) {
+                newEth->SetName([discoveredName UTF8String]);
+            }
+            newEth->EnsureUniqueId();
+            newEth->EnsureUniqueName();
+            om.AddController(newEth);
+            [self recalcModelStartChannels];
+            _context->MarkControllersDirty();
+            return YES;
+        }
+        return NO;
+    }
+
+    if ([kind isEqualToString:@"rename"]) {
+        if (![action isEqualToString:@"rename"]) return NO;
+        NSString* discoveredName = descriptor[@"discoveredName"];
+        if (discoveredName.length == 0) return NO;
+        Controller* c = om.GetController(existingName.UTF8String);
+        if (!c) return NO;
+        // Refuse if the new name already exists — would silently
+        // collapse two distinct controllers.
+        if (om.GetController(discoveredName.UTF8String)) return NO;
+
+        const std::string oldName = c->GetName();
+        const std::string newName = [discoveredName UTF8String];
+        c->SetName(newName);
+        // Rewrite every model's controllerName so existing
+        // assignments stay valid. Mirrors desktop's `renames`
+        // map walk in OnButtonDiscoverClick (TabSetup.cpp:1602).
+        if (_context->HasModelManager()) {
+            auto& mgr = _context->GetModelManager();
+            for (const auto& it : mgr) {
+                Model* m = it.second;
+                if (m && m->GetControllerName() == oldName) {
+                    m->SetControllerName(newName);
+                }
+            }
+        }
+        [self recalcModelStartChannels];
+        _context->MarkControllersDirty();
+        return YES;
+    }
+    return NO;
+}
+
+#pragma mark - J-32.1 — Controllers Visualize (read-only wiring)
+
+// Build a per-model NSDictionary matching the wiringForController:
+// schema. Used for both port-attached models and the
+// no-connection bucket — pass `pm == nullptr` for no-connection
+// models where only the raw Model is known.
+static NSDictionary* BuildWiringModelEntry(UDControllerPortModel* pm,
+                                            Model* fallback,
+                                            Controller* controller,
+                                            const ControllerCaps* caps) {
+    Model* m = pm ? pm->GetModel() : fallback;
+    NSMutableDictionary* d = [NSMutableDictionary dictionary];
+    if (m) {
+        d[@"name"]  = [NSString stringWithUTF8String:m->GetName().c_str()];
+        d[@"label"] = [NSString stringWithUTF8String:m->GetName().c_str()];
+    } else {
+        d[@"name"]  = @"";
+        d[@"label"] = @"";
+    }
+    if (pm) {
+        d[@"string"]               = @(pm->GetString());
+        d[@"startChannel"]         = @((long long)pm->GetStartChannel());
+        d[@"endChannel"]           = @((long long)pm->GetEndChannel());
+        d[@"channels"]             = @((long long)pm->Channels());
+        d[@"smartRemote"]          = @(pm->GetSmartRemote());
+        char letter = pm->GetSmartRemoteLetter();
+        d[@"smartRemoteLetter"]    = letter ?
+            [NSString stringWithFormat:@"%c", letter] : @"";
+        d[@"smartRemoteType"]      = [NSString stringWithUTF8String:pm->GetSmartRemoteType().c_str()];
+        d[@"universe"]             = @(pm->GetUniverse());
+        d[@"universeStartChannel"] = @(pm->GetUniverseStartChannel());
+        d[@"protocol"]             = [NSString stringWithUTF8String:pm->GetProtocol().c_str()];
+
+        std::string reason;
+        const bool valid = pm->Check(controller, caps, reason);
+        d[@"valid"]         = @(valid ? YES : NO);
+        d[@"invalidReason"] = [NSString stringWithUTF8String:reason.c_str()];
+    } else if (m) {
+        d[@"string"]               = @(0);
+        d[@"startChannel"]         = @((long long)m->GetFirstChannel() + 1);
+        d[@"endChannel"]           = @((long long)m->GetLastChannel() + 1);
+        d[@"channels"]             = @((long long)(m->GetLastChannel() - m->GetFirstChannel() + 1));
+        d[@"smartRemote"]          = @(m->GetSmartRemote());
+        d[@"smartRemoteLetter"]    = @"";
+        d[@"smartRemoteType"]      = [NSString stringWithUTF8String:m->GetSmartRemoteType().c_str()];
+        d[@"universe"]             = @(0);
+        d[@"universeStartChannel"] = @(0);
+        d[@"protocol"]             = [NSString stringWithUTF8String:m->GetControllerProtocol().c_str()];
+        d[@"valid"]                = @(NO);
+        d[@"invalidReason"]        = @"Model is not assigned to a port on this controller";
+    }
+    return d;
+}
+
+static NSString* PortKindFromTypeString(const std::string& type) {
+    if (type == "Pixel")            return @"pixel";
+    if (type == "Serial")           return @"serial";
+    if (type == "PWM")              return @"pwm";
+    if (type == "Virtual Matrix")   return @"virtualMatrix";
+    if (type == "LED Panel")        return @"ledPanelMatrix";
+    return [NSString stringWithUTF8String:type.c_str()];
+}
+
+static NSString* PortDisplayName(const std::string& type, int portNum) {
+    if (type == "Pixel")           return [NSString stringWithFormat:@"Pixel Port %d", portNum];
+    if (type == "Serial")          return [NSString stringWithFormat:@"Serial Port %d", portNum];
+    if (type == "PWM")             return [NSString stringWithFormat:@"PWM Port %d", portNum];
+    if (type == "Virtual Matrix")  return [NSString stringWithFormat:@"Virtual Matrix %d", portNum];
+    if (type == "LED Panel")       return [NSString stringWithFormat:@"LED Panel %d", portNum];
+    return [NSString stringWithFormat:@"%s %d", type.c_str(), portNum];
+}
+
+static NSDictionary* BuildWiringPortEntry(UDControllerPort* port,
+                                           Controller* controller,
+                                           const ControllerCaps* caps,
+                                           bool isPixel) {
+    if (!port) return @{};
+    const std::string type = port->GetType();
+    NSMutableArray<NSDictionary*>* modelEntries = [NSMutableArray array];
+    for (UDControllerPortModel* pm : port->GetModels()) {
+        if (!pm) continue;
+        [modelEntries addObject:BuildWiringModelEntry(pm, nullptr, controller, caps)];
+    }
+    // Skip the per-port Check on empty ports — Check reports
+    // "Invalid protocol on pixel port N:" for any port whose
+    // _protocol is empty, which is always true for ports the
+    // user hasn't dropped a model onto yet. The empty case is
+    // shown as a "Drop here" target in the UI, not as a
+    // hardware-validity error.
+    bool valid = true;
+    std::string reason;
+    if (port->GetModelCount() > 0 && caps) {
+        valid = port->Check(controller, isPixel, caps, reason);
+    }
+    return @{
+        @"kind":              PortKindFromTypeString(type),
+        @"port":              @(port->GetPort()),
+        @"name":              PortDisplayName(type, port->GetPort()),
+        @"protocol":          [NSString stringWithUTF8String:port->GetProtocol().c_str()],
+        @"valid":             @(valid ? YES : NO),
+        @"invalidReason":     [NSString stringWithUTF8String:reason.c_str()],
+        @"isSmartRemotePort": @(port->IsSmartRemotePort() ? YES : NO),
+        @"smartRemoteCount":  @(port->GetSmartRemoteCount()),
+        @"startChannel":      @((long long)port->GetStartChannel()),
+        @"endChannel":        @((long long)port->GetEndChannel()),
+        @"channels":          @((long long)port->Channels()),
+        @"pixels":            @(port->Pixels()),
+        @"models":            modelEntries,
+    };
+}
+
+// Placeholder for a port that exists in caps but has no models
+// today. Built directly so we don't auto-create a UDControllerPort
+// in `_pixelPorts` — those empty entries pollute `UDController::
+// Check`'s "Pixel ports only support a single protocol" check,
+// which compares each port's protocol against the first non-
+// empty one. An empty placeholder protocol ("" != "ws2811")
+// would spuriously trigger that error.
+static NSDictionary* BuildEmptyPortEntry(NSString* kind,
+                                          int portNum,
+                                          const std::string& typeStr) {
+    return @{
+        @"kind":              kind,
+        @"port":              @(portNum),
+        @"name":              PortDisplayName(typeStr, portNum),
+        @"protocol":          @"",
+        @"valid":             @YES,
+        @"invalidReason":     @"",
+        @"isSmartRemotePort": @NO,
+        @"smartRemoteCount":  @0,
+        @"startChannel":      @0,
+        @"endChannel":        @0,
+        @"channels":          @0,
+        @"pixels":            @0,
+        @"models":            @[],
+    };
+}
+
+- (nullable NSDictionary*)wiringForController:(NSString*)name {
+    if (!_context || !name || !_context->HasModelManager()) return nil;
+    auto& om = _context->GetOutputManager();
+    auto& mm = _context->GetModelManager();
+    Controller* c = om.GetController(name.UTF8String);
+    if (!c) return nil;
+
+    UDController cud(c, &om, &mm, /*eliminateOverlaps=*/false);
+    ControllerCaps* caps = ControllerCaps::GetControllerConfig(c);
+
+    // Run the controller-level Check FIRST, before we touch any
+    // `GetController*Port` lookups. The auto-create path in
+    // those getters silently inserts empty `UDControllerPort`
+    // entries with `_protocol == ""`, which then break
+    // `UDController::Check`'s "single protocol per port-kind"
+    // detector (it compares each entry's protocol against the
+    // first non-empty one). Snapshotting `Check` while
+    // `_pixelPorts` / `_serialPorts` only hold model-bearing
+    // entries gives us the validity decision the desktop dialog
+    // would show.
+    std::string checkReason;
+    const bool overallValid = cud.Check(caps, checkReason);
+
+    NSMutableArray<NSDictionary*>* ports = [NSMutableArray array];
+
+    // Caps holds the hardware's actual port count; show every
+    // one (even empty) so the user can drag onto them. Fall
+    // back to the UDController's max when caps are missing.
+    const int capsPixel  = caps ? caps->GetMaxPixelPort()  : 0;
+    const int capsSerial = caps ? caps->GetMaxSerialPort() : 0;
+    const int hiPixel  = std::max(capsPixel,  cud.GetMaxPixelPort());
+    const int hiSerial = std::max(capsSerial, cud.GetMaxSerialPort());
+    for (int p = 1; p <= hiPixel; ++p) {
+        if (cud.HasPixelPort(p)) {
+            [ports addObject:BuildWiringPortEntry(cud.GetControllerPixelPort(p), c, caps, /*pixel*/ true)];
+        } else {
+            [ports addObject:BuildEmptyPortEntry(@"pixel", p, "Pixel")];
+        }
+    }
+    for (int p = 1; p <= hiSerial; ++p) {
+        if (cud.HasSerialPort(p)) {
+            [ports addObject:BuildWiringPortEntry(cud.GetControllerSerialPort(p), c, caps, /*pixel*/ false)];
+        } else {
+            [ports addObject:BuildEmptyPortEntry(@"serial", p, "Serial")];
+        }
+    }
+    // PWM / Virtual Matrix / LED Panel Matrix don't have caps-
+    // side max counts the same way; only show ports that exist.
+    for (int p = 1; p <= cud.GetMaxPWMPort(); ++p) {
+        if (cud.HasPWMPort(p)) {
+            [ports addObject:BuildWiringPortEntry(cud.GetControllerPWMPort(p), c, caps, false)];
+        }
+    }
+    for (int p = 1; p <= cud.GetMaxVirtualMatrixPort(); ++p) {
+        if (cud.HasVirtualMatrixPort(p)) {
+            [ports addObject:BuildWiringPortEntry(cud.GetControllerVirtualMatrixPort(p), c, caps, false)];
+        }
+    }
+    for (int p = 1; p <= cud.GetMaxLEDPanelMatrixPort(); ++p) {
+        if (cud.HasLEDPanelMatrixPort(p)) {
+            [ports addObject:BuildWiringPortEntry(cud.GetControllerLEDPanelMatrixPort(p), c, caps, false)];
+        }
+    }
+
+    NSMutableArray<NSDictionary*>* noConn = [NSMutableArray array];
+    for (Model* m : cud.GetNoConnectionModels()) {
+        if (!m) continue;
+        [noConn addObject:BuildWiringModelEntry(nullptr, m, c, caps)];
+    }
+
+    // Drag source: every concrete model in the show that ISN'T
+    // already on a port of this controller (and isn't already in
+    // the no-connection bucket). Mirrors desktop's right-side
+    // "Models" pane in ControllerModelDialog. Excludes model
+    // groups + submodels — only top-level models map cleanly to
+    // a controller port.
+    std::set<std::string> assigned;
+    for (NSDictionary* p in ports) {
+        for (NSDictionary* m in p[@"models"]) {
+            if (NSString* n = m[@"name"]) {
+                assigned.insert(n.UTF8String);
+            }
+        }
+    }
+    for (NSDictionary* m in noConn) {
+        if (NSString* n = m[@"name"]) {
+            assigned.insert(n.UTF8String);
+        }
+    }
+    NSMutableArray<NSDictionary*>* available = [NSMutableArray array];
+    for (const auto& [name, m] : mm.GetModels()) {
+        if (!m) continue;
+        if (m->GetDisplayAs() == DisplayAsType::ModelGroup) continue;
+        if (m->GetDisplayAs() == DisplayAsType::SubModel)   continue;
+        if (assigned.count(m->GetName())) continue;
+        NSMutableDictionary* d = [NSMutableDictionary dictionary];
+        d[@"name"]            = [NSString stringWithUTF8String:m->GetName().c_str()];
+        d[@"channels"]        = @((long long)(m->GetLastChannel() - m->GetFirstChannel() + 1));
+        d[@"controllerName"]  = [NSString stringWithUTF8String:m->GetControllerName().c_str()];
+        d[@"controllerPort"]  = @(m->GetControllerPort(1));
+        d[@"protocol"]        = [NSString stringWithUTF8String:m->GetControllerProtocol().c_str()];
+        [available addObject:d];
+    }
+
+    long long totalModels = 0;
+    long long totalChannels = 0;
+    for (NSDictionary* p in ports) {
+        totalModels   += [p[@"models"] count];
+        totalChannels += [p[@"channels"] longLongValue];
+    }
+
+    return @{
+        @"name":         [NSString stringWithUTF8String:c->GetName().c_str()],
+        @"ip":           [NSString stringWithUTF8String:c->GetIP().c_str()],
+        @"vendor":       [NSString stringWithUTF8String:c->GetVendor().c_str()],
+        @"model":        [NSString stringWithUTF8String:c->GetModel().c_str()],
+        @"variant":      [NSString stringWithUTF8String:c->GetVariant().c_str()],
+        @"valid":        @(overallValid ? YES : NO),
+        @"errorMessage": [NSString stringWithUTF8String:checkReason.c_str()],
+        @"ports":        ports,
+        @"noConnection": noConn,
+        @"availableModels": available,
+        @"totals": @{
+            @"models":      @(totalModels),
+            @"channels":    @(totalChannels),
+            @"pixelPorts":  @(cud.GetMaxPixelPort()),
+            @"serialPorts": @(cud.GetMaxSerialPort()),
+        },
+    };
+}
+
+#pragma mark - J-32.2 — Visualize: per-port protocol picker
+
+- (NSArray<NSString*>*)availableProtocolsForController:(NSString*)name
+                                                  kind:(NSString*)kind {
+    NSMutableArray<NSString*>* out = [NSMutableArray array];
+    if (!_context || !name || !kind) return out;
+    Controller* c = _context->GetOutputManager().GetController(name.UTF8String);
+    if (!c) return out;
+    ControllerCaps* caps = ControllerCaps::GetControllerConfig(c);
+
+    std::vector<std::string> protos;
+    if ([kind isEqualToString:@"pixel"]) {
+        protos = caps
+            ? GetAllPixelTypes(caps->GetPixelProtocols(),
+                                /*includeSerial*/ false,
+                                /*includeArtificial*/ true,
+                                /*includeMatrices*/ false)
+            : GetAllPixelTypes(/*includeSerial*/ false,
+                                /*includeArtificial*/ true,
+                                /*includeMatrices*/ true);
+    } else if ([kind isEqualToString:@"serial"]) {
+        protos = caps
+            ? GetAllSerialTypes(caps->GetSerialProtocols())
+            : GetAllSerialTypes();
+    } else {
+        return out;
+    }
+    for (const auto& p : protos) {
+        [out addObject:[NSString stringWithUTF8String:p.c_str()]];
+    }
+    return out;
+}
+
+- (BOOL)setPortProtocolOnController:(NSString*)name
+                                kind:(NSString*)kind
+                                port:(int)port
+                            protocol:(NSString*)protocol {
+    if (!_context || !name || !kind || !protocol) return NO;
+    if (![kind isEqualToString:@"pixel"] && ![kind isEqualToString:@"serial"]) return NO;
+    Controller* c = _context->GetOutputManager().GetController(name.UTF8String);
+    if (!c) return NO;
+
+    NSArray<NSString*>* valid =
+        [self availableProtocolsForController:name kind:kind];
+    if (![valid containsObject:protocol]) return NO;
+
+    const std::string proto = protocol.UTF8String;
+    auto& om = _context->GetOutputManager();
+    auto& mm = _context->GetModelManager();
+    UDController cud(c, &om, &mm, /*eliminateOverlaps=*/false);
+    ControllerCaps* caps = ControllerCaps::GetControllerConfig(c);
+
+    // Hardware that can't mix protocols across ports of the same
+    // kind has to apply the new protocol everywhere of that kind.
+    // Falcon F16 et al. are the common case here.
+    const bool applyToAllPorts =
+        caps && !caps->SupportsMultipleSimultaneousOutputProtocols();
+
+    bool changed = false;
+    auto applyToPort = [&](UDControllerPort* p) {
+        if (!p) return;
+        for (UDControllerPortModel* pm : p->GetModels()) {
+            if (!pm || !pm->GetModel()) continue;
+            if (pm->GetModel()->GetControllerProtocol() != proto) {
+                pm->GetModel()->SetControllerProtocol(proto);
+                _context->MarkLayoutModelDirty(pm->GetModel()->GetName());
+                changed = true;
+            }
+        }
+    };
+
+    if ([kind isEqualToString:@"pixel"]) {
+        if (applyToAllPorts) {
+            for (int p = 1; p <= cud.GetMaxPixelPort(); ++p) {
+                applyToPort(cud.GetControllerPixelPort(p));
+            }
+        } else {
+            applyToPort(cud.GetControllerPixelPort(port));
+        }
+    } else {
+        if (applyToAllPorts) {
+            for (int p = 1; p <= cud.GetMaxSerialPort(); ++p) {
+                applyToPort(cud.GetControllerSerialPort(p));
+            }
+        } else {
+            applyToPort(cud.GetControllerSerialPort(port));
+        }
+    }
+
+    if (changed) {
+        [self recalcModelStartChannels];
+    }
+    return changed;
+}
+
+#pragma mark - J-32.3 — Visualize: per-model controller-connection reader
+
+- (nullable NSDictionary*)controllerConnectionForModel:(NSString*)modelName {
+    if (!_context || !modelName || !_context->HasModelManager()) return nil;
+    Model* m = _context->GetModelManager()[modelName.UTF8String];
+    if (!m) return nil;
+    ControllerConnection& cc = m->GetCtrlConn();
+
+    NSMutableArray<NSString*>* colorOrderOptions = [NSMutableArray array];
+    for (const auto& s : Model::CONTROLLER_COLORORDER) {
+        [colorOrderOptions addObject:[NSString stringWithUTF8String:s.c_str()]];
+    }
+    const std::string curOrder = cc.GetColorOrder();
+    int curOrderIdx = -1;
+    for (int i = 0; i < (int)Model::CONTROLLER_COLORORDER.size(); ++i) {
+        if (Model::CONTROLLER_COLORORDER[i] == curOrder) { curOrderIdx = i; break; }
+    }
+
+    NSMutableArray<NSString*>* srTypeOptions = [NSMutableArray array];
+    for (const auto& s : cc.GetSmartRemoteTypes()) {
+        [srTypeOptions addObject:[NSString stringWithUTF8String:s.c_str()]];
+    }
+
+    return @{
+        @"brightnessActive": @(cc.IsPropertySet(ControllerConnection::BRIGHTNESS_ACTIVE) ? YES : NO),
+        @"brightness":       @(cc.GetBrightness()),
+        @"gammaActive":      @(cc.IsPropertySet(ControllerConnection::GAMMA_ACTIVE) ? YES : NO),
+        @"gamma":            @(cc.GetGamma()),
+        @"colorOrderActive": @(cc.IsPropertySet(ControllerConnection::COLOR_ORDER_ACTIVE) ? YES : NO),
+        @"colorOrderIndex":  @(curOrderIdx),
+        @"colorOrder":       [NSString stringWithUTF8String:curOrder.c_str()],
+        @"colorOrderOptions": colorOrderOptions,
+        @"groupCountActive": @(cc.IsPropertySet(ControllerConnection::GROUP_COUNT_ACTIVE) ? YES : NO),
+        @"groupCount":       @(cc.GetGroupCount()),
+        @"startNullsActive": @(cc.IsPropertySet(ControllerConnection::START_NULLS_ACTIVE) ? YES : NO),
+        @"startNulls":       @(cc.GetStartNulls()),
+        @"endNullsActive":   @(cc.IsPropertySet(ControllerConnection::END_NULLS_ACTIVE) ? YES : NO),
+        @"endNulls":         @(cc.GetEndNulls()),
+        @"dmxChannel":       @(cc.GetDMXChannel()),
+        @"useSmartRemote":   @(cc.IsPropertySet(ControllerConnection::USE_SMART_REMOTE) ? YES : NO),
+        @"smartRemote":      @(cc.GetSmartRemote()),
+        @"smartRemoteType":  [NSString stringWithUTF8String:cc.GetSmartRemoteType().c_str()],
+        @"smartRemoteTypeOptions": srTypeOptions,
+        @"srMaxCascade":     @(cc.GetSRMaxCascade()),
+        @"srCascadeOnPort":  @(cc.GetSRCascadeOnPort() ? YES : NO),
+    };
+}
+
+#pragma mark - J-32.5 — Visualize: drag-drop model assignment
+
+// Find the UDControllerPort matching kind + port number. Returns
+// nullptr when kind is unknown or the port isn't reachable.
+static UDControllerPort* GetUDPortForKind(UDController& cud,
+                                           NSString* portKind,
+                                           int port) {
+    if ([portKind isEqualToString:@"pixel"])         return cud.GetControllerPixelPort(port);
+    if ([portKind isEqualToString:@"serial"])        return cud.GetControllerSerialPort(port);
+    if ([portKind isEqualToString:@"pwm"])           return cud.GetControllerPWMPort(port);
+    if ([portKind isEqualToString:@"virtualMatrix"]) return cud.GetControllerVirtualMatrixPort(port);
+    if ([portKind isEqualToString:@"ledPanelMatrix"]) return cud.GetControllerLEDPanelMatrixPort(port);
+    return nullptr;
+}
+
+- (BOOL)assignModelToController:(NSString*)modelName
+                  controllerName:(NSString*)controllerName
+                            kind:(NSString*)portKind
+                            port:(int)port
+                      afterModel:(nullable NSString*)afterModelName
+                     smartRemote:(int)smartRemote {
+    if (!_context || !modelName || !controllerName || !portKind) return NO;
+    if (!_context->HasModelManager()) return NO;
+    auto& om = _context->GetOutputManager();
+    auto& mm = _context->GetModelManager();
+
+    Controller* c = om.GetController(controllerName.UTF8String);
+    if (!c) return NO;
+    Model* m = mm[modelName.UTF8String];
+    if (!m) return NO;
+
+    _context->AbortRender(5000);
+
+    // Build the wiring tree BEFORE we mutate so we can read the
+    // current chain on the destination port + look up the
+    // "after" model and the model that's currently chained
+    // immediately after it. UDController is re-built below by
+    // RecalcStartChannels, so this snapshot is single-use.
+    UDController cud(c, &om, &mm, /*eliminateOverlaps=*/false);
+    UDControllerPort* dstPort = GetUDPortForKind(cud, portKind, port);
+    if (!dstPort) return NO;
+    ControllerCaps* caps = ControllerCaps::GetControllerConfig(c);
+
+    Model* afterModel = nullptr;
+    if (afterModelName && afterModelName.length > 0) {
+        afterModel = mm[afterModelName.UTF8String];
+    }
+
+    // Whoever is currently chained AFTER the target needs to
+    // re-resolve their chain head to point at the newly-inserted
+    // model. Capture before we mutate.
+    Model* afterNext = (afterModel != nullptr)
+        ? dstPort->GetModelAfter(afterModel)
+        : nullptr;
+
+    // 1) Controller + port assignment.
+    m->SetControllerName(c->GetName());
+    m->SetControllerPort(port);
+
+    // 2) Protocol — empty port picks a sensible default from
+    //    caps; non-empty port inherits the existing chain's
+    //    protocol so the user doesn't end up with a port mixing
+    //    ws2811 and apa102.
+    if ([portKind isEqualToString:@"pixel"]) {
+        if (dstPort->GetModelCount() == 0) {
+            if (caps && !caps->GetPixelProtocols().empty()) {
+                const auto pxs = caps->GetPixelProtocols();
+                if (std::find(pxs.begin(), pxs.end(),
+                              m->GetControllerProtocol()) == pxs.end()) {
+                    m->SetControllerProtocol(pxs.front());
+                }
+            } else if (!m->IsPixelProtocol()) {
+                m->SetControllerProtocol("ws2811");
+            }
+        } else if (afterModel) {
+            m->SetControllerProtocol(afterModel->GetControllerProtocol());
+        }
+        if (caps && !caps->SupportsSmartRemotes()) {
+            m->SetSmartRemote(0);
+        }
+    } else if ([portKind isEqualToString:@"serial"]) {
+        if (dstPort->GetModelCount() == 0) {
+            if (caps && !caps->GetSerialProtocols().empty()) {
+                const auto sps = caps->GetSerialProtocols();
+                if (std::find(sps.begin(), sps.end(),
+                              m->GetControllerProtocol()) == sps.end()) {
+                    m->SetControllerProtocol(sps.front());
+                }
+            } else if (!m->IsSerialProtocol()) {
+                m->SetControllerProtocol("dmx");
+            }
+            if (m->GetControllerDMXChannel() == 0) {
+                m->SetControllerDMXChannel(1);
+            }
+        } else if (afterModel) {
+            m->SetControllerProtocol(afterModel->GetControllerProtocol());
+        }
+        m->SetSmartRemote(0);
+    } else if ([portKind isEqualToString:@"pwm"]) {
+        m->SetControllerProtocol("PWM");
+        m->SetSmartRemote(0);
+    } else if ([portKind isEqualToString:@"virtualMatrix"]) {
+        m->SetControllerProtocol("Virtual Matrix");
+        m->SetSmartRemote(0);
+    } else if ([portKind isEqualToString:@"ledPanelMatrix"]) {
+        m->SetControllerProtocol("LED Panel Matrix");
+        m->SetSmartRemote(0);
+    }
+
+    // 3) Smart-remote inheritance. -1 = inherit from afterModel
+    //    (or leave the model's own value when there's no chain
+    //    target); >= 0 = explicit override.
+    if ([portKind isEqualToString:@"pixel"]) {
+        if (smartRemote >= 0) {
+            m->SetSmartRemote(smartRemote);
+        } else if (afterModel) {
+            m->SetSmartRemote(afterModel->GetSmartRemote());
+        }
+    }
+
+    // 4) Chain. Pixel uses modelChain string ("@PrevModel:1");
+    //    serial uses controllerDMXChannel arithmetic.
+    if ([portKind isEqualToString:@"pixel"]) {
+        if (afterModel) {
+            // Insert after `afterModel`: it stays where it was;
+            // `m` chains off it; whatever was chained off
+            // `afterModel` now chains off `m`.
+            m->SetModelChain(">" + afterModel->GetName());
+            if (afterNext) {
+                afterNext->SetModelChain(">" + m->GetName());
+            }
+        } else if (dstPort->GetModelCount() > 0) {
+            // No after-target but port non-empty → append at end.
+            if (auto* tail = dstPort->GetLastModel()) {
+                if (tail->GetModel() && tail->GetModel() != m) {
+                    m->SetModelChain(">" + tail->GetModel()->GetName());
+                }
+            }
+        } else {
+            m->SetModelChain("");
+        }
+    } else if ([portKind isEqualToString:@"serial"]) {
+        // Walk forward from `m` (now in the chain at the desired
+        // position), pushing each downstream model's DMX channel
+        // forward when it would overlap. Matches the desktop's
+        // rhs=true serial branch.
+        if (afterModel) {
+            int nextCh = afterModel->GetControllerDMXChannel() + afterModel->GetChanCount();
+            m->SetControllerDMXChannel(nextCh);
+            m->SetModelChain("");
+            Model* prev = m;
+            Model* nxt = afterNext;
+            while (nxt) {
+                int needCh = prev->GetControllerDMXChannel() + prev->GetChanCount();
+                if (nxt->GetControllerDMXChannel() < needCh) {
+                    nxt->SetControllerDMXChannel(needCh);
+                }
+                nxt->SetModelChain("");
+                prev = nxt;
+                // dstPort is stale once we mutate channels, but
+                // GetModelAfter only reads ordered list, which
+                // hasn't been re-sorted; safe to keep walking.
+                nxt = dstPort->GetModelAfter(nxt);
+            }
+        }
+    }
+
+    _context->MarkLayoutModelDirty(m->GetName());
+    if (afterNext) _context->MarkLayoutModelDirty(afterNext->GetName());
+    [self reworkAndRecalcStartChannels];
+    return YES;
+}
+
+- (BOOL)removeModelFromController:(NSString*)modelName {
+    if (!_context || !modelName || !_context->HasModelManager()) return NO;
+    auto& mm = _context->GetModelManager();
+    Model* m = mm[modelName.UTF8String];
+    if (!m) return NO;
+
+    _context->AbortRender(5000);
+
+    // Anyone chained off this model loses their anchor — clear
+    // their chain so they fall back to whatever start-channel
+    // pattern was on them before, mirroring desktop's
+    // CONTROLLER_REMOVEPORTMODELS behaviour.
+    const std::string victim = m->GetName();
+    for (const auto& [_, other] : mm.GetModels()) {
+        if (!other || other == m) continue;
+        const std::string chain = other->GetModelChain();
+        if (!chain.empty() && chain.size() > 1 && chain[0] == '>' &&
+            chain.substr(1) == victim) {
+            other->SetModelChain("");
+            _context->MarkLayoutModelDirty(other->GetName());
+        }
+    }
+
+    m->SetControllerPort(0);
+    m->SetModelChain("");
+    if (m->GetControllerName() != "") {
+        m->SetControllerName(NO_CONTROLLER);
+    }
+    _context->MarkLayoutModelDirty(m->GetName());
+    [self reworkAndRecalcStartChannels];
+    return YES;
+}
+
+#pragma mark - J-32.7 — Visualize: wiring export
+
+// Quote a CSV cell when it contains a comma, quote, or newline.
+// Mirrors RFC 4180.
+static std::string CSVQuote(const std::string& s) {
+    bool needsQuote = false;
+    for (char ch : s) {
+        if (ch == ',' || ch == '"' || ch == '\n' || ch == '\r') {
+            needsQuote = true;
+            break;
+        }
+    }
+    if (!needsQuote) return s;
+    std::string out = "\"";
+    for (char ch : s) {
+        if (ch == '"') out += "\"\"";
+        else out += ch;
+    }
+    out += "\"";
+    return out;
+}
+
+- (nullable NSString*)exportWiringCSVForController:(NSString*)name {
+    if (!_context || !name || !_context->HasModelManager()) return nil;
+    auto& om = _context->GetOutputManager();
+    Controller* c = om.GetController(name.UTF8String);
+    if (!c) return nil;
+    auto& mm = _context->GetModelManager();
+    UDController cud(c, &om, &mm, /*eliminateOverlaps=*/false);
+
+    using namespace ExportSettings;
+    const SETTINGS settings = static_cast<SETTINGS>(
+        SETTINGS_PORT_ABSADDRESS |
+        SETTINGS_PORT_CHANNELS |
+        SETTINGS_PORT_PIXELS |
+        SETTINGS_MODEL_DESCRIPTIONS |
+        SETTINGS_MODEL_ABSADDRESS |
+        SETTINGS_MODEL_CHANNELS |
+        SETTINGS_MODEL_PIXELS);
+    int columnSize = 0;
+    auto rows = cud.ExportAsCSV(settings, /*brightness=*/100.0f, columnSize);
+
+    std::string out;
+    out.reserve(rows.size() * 64);
+    for (const auto& row : rows) {
+        for (size_t i = 0; i < row.size(); ++i) {
+            if (i > 0) out += ',';
+            out += CSVQuote(row[i]);
+        }
+        out += '\n';
+    }
+    return [NSString stringWithUTF8String:out.c_str()];
+}
+
+- (nullable NSString*)exportWiringJSONForController:(NSString*)name {
+    if (!_context || !name || !_context->HasModelManager()) return nil;
+    auto& om = _context->GetOutputManager();
+    Controller* c = om.GetController(name.UTF8String);
+    if (!c) return nil;
+    auto& mm = _context->GetModelManager();
+    UDController cud(c, &om, &mm, /*eliminateOverlaps=*/false);
+    return [NSString stringWithUTF8String:cud.ExportAsJSON().c_str()];
+}
+
+- (NSDictionary*)portCountsForController:(NSString*)name {
+    if (!_context || !name) return @{@"maxPixelPort": @0, @"maxSerialPort": @0};
+    Controller* c = _context->GetOutputManager().GetController(name.UTF8String);
+    if (!c) return @{@"maxPixelPort": @0, @"maxSerialPort": @0};
+    ControllerCaps* caps = ControllerCaps::GetControllerConfig(c);
+    if (!caps) return @{@"maxPixelPort": @0, @"maxSerialPort": @0};
+    return @{
+        @"maxPixelPort":  @(caps->GetMaxPixelPort()),
+        @"maxSerialPort": @(caps->GetMaxSerialPort()),
+    };
+}
+
+- (NSDictionary*)smartRemoteCapabilitiesForController:(NSString*)name {
+    if (!_context || !name) {
+        return @{@"supportsSmartRemotes": @NO,
+                  @"maxRemotes": @0,
+                  @"types": @[]};
+    }
+    Controller* c = _context->GetOutputManager().GetController(name.UTF8String);
+    ControllerCaps* caps = c ? ControllerCaps::GetControllerConfig(c) : nullptr;
+    if (!caps || !caps->SupportsSmartRemotes()) {
+        return @{@"supportsSmartRemotes": @NO,
+                  @"maxRemotes": @0,
+                  @"types": @[]};
+    }
+    NSMutableArray<NSString*>* types = [NSMutableArray array];
+    for (const auto& s : caps->GetSmartRemoteTypes()) {
+        [types addObject:[NSString stringWithUTF8String:s.c_str()]];
+    }
+    return @{
+        @"supportsSmartRemotes": @YES,
+        @"maxRemotes":           @(caps->GetSmartRemoteCount()),
+        @"types":                types,
+    };
 }
 
 @end
