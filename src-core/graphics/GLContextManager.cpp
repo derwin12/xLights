@@ -698,7 +698,41 @@ static void bootstrapWGL(PlatformState* ps,
         ps->shaderShareRoot = createCoreContext(ps, nullptr,
                                                 ps->shaderShareRootHwnd,
                                                 ps->shaderShareRootHdc);
-        if (!ps->shaderShareRoot) {
+        if (ps->shaderShareRoot) {
+            // Prime the share-root by making it current once.  Several drivers
+            // (observed on Windows in GL-worker thread mode) refuse to make a
+            // sharing child context current until the share parent itself has
+            // been made current at least once — wglMakeCurrent on the child
+            // fails with ERROR_INVALID_HANDLE, the version-logging code below
+            // produces "? (?) (?)" output, and rendering silently disables
+            // every shader effect ("Could not create/set OpenGL Context for
+            // ShaderEffect" in the log).  macOS does the equivalent under
+            // selectBestGPU().  If priming itself fails, tear the share-root
+            // down so pool contexts fall back to non-sharing (functionally
+            // correct, programs just won't be reused across pool contexts).
+            if (wglMakeCurrent(ps->shaderShareRootHdc, ps->shaderShareRoot)) {
+                const char* ver = (const char*)glGetString(GL_VERSION);
+                const char* rend = (const char*)glGetString(GL_RENDERER);
+                const char* vend = (const char*)glGetString(GL_VENDOR);
+                spdlog::info("GLContextManager (share-root) - glVer: {} ({}) ({})",
+                             ver ? ver : "?", rend ? rend : "?", vend ? vend : "?");
+                wglMakeCurrent(ps->shaderShareRootHdc, nullptr);
+            } else {
+                spdlog::warn("GLContextManager: share-root wglMakeCurrent failed (GLE={}); "
+                             "pool contexts will not share programs/buffers",
+                             (unsigned)GetLastError());
+                wglDeleteContext(ps->shaderShareRoot);
+                if (ps->shaderShareRootHdc) {
+                    ReleaseDC(ps->shaderShareRootHwnd, ps->shaderShareRootHdc);
+                    ps->shaderShareRootHdc = nullptr;
+                }
+                if (ps->shaderShareRootHwnd) {
+                    DestroyWindow(ps->shaderShareRootHwnd);
+                    ps->shaderShareRootHwnd = nullptr;
+                }
+                ps->shaderShareRoot = nullptr;
+            }
+        } else {
             spdlog::warn("GLContextManager: shader share-root creation failed; "
                          "pool contexts will be isolated (program cache won't survive context shuffle)");
         }
@@ -776,11 +810,16 @@ bool GLContextManager::MakeCurrent(ContextHandle ctx) {
         if (wglMakeCurrent(info->hdc, info->context)) return true;
         DWORD gle = GetLastError();
         if (gle == ERROR_INVALID_HANDLE) {
-            spdlog::debug("GLContextManager: wglMakeCurrent invalid handle - "
-                          "hwnd_valid={} dc_type={} hglrc={:p}",
-                          (int)IsWindow(info->hwnd),
-                          (int)GetObjectType(info->hdc),
-                          (void*)info->context);
+            // Bumped from debug to warn so a recurrence is visible in user
+            // logs without needing a debug-level config.  Common causes:
+            // share-root not primed (see bootstrapWGL), HDC/HWND destroyed
+            // out from under us, or the HGLRC being current on another
+            // thread.
+            spdlog::warn("GLContextManager: wglMakeCurrent invalid handle - "
+                         "hwnd_valid={} dc_type={} hglrc={:p}",
+                         (int)IsWindow(info->hwnd),
+                         (int)GetObjectType(info->hdc),
+                         (void*)info->context);
             return false;
         }
         if (gle == 2004) {
