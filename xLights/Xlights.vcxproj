@@ -876,6 +876,10 @@ xcopy "$(SolutionDir)..\bin64\Vamp\" "$(TargetDir)Vamp\" /e /y /i /r
     <ClCompile Include="..\src-core\utils\Parallel.cpp" />
     <ClCompile Include="..\src-ui-wx\model\PathGenerationDialog.cpp" />
     <ClCompile Include="..\src-ui-wx\sequencer\PerspectivesPanel.cpp" />
+    <ClCompile Include="..\src-core\links\LinksManager.cpp" />
+    <ClCompile Include="..\src-ui-wx\links\AddLinkDialog.cpp" />
+    <ClCompile Include="..\src-ui-wx\links\LinksMenu.cpp" />
+    <ClCompile Include="..\src-ui-wx\links\ManageLinksDialog.cpp" />
     <ClCompile Include="..\src-core\lyrics\LRCParser.cpp" />
     <ClCompile Include="..\src-core\lyrics\PhonemeDictionary.cpp" />
     <ClCompile Include="..\src-core\render\PixelBuffer.cpp" />
@@ -1466,6 +1470,9 @@ xcopy "$(SolutionDir)..\bin64\Vamp\" "$(TargetDir)Vamp\" /e /y /i /r
     <ClInclude Include="..\src-core\utils\Parallel.h" />
     <ClInclude Include="..\src-ui-wx\model\PathGenerationDialog.h" />
     <ClInclude Include="..\src-ui-wx\sequencer\PerspectivesPanel.h" />
+    <ClInclude Include="..\src-core\links\LinksManager.h" />
+    <ClInclude Include="..\src-ui-wx\links\AddLinkDialog.h" />
+    <ClInclude Include="..\src-ui-wx\links\ManageLinksDialog.h" />
     <ClInclude Include="..\src-core\lyrics\LRCParser.h" />
     <ClInclude Include="..\src-core\lyrics\PhonemeDictionary.h" />
     <ClInclude Include="..\src-core\render\PixelBuffer.h" />

@@ -879,6 +879,7 @@ public:
     static const wxWindowID ID_MNU_SUPERQUIET;
     static const wxWindowID ID_MNU_SILENT;
     static const wxWindowID ID_IMPORT_EFFECTS;
+    static const wxWindowID ID_MNU_LINKS_MANAGE;
     static const wxWindowID ID_MNU_TOD;
     static const wxWindowID ID_MNU_MANUAL;
     static const wxWindowID ID_MNU_ZOOM;
@@ -954,6 +955,7 @@ public:
     wxGridBagSizer* GridBagSizer1;
     wxGridBagSizer* StatusBarSizer;
     wxMenu* AudioMenu;
+    wxMenu* LinksMenu = nullptr;
     wxMenu* Menu1;
     wxMenu* Menu3;
     wxMenu* MenuFile;
@@ -1119,6 +1121,7 @@ public:
     wxMenuItem* mruf_MenuItem[MRUF_LENGTH];
     wxMenu *revertToMenu = nullptr;
     wxMenuItem* revertToMenuItem = nullptr;
+    std::vector<wxMenuItem*> _linkMenuItems;
 
     OutputManager _outputManager;
     OutputModelManager _outputModelManager;
@@ -1478,6 +1481,9 @@ public:
 
     void OnMenuMRU(wxCommandEvent& event);
     void OnMRUSequence(wxCommandEvent& event);
+    void PopulateLinksMenu();
+    void OnManageLinksClick(wxCommandEvent& event);
+    void OnLinkItemClick(wxCommandEvent& event);
     bool SetDir(const wxString& dirname, bool permanent);
     void SetBaseShowDir(const wxString& baseShowDir);
     void UpdateFromBaseShowFolder(bool prompt);

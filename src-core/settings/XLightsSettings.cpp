@@ -23,7 +23,7 @@ void XLightsSettings::EnsureSections()
 {
     if (!_data.is_object())
         _data = nlohmann::json::object();
-    for (const auto& sec : {"main", "tod", "bookmarks", "_meta"}) {
+    for (const auto& sec : {"main", "tod", "bookmarks", "links", "_meta"}) {
         if (!_data.contains(sec))
             _data[sec] = nlohmann::json::object();
     }
@@ -211,6 +211,25 @@ void XLightsSettings::WriteDouble(const std::string& key, double val,
 {
     std::unique_lock lock(_mutex);
     _data[section][key] = val;
+    _dirty = true;
+}
+
+nlohmann::json XLightsSettings::ReadJsonArray(const std::string& key,
+                                               const std::string& section) const
+{
+    std::shared_lock lock(_mutex);
+    if (!_data.contains(section)) return nlohmann::json::array();
+    const auto& sec = _data.at(section);
+    if (!sec.contains(key)) return nlohmann::json::array();
+    const auto& v = sec.at(key);
+    return v.is_array() ? v : nlohmann::json::array();
+}
+
+void XLightsSettings::WriteJsonArray(const std::string& key, const nlohmann::json& arr,
+                                      const std::string& section)
+{
+    std::unique_lock lock(_mutex);
+    _data[section][key] = arr;
     _dirty = true;
 }
 

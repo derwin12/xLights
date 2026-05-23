@@ -267,6 +267,7 @@ file(GLOB_RECURSE SRC_CORE
     src-core/graphics/xlFontInfo.cpp
     src-core/graphics/xlGraphicsAccumulators.cpp
     src-core/graphics/xlMesh.cpp
+    src-core/links/*.cpp
     src-core/lyrics/*.cpp
     src-core/media/AudioLoader.cpp
     src-core/media/AIModelStore.cpp
@@ -419,6 +420,7 @@ file(GLOB_RECURSE SRC_UI
     src-ui-wx/graphics/wxTextDrawingContext.cpp
     src-ui-wx/import_export/*.cpp
     src-ui-wx/layout/*.cpp
+    src-ui-wx/links/*.cpp
     src-ui-wx/media/*.cpp
     src-ui-wx/model/*.cpp
     src-ui-wx/modelproperties/*.cpp

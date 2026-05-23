@@ -68,6 +68,13 @@ public:
     void WriteDouble(const std::string& key, double val,
                      const std::string& section = "main");
 
+    // --- JSON array access (for list-of-objects, e.g. custom links) ----
+
+    nlohmann::json ReadJsonArray(const std::string& key,
+                                  const std::string& section = "main") const;
+    void WriteJsonArray(const std::string& key, const nlohmann::json& arr,
+                        const std::string& section = "main");
+
     // --- Iteration -------------------------------------------------------
 
     /// Return all keys present in the given section.

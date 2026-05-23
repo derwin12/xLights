@@ -114,6 +114,7 @@
 #include "xLightsApp.h"
 #include "xLightsMain.h"
 #include "xLightsVersion.h"
+#include "links/LinksManager.h"
 #include "settings/XLightsConfigAdapter.h"
 #include "controllerproperties/ControllerPropertyAdapter.h"
 #include "controllers/ControllerCaps.h"
@@ -355,6 +356,7 @@ const wxWindowID xLightsFrame::ID_MNU_QUIET = wxNewId();
 const wxWindowID xLightsFrame::ID_MNU_SUPERQUIET = wxNewId();
 const wxWindowID xLightsFrame::ID_MNU_SILENT = wxNewId();
 const wxWindowID xLightsFrame::ID_IMPORT_EFFECTS = wxNewId();
+const wxWindowID xLightsFrame::ID_MNU_LINKS_MANAGE = wxNewId();
 const wxWindowID xLightsFrame::ID_MNU_TOD = wxNewId();
 const wxWindowID xLightsFrame::ID_MNU_MANUAL = wxNewId();
 const wxWindowID xLightsFrame::ID_MNU_ZOOM = wxNewId();
@@ -1261,6 +1263,8 @@ xLightsFrame::xLightsFrame(wxWindow* parent, int ab, wxWindowID id, bool renderO
     MenuItem_ImportEffects = new wxMenuItem(Menu2, ID_IMPORT_EFFECTS, _("Import Effects"), wxEmptyString, wxITEM_NORMAL);
     Menu2->Append(MenuItem_ImportEffects);
     MenuBar->Append(Menu2, _("&Import"));
+    LinksMenu = new wxMenu();
+    MenuBar->Append(LinksMenu, _("&Links"));
     MenuHelp = new wxMenu();
     MenuItem_TOD = new wxMenuItem(MenuHelp, ID_MNU_TOD, _("Tip of the Day"), wxEmptyString, wxITEM_NORMAL);
     MenuHelp->Append(MenuItem_TOD);
@@ -1461,6 +1465,7 @@ xLightsFrame::xLightsFrame(wxWindow* parent, int ab, wxWindowID id, bool renderO
     Connect(ID_MNU_SUPERQUIET, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenuItem_VQuietVolSelected);
     Connect(ID_MNU_SILENT, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenuItem_SilentVolSelected);
     Connect(ID_IMPORT_EFFECTS, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenuItemImportEffects);
+    Connect(ID_MNU_LINKS_MANAGE, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnManageLinksClick);
     Connect(ID_MNU_TOD, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenuItem_TODSelected);
     Connect(ID_MNU_MANUAL, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenuItem_UserManualSelected);
     Connect(ID_MNU_ZOOM, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenuItem_ZoomSelected);
@@ -1782,6 +1787,9 @@ xLightsFrame::xLightsFrame(wxWindow* parent, int ab, wxWindowID id, bool renderO
     }
     MenuFile->FindItem(ID_MENUITEM_RECENTFOLDERS)->SetBitmap(GetMenuItemBitmapBundle("wxART_FOLDER_OPEN"));
     MenuFile->FindItem(ID_MENUITEM_OPENRECENTSEQUENCE)->SetBitmap(GetMenuItemBitmapBundle("wxART_FILE_OPEN"));
+
+    LinksManager::Get().Load();
+    PopulateLinksMenu();
 
     spdlog::debug("xLightsFrame constructor loading config.");
 
