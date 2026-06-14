@@ -26,6 +26,9 @@
 #include <wx/regex.h>
 #include <wx/stdpaths.h>
 
+#include <unordered_map>
+#include <unordered_set>
+
 #include "xLightsImportChannelMapDialog.h"
 #include "import_export/AutoMapper.h"
 #include "import_export/MapHintsIO.h"
@@ -3487,6 +3490,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     }
 
     wxString summary;
+    summary << wxString::Format("QuikMap Report %s\n", AutoMapper::QUIKMAP_REPORT_VERSION);
 
     // Phase 0: skip DMX models/groups - they shouldn't be auto-mapped.
     if (dlg) dlg->Update(2, "Phase 0: Looking for DMX models/groups to skip...");
@@ -3523,6 +3527,34 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     int phase10 = before - after;
     summary << wxString::Format("Phase 10: Alias matches found: %d\n", phase10);
     if (dlg) dlg->Update(40, wxString::Format("Phase 10 complete - alias matches found: %d", phase10));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
+    // Phase 12: custom-model exact-dimension matches. Pairs an unmapped
+    // Custom destination model with an unmapped vendor Custom model whose
+    // node count and CustomWidth/CustomHeight are exactly equal, regardless
+    // of name.
+    before = after;
+    if (dlg) dlg->Update(42, "Phase 12: Looking for custom exact-dimension matches...");
+    DoCustomExactDimensionMatch(select, "Phase 12: CustomExactDimension");
+    after = CountUnmappedRoots();
+    int phase12 = before - after;
+    summary << wxString::Format("Phase 12: Custom exact-dimension matches found: %d\n", phase12);
+    if (dlg) dlg->Update(43, wxString::Format("Phase 12 complete - custom exact-dimension matches found: %d", phase12));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
+    // Phase 13: custom-model submodel-overlap matches. Pairs an unmapped
+    // Custom destination model with an unmapped vendor Custom model that
+    // shares at least 3 submodel names, regardless of the parent model's
+    // name.
+    before = after;
+    if (dlg) dlg->Update(43, "Phase 13: Looking for custom submodel-overlap matches...");
+    DoCustomSubmodelOverlapMatch(select, "Phase 13: CustomSubmodelOverlap");
+    after = CountUnmappedRoots();
+    int phase13 = before - after;
+    summary << wxString::Format("Phase 13: Custom submodel-overlap matches found: %d\n", phase13);
+    if (dlg) dlg->Update(44, wxString::Format("Phase 13 complete - custom submodel-overlap matches found: %d", phase13));
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
@@ -3626,6 +3658,57 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
+    // Phase 90: like-model backfill. For an unmapped model that's a numbered
+    // sibling of an already-mapped model (e.g. "Cane-4" alongside mapped
+    // "Cane-1"), derive and try the analogous vendor name.
+    before = after;
+    if (dlg) dlg->Update(88, "Phase 90: Looking for like-model matches...");
+    DoLikeModelBackfill(select, "Phase 90: LikeModel");
+    after = CountUnmappedRoots();
+    int phase90 = before - after;
+    summary << wxString::Format("Phase 90: Like-model matches found: %d\n", phase90);
+    if (dlg) dlg->Update(89, wxString::Format("Phase 90 complete - like-model matches found: %d", phase90));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
+    // Phase 95: group-coverage skip. If an already-mapped destination group
+    // is made up entirely of one model type (e.g. a group of Arches), mark
+    // its individual member models as skipped so Phase 100 doesn't
+    // separately/redundantly map them.
+    if (dlg) dlg->Update(89, "Phase 95: Checking group coverage...");
+    DoGroupCoverageSkip("Phase 95: GroupCoverage");
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
+    // Phase 96: custom-dimension match. For still-unmapped Custom-type
+    // destination roots, prefer a still-unmapped vendor Custom model/group
+    // whose node count and grid shape closely match, over the blind
+    // first-available pairing Phase 97 would otherwise make.
+    before = after;
+    if (dlg) dlg->Update(89, "Phase 96: Looking for custom-dimension matches...");
+    DoCustomDimensionMatch(select, "Phase 96: CustomDimension");
+    after = CountUnmappedRoots();
+    int phase96 = before - after;
+    summary << wxString::Format("Phase 96: Custom-dimension matches found: %d\n", phase96);
+    if (dlg) dlg->Update(89, wxString::Format("Phase 96 complete - custom-dimension matches found: %d", phase96));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
+    // Phase 97: model-type catch-all. Maps any still-unmapped destination
+    // root to a still-unmapped vendor model/group of the same kind AND the
+    // same model "type" (e.g. "Arches" to "Arches"), ignoring names. Runs
+    // ahead of the unconditional Phase 100 catch-all so like-for-like model
+    // types are preferred.
+    before = after;
+    if (dlg) dlg->Update(89, "Phase 97: Looking for like-model-type matches...");
+    DoModelTypeCatchAll(select, "Phase 97: ModelTypeCatchall");
+    after = CountUnmappedRoots();
+    int phase97 = before - after;
+    summary << wxString::Format("Phase 97: Model-type catch-all matches found: %d\n", phase97);
+    if (dlg) dlg->Update(90, wxString::Format("Phase 97 complete - model-type catch-all matches found: %d", phase97));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
     // Phase 100: last-resort catch-all. Maps anything still unmapped on the
     // vendor side to anything still unmapped on the user's layout, as long
     // as model maps to model, group maps to group, and type matches type
@@ -3640,6 +3723,36 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
+    // Phase 101: sibling-reuse backfill. For any destination root still
+    // unmapped after Phase 100 (e.g. a numbered family with more destination
+    // props than like-typed vendor props), reuse an already-mapped sibling's
+    // vendor mapping (same fuzzy base/side, same model type).
+    before = after;
+    if (dlg) dlg->Update(100, "Phase 101: Looking for sibling-reuse matches...");
+    DoSiblingReuseBackfill(select, "Phase 101: SiblingReuse");
+    after = CountUnmappedRoots();
+    int phase101 = before - after;
+    summary << wxString::Format("Phase 101: Sibling-reuse matches found: %d\n", phase101);
+    if (dlg) dlg->Update(100, wxString::Format("Phase 101 complete - sibling-reuse matches found: %d", phase101));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
+    // catchall summary listing - only show if it found any matches, since it's just a repeat of the final state of the tree but without the mapping rules in the report.
+    if (phase97 > 0) {
+        summary << "\nModel-type catch-all matches (Phase 97):\n";
+        std::function<void(xLightsImportModelNode*)> walkModelTypeCatchAll = [&](xLightsImportModelNode* node) {
+            if (node->IsMapped() && node->GetMappingRule() == "Phase 97: ModelTypeCatchall") {
+                summary << wxString::Format("  %s -> %s\n", node->GetModelName(), wxString(node->GetMapping()));
+            }
+            for (unsigned int i = 0; i < node->GetChildCount(); ++i) {
+                walkModelTypeCatchAll(node->GetNthChild(i));
+            }
+        };
+        for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+            walkModelTypeCatchAll(_dataModel->GetNthChild(i));
+        }
+    }
+
     if (phase100 > 0) {
         summary << "\nCatch-all matches (Phase 100):\n";
         std::function<void(xLightsImportModelNode*)> walkCatchAll = [&](xLightsImportModelNode* node) {
@@ -3652,6 +3765,21 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         };
         for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
             walkCatchAll(_dataModel->GetNthChild(i));
+        }
+    }
+
+    if (phase101 > 0) {
+        summary << "\nSibling-reuse matches (Phase 101):\n";
+        std::function<void(xLightsImportModelNode*)> walkSiblingReuse = [&](xLightsImportModelNode* node) {
+            if (node->IsMapped() && node->GetMappingRule() == "Phase 101: SiblingReuse") {
+                summary << wxString::Format("  %s -> %s\n", node->GetModelName(), wxString(node->GetMapping()));
+            }
+            for (unsigned int i = 0; i < node->GetChildCount(); ++i) {
+                walkSiblingReuse(node->GetNthChild(i));
+            }
+        };
+        for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+            walkSiblingReuse(_dataModel->GetNthChild(i));
         }
     }
 
@@ -3798,6 +3926,86 @@ void xLightsImportChannelMapDialog::DoSubModelFallback(bool select, const std::s
     AutoMapper::RunSubModelFallback(roots, available, *xlights, select, selectedTargets, ruleLabel);
 }
 
+void xLightsImportChannelMapDialog::DoCustomExactDimensionMatch(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.modelClass = ic->modelClass;
+                src.isSingingProp = ic->isSingingProp;
+                src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
+                src.width = ic->width;
+                src.height = ic->height;
+                src.strandCount = ic->strandCount;
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunCustomExactDimensionMatch(roots, available, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoCustomSubmodelOverlapMatch(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.modelClass = ic->modelClass;
+                src.isSingingProp = ic->isSingingProp;
+                src.displayType = ic->type;
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunCustomSubmodelOverlapMatch(roots, available, select, selectedTargets, ruleLabel);
+}
+
 void xLightsImportChannelMapDialog::DoCatchAllFallback(bool select, const std::string& ruleLabel)
 {
     std::vector<AvailableSource> available;
@@ -3833,6 +4041,106 @@ void xLightsImportChannelMapDialog::DoCatchAllFallback(bool select, const std::s
     }
 
     AutoMapper::RunCatchAll(roots, available, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoSiblingReuseBackfill(bool select, const std::string& ruleLabel)
+{
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunSiblingReuseBackfill(roots, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoCustomDimensionMatch(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.modelClass = ic->modelClass;
+                src.isSingingProp = ic->isSingingProp;
+                src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
+                src.width = ic->width;
+                src.height = ic->height;
+                src.strandCount = ic->strandCount;
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunCustomDimensionMatch(roots, available, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoModelTypeCatchAll(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.modelClass = ic->modelClass;
+                src.isSingingProp = ic->isSingingProp;
+                src.displayType = ic->type;
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunModelTypeCatchAll(roots, available, select, selectedTargets, ruleLabel);
 }
 
 void xLightsImportChannelMapDialog::DoSingingProp(bool select, const std::string& ruleLabel)
@@ -4024,6 +4332,50 @@ void xLightsImportChannelMapDialog::DoBestGuess(bool select, const std::string& 
     AutoMapper::RunBestGuess(roots, available, select, selectedTargets, ruleLabel);
 }
 
+void xLightsImportChannelMapDialog::DoLikeModelBackfill(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunLikeModelBackfill(roots, available, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoGroupCoverageSkip(const std::string& ruleLabel)
+{
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    AutoMapper::RunGroupCoverageSkip(roots, *xlights, ruleLabel);
+}
+
 void xLightsImportChannelMapDialog::NotifyMappingItemsChanged()
 {
     // wxDataViewCtrl on macOS (NSOutlineView) caches item values and ignores
@@ -4208,9 +4560,19 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                 }
             }
         }
+        // Models chained off a singing prop via StartChannel=">OtherModel:n"
+        // (e.g. a "Ribbon" decoration chained off "Singing Tree Female") are
+        // part of that prop's physical assembly, even though they carry no
+        // FaceInfo of their own. Collect the chain target for each model here
+        // and propagate isSingingProp from the chain target after the main
+        // loop, so they're excluded from generic name-based matching the same
+        // as the singing prop itself.
+        std::unordered_map<std::string, std::string> chainTarget;
+
         if (modelNode) {
             for (pugi::xml_node node = modelNode.first_child(); node; node = node.next_sibling()) {
-                if (auto mm = GetImportChannel(node.attribute(XmlNodeKeys::NameAttribute).as_string()); mm) {
+                std::string name = node.attribute(XmlNodeKeys::NameAttribute).as_string();
+                if (auto mm = GetImportChannel(name); mm) {
                     mm->type = node.attribute(XmlNodeKeys::DisplayAsAttribute).as_string();
                     bool singingFace = false;
                     if (mm->type == XmlNodeKeys::CustomType) {
@@ -4221,6 +4583,14 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                         }
                     }
                     mm->isSingingProp = singingFace;
+
+                    std::string startChannel = node.attribute(XmlNodeKeys::StartChannelAttribute).as_string();
+                    if (!startChannel.empty() && startChannel.front() == '>') {
+                        std::string target = startChannel.substr(1);
+                        auto colon = target.rfind(':');
+                        if (colon != std::string::npos) target = target.substr(0, colon);
+                        if (!target.empty() && target != name) chainTarget[name] = target;
+                    }
                     bool spiralTree = std::string_view(node.attribute(XmlNodeKeys::TreeSpiralRotationsAttribute).as_string("0")) != "0";
                     bool sticks = std::string_view(node.attribute(XmlNodeKeys::CCSticksAttribute).as_string("false")) == "true";
                     std::string dropPattern = node.attribute(XmlNodeKeys::DropPatternAttribute).as_string();
@@ -4329,6 +4699,23 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                     }
                 }
 
+            }
+
+            // Resolve chains (following through multiple links if needed) and
+            // mark any model chained to a singing prop as a singing prop too.
+            for (const auto& [name, target] : chainTarget) {
+                std::string cur = target;
+                std::unordered_set<std::string> seen{name};
+                while (true) {
+                    if (auto* targetMm = GetImportChannel(cur); targetMm != nullptr && targetMm->isSingingProp) {
+                        if (auto* mm = GetImportChannel(name); mm != nullptr) mm->isSingingProp = true;
+                        break;
+                    }
+                    if (!seen.insert(cur).second) break;
+                    auto it = chainTarget.find(cur);
+                    if (it == chainTarget.end()) break;
+                    cur = it->second;
+                }
             }
         }
 

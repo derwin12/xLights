@@ -197,9 +197,14 @@ public:
         return _aliases;
     }
 
-    std::string GetModelType() const {
+    std::string GetModelType() const override {
         return _modelType;
     }
+
+    int GetNodeCount() const override { return _nodeCount; }
+    int GetWidth() const override { return _width; }
+    int GetHeight() const override { return _height; }
+    int GetStrandCount() const override { return _strandCount; }
 
     void Map(const std::string& mapTo, const std::string& mappingModelType) override
     {
@@ -718,12 +723,19 @@ protected:
             std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>& aliases)> lambda_node,
             const std::string& extra1, const std::string& extra2, const std::string& mg, const bool& select, const std::string& ruleLabel = "");
         void DoSubModelFallback(bool select, const std::string& ruleLabel = "");
+        void DoCustomExactDimensionMatch(bool select, const std::string& ruleLabel = "");
+        void DoCustomSubmodelOverlapMatch(bool select, const std::string& ruleLabel = "");
         void DoCatchAllFallback(bool select, const std::string& ruleLabel = "");
+        void DoSiblingReuseBackfill(bool select, const std::string& ruleLabel = "");
+        void DoCustomDimensionMatch(bool select, const std::string& ruleLabel = "");
+        void DoModelTypeCatchAll(bool select, const std::string& ruleLabel = "");
         void DoSingingProp(bool select, const std::string& ruleLabel = "");
         void DoSingingPropBackfill(bool select, const std::string& ruleLabel = "");
         void DoFloodlight(bool select, const std::string& ruleLabel = "");
         void DoFloodlightBackfill(bool select, const std::string& ruleLabel = "");
         void DoBestGuess(bool select, const std::string& ruleLabel = "");
+        void DoLikeModelBackfill(bool select, const std::string& ruleLabel = "");
+        void DoGroupCoverageSkip(const std::string& ruleLabel = "");
         int CountUnmappedRoots() const;
         int CountUnmappedDescendants() const;
 

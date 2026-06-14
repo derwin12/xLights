@@ -18,7 +18,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <regex>
 #include <set>
 #include <string>
@@ -60,6 +62,57 @@ std::vector<std::string> SplitSlash(const std::string& s) {
     }
     parts.push_back(cur);
     return parts;
+}
+
+// Shared by the catch-all-style phases: once `model` has been mapped to a
+// vendor model, fills any still-unmapped Strand/SubModel and Node children
+// from not-yet-used `<mappedVendorModel>/...` available sources of the
+// corresponding depth, ignoring names.
+void FillMappedModelChildren(const std::vector<ImportMappingNode*>& roots,
+                              const std::vector<AvailableSource>& available,
+                              bool selectMapAvail,
+                              std::unordered_set<std::string>& used,
+                              const std::string& ruleLabel) {
+    for (auto* model : roots) {
+        if (model == nullptr || model->GetMapping().empty()) continue;
+        const std::string vendorPrefix = Lower(Trim(model->GetMapping())) + "/";
+
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* strand = model->GetNthChild(k);
+            if (strand == nullptr) continue;
+
+            if (strand->GetMapping().empty()) {
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 2) continue;
+
+                    strand->Map(src.displayName, "Strand");
+                    strand->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+
+            for (unsigned int m = 0; m < strand->GetChildCount(); ++m) {
+                auto* node = strand->GetNthChild(m);
+                if (node == nullptr || !node->GetMapping().empty()) continue;
+
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 3) continue;
+
+                    node->Map(src.displayName, "Node");
+                    node->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+        }
+    }
 }
 
 // --- Fuzzy matcher helpers -------------------------------------------------
@@ -184,6 +237,23 @@ std::vector<std::string> FuzzySideSignature(const std::string& name) {
         if (tokens.count(tag)) out.push_back(tag);
     }
     return out;
+}
+
+// FuzzyTokens with side tags (left/right/upper/lower/top/bottom/l/r) and
+// purely-numeric tokens removed - the "family" tokens that should be shared
+// by all members of a same-type group (e.g. "Arches-1-Left" and "Arches-6-R"
+// both reduce to {"arch"}).
+std::unordered_set<std::string> FuzzyBaseTokens(const std::string& name) {
+    static const std::unordered_set<std::string> sideTags = {
+        "left", "right", "upper", "lower", "top", "bottom", "l", "r"
+    };
+    std::unordered_set<std::string> base;
+    for (const auto& tok : FuzzyTokens(name)) {
+        if (sideTags.count(tok)) continue;
+        if (std::all_of(tok.begin(), tok.end(), [](char c) { return c >= '0' && c <= '9'; })) continue;
+        base.insert(tok);
+    }
+    return base;
 }
 
 std::unordered_set<std::string> FuzzyModelFamilies(const std::string& name) {
@@ -999,6 +1069,517 @@ void RunBestGuess(const std::vector<ImportMappingNode*>& roots,
     }
 }
 
+void RunLikeModelBackfill(const std::vector<ImportMappingNode*>& roots,
+                          const std::vector<AvailableSource>& available,
+                          bool selectOnly,
+                          const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                          const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Seed "used" with anything already mapped so this phase doesn't hand out
+    // a vendor source another phase (or this phase, for an earlier root)
+    // already claimed.
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+    }
+
+    for (auto* model : roots) {
+        if (model == nullptr || model->IsGroup() || model->IsSkipped()) continue;
+        if (!model->GetMapping().empty()) continue;
+        if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+
+        const std::string targetName = model->GetCoreModel();
+        auto targetBase = FuzzyBaseTokens(targetName);
+        auto targetSide = FuzzySideSignature(targetName);
+        auto targetNum = FuzzyNumericSignature(targetName);
+        if (targetBase.empty() || targetNum.size() != 1) continue;
+
+        for (auto* sibling : roots) {
+            if (sibling == nullptr || sibling == model || sibling->IsGroup()) continue;
+            if (sibling->GetMapping().empty()) continue;
+
+            const std::string siblingName = sibling->GetCoreModel();
+            if (FuzzyBaseTokens(siblingName) != targetBase) continue;
+            if (FuzzySideSignature(siblingName) != targetSide) continue;
+
+            auto siblingNum = FuzzyNumericSignature(siblingName);
+            if (siblingNum.size() != 1 || siblingNum[0] == targetNum[0]) continue;
+
+            // Substitute the sibling's number for ours in the sibling's
+            // mapped vendor name, e.g. mapped "Cane 1" -> candidate "Cane 4".
+            const std::string& mapping = sibling->GetMapping();
+            size_t pos = mapping.find(siblingNum[0]);
+            if (pos == std::string::npos) continue;
+            std::string candidate = mapping.substr(0, pos) + targetNum[0] + mapping.substr(pos + siblingNum[0].size());
+            std::string candidateLower = Lower(Trim(candidate));
+            if (used.count(candidateLower) != 0) continue;
+
+            for (const auto& src : available) {
+                if (selectMapAvail && !src.selected) continue;
+                if (src.canonicalName.find('/') != std::string::npos) continue;
+                if (src.modelType == "ModelGroup") continue;
+                if (Lower(Trim(src.displayName)) != candidateLower) continue;
+
+                model->Map(src.displayName, src.modelType);
+                model->SetMappingRule(ruleLabel);
+                used.insert(candidateLower);
+                break;
+            }
+            if (!model->GetMapping().empty()) break;
+        }
+    }
+
+    // Dimension-reuse fallback: for a still-unmapped numbered sibling (e.g.
+    // "Cane-4") whose analogous vendor name (e.g. "Cane 4") doesn't exist -
+    // vendor only has 3 canes - if it's a Custom model whose node count and
+    // grid shape exactly match an already-mapped same-family sibling's (e.g.
+    // "Cane-3", same 100x51 shape), reuse that sibling's mapped vendor source.
+    // This keeps a genuinely like-shaped destination paired with its closest
+    // relative instead of falling through to Phase 97's blind same-type
+    // (e.g. Custom<->Custom) pairing with an unrelated prop.
+    for (auto* model : roots) {
+        if (model == nullptr || model->IsGroup() || model->IsSkipped()) continue;
+        if (!model->GetMapping().empty()) continue;
+        if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+        if (Lower(Trim(model->GetModelType())) != "custom") continue;
+
+        const int targetNodes = model->GetNodeCount();
+        const int targetWidth = model->GetWidth();
+        const int targetHeight = model->GetHeight();
+        if (targetNodes <= 0) continue;
+
+        const std::string targetName = model->GetCoreModel();
+        auto targetBase = FuzzyBaseTokens(targetName);
+        auto targetSide = FuzzySideSignature(targetName);
+        if (targetBase.empty()) continue;
+
+        for (auto* sibling : roots) {
+            if (sibling == nullptr || sibling == model || sibling->IsGroup()) continue;
+            if (sibling->GetMapping().empty()) continue;
+            if (Lower(Trim(sibling->GetModelType())) != "custom") continue;
+            if (sibling->GetNodeCount() != targetNodes) continue;
+            if (sibling->GetWidth() != targetWidth || sibling->GetHeight() != targetHeight) continue;
+
+            const std::string siblingName = sibling->GetCoreModel();
+            if (FuzzyBaseTokens(siblingName) != targetBase) continue;
+            if (FuzzySideSignature(siblingName) != targetSide) continue;
+
+            model->Map(sibling->GetMapping(), "Model");
+            model->SetMappingRule(ruleLabel);
+            break;
+        }
+    }
+}
+
+void RunCustomExactDimensionMatch(const std::vector<ImportMappingNode*>& roots,
+                                   const std::vector<AvailableSource>& available,
+                                   bool selectOnly,
+                                   const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                                   const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    for (auto* model : roots) {
+        if (model == nullptr || model->IsGroup() || model->IsSkipped()) continue;
+        if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+        if (!model->GetMapping().empty()) continue;
+        if (Lower(Trim(model->GetModelType())) != "custom") continue;
+
+        const int targetNodes = model->GetNodeCount();
+        const int targetWidth = model->GetWidth();
+        const int targetHeight = model->GetHeight();
+        if (targetNodes <= 0) continue;
+
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+            if (src.modelType == "ModelGroup") continue;
+            if (Lower(Trim(src.displayType)) != "custom") continue;
+            if (src.nodeCount != targetNodes || src.width != targetWidth || src.height != targetHeight) continue;
+
+            model->Map(src.displayName, src.modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(src.displayName)));
+            break;
+        }
+    }
+
+    FillMappedModelChildren(roots, available, selectMapAvail, used, ruleLabel);
+}
+
+void RunCustomSubmodelOverlapMatch(const std::vector<ImportMappingNode*>& roots,
+                                    const std::vector<AvailableSource>& available,
+                                    bool selectOnly,
+                                    const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                                    const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    // Pre-build, per still-unmapped non-group Custom vendor model, the set of
+    // its submodel names from `<vendorModel>/<submodel>` entries.
+    struct CustomCandidate {
+        const AvailableSource* src;
+        std::unordered_set<std::string> submodels;
+    };
+    std::vector<CustomCandidate> candidates;
+    for (const auto& src : available) {
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (src.modelType == "ModelGroup") continue;
+        if (Lower(Trim(src.displayType)) != "custom") continue;
+        if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+
+        CustomCandidate cand;
+        cand.src = &src;
+        const std::string prefix = src.canonicalName + "/";
+        for (const auto& sub : available) {
+            if (sub.canonicalName.rfind(prefix, 0) != 0) continue;
+            auto parts = SplitSlash(sub.canonicalName);
+            if (parts.size() != 2) continue;
+            cand.submodels.insert(Lower(Trim(parts[1])));
+        }
+        if (!cand.submodels.empty()) candidates.push_back(std::move(cand));
+    }
+
+    for (auto* model : roots) {
+        if (model == nullptr || model->IsGroup() || model->IsSkipped()) continue;
+        if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+        if (!model->GetMapping().empty()) continue;
+        if (Lower(Trim(model->GetModelType())) != "custom") continue;
+
+        std::unordered_set<std::string> targetSubmodels;
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            const std::string& strand = sm->GetCoreStrand();
+            if (!strand.empty()) targetSubmodels.insert(Lower(Trim(strand)));
+        }
+        if (targetSubmodels.size() < 3) continue;
+
+        for (const auto& cand : candidates) {
+            if (selectMapAvail && !cand.src->selected) continue;
+            if (used.count(Lower(Trim(cand.src->displayName))) != 0) continue;
+
+            int overlap = 0;
+            for (const auto& name : targetSubmodels) {
+                if (cand.submodels.count(name) != 0) ++overlap;
+            }
+            if (overlap < 3) continue;
+
+            model->Map(cand.src->displayName, cand.src->modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(cand.src->displayName)));
+            break;
+        }
+    }
+
+    FillMappedModelChildren(roots, available, selectMapAvail, used, ruleLabel);
+}
+
+void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
+                              const std::vector<AvailableSource>& available,
+                              bool selectOnly,
+                              const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                              const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Seed "used" with anything already mapped (by name, lowered/trimmed) so
+    // this pass doesn't hand out a source a previous phase already used.
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    // Top-level pass: model<->model, group<->group, both Custom type, picking
+    // the candidate whose node count / grid shape is the closest match.
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (selectMapAvail || selectMapTarget) {
+            bool isTargetSelected = selectedTargets.count(model) != 0;
+            if (selectMapTarget && !isTargetSelected) continue;
+        }
+        if (!model->GetMapping().empty()) continue;
+        if (model->IsSkipped()) continue;
+
+        const std::string targetType = Lower(Trim(model->GetModelType()));
+        if (targetType != "custom") continue;
+
+        const int targetNodes = model->GetNodeCount();
+        if (targetNodes <= 0) continue;
+        const int targetWidth = model->GetWidth();
+        const int targetHeight = model->GetHeight();
+        const double targetAspect = (targetWidth > 0 && targetHeight > 0)
+            ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
+            : 0.0;
+
+        const AvailableSource* best = nullptr;
+        double bestScore = 0.0;
+
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+            bool srcIsGroup = (src.modelType == "ModelGroup");
+            if (srcIsGroup != model->IsGroup()) continue;
+            if (Lower(Trim(src.displayType)) != "custom") continue;
+            if (src.nodeCount <= 0) continue;
+
+            // Relative difference in node count - the dominant factor since
+            // it best reflects overall prop "size".
+            double nodeDiff = std::abs(src.nodeCount - targetNodes) / static_cast<double>(std::max(src.nodeCount, targetNodes));
+
+            // Aspect-ratio difference (only considered when both sides have
+            // known dimensions); weighted lower than node count.
+            double aspectDiff = 0.0;
+            if (targetAspect > 0.0 && src.width > 0 && src.height > 0) {
+                double srcAspect = static_cast<double>(src.width) / static_cast<double>(src.height);
+                aspectDiff = std::abs(srcAspect - targetAspect) / std::max(srcAspect, targetAspect);
+            }
+
+            double score = nodeDiff + (0.25 * aspectDiff);
+            if (best == nullptr || score < bestScore) {
+                best = &src;
+                bestScore = score;
+            }
+        }
+
+        // Only accept a close match - node counts within ~25% of each other.
+        // Anything looser is left for Phase 97/100 to pair by type alone.
+        if (best != nullptr && bestScore <= 0.25) {
+            model->Map(best->displayName, best->modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(best->displayName)));
+        }
+    }
+
+    // Strand/Node pass: for any root that ended up mapped (here or earlier),
+    // fill its still-unmapped Strand/Node children from `<vendorModel>/...`
+    // sources of the same depth, ignoring names.
+    for (auto* model : roots) {
+        if (model == nullptr || model->GetMapping().empty()) continue;
+        const std::string vendorPrefix = Lower(Trim(model->GetMapping())) + "/";
+
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* strand = model->GetNthChild(k);
+            if (strand == nullptr) continue;
+
+            if (strand->GetMapping().empty()) {
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 2) continue;
+
+                    strand->Map(src.displayName, "Strand");
+                    strand->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+
+            for (unsigned int m = 0; m < strand->GetChildCount(); ++m) {
+                auto* node = strand->GetNthChild(m);
+                if (node == nullptr || !node->GetMapping().empty()) continue;
+
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 3) continue;
+
+                    node->Map(src.displayName, "Node");
+                    node->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void RunModelTypeCatchAll(const std::vector<ImportMappingNode*>& roots,
+                          const std::vector<AvailableSource>& available,
+                          bool selectOnly,
+                          const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                          const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Seed "used" with anything already mapped (by name, lowered/trimmed) so
+    // this pass doesn't hand out a source a previous phase already used.
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    // Top-level pass: model<->model, group<->group, requiring matching model
+    // "type" (e.g. "Arches", "Tree 360", "Matrix"), ignoring names entirely.
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (selectMapAvail || selectMapTarget) {
+            bool isTargetSelected = selectedTargets.count(model) != 0;
+            if (selectMapTarget && !isTargetSelected) continue;
+        }
+        if (!model->GetMapping().empty()) continue;
+        if (model->IsSkipped()) continue;
+
+        const std::string targetType = Lower(Trim(model->GetModelType()));
+        if (targetType.empty()) continue;
+
+        // "Custom" covers wildly different shapes (a 3D Cube and a Snowflake
+        // are both "Custom"), so a blind type match here is meaningless.
+        // Custom models that didn't get a dimension-based match in Phase 96
+        // are left for Phase 100 instead.
+        if (targetType == "custom") continue;
+
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+            bool srcIsGroup = (src.modelType == "ModelGroup");
+            if (srcIsGroup != model->IsGroup()) continue;
+            if (Lower(Trim(src.displayType)) != targetType) continue;
+
+            model->Map(src.displayName, src.modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(src.displayName)));
+            break;
+        }
+    }
+
+    // Strand/Node pass: for any root that ended up mapped (here or earlier),
+    // fill its still-unmapped Strand/Node children from `<vendorModel>/...`
+    // sources of the same depth, ignoring names.
+    for (auto* model : roots) {
+        if (model == nullptr || model->GetMapping().empty()) continue;
+        const std::string vendorPrefix = Lower(Trim(model->GetMapping())) + "/";
+
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* strand = model->GetNthChild(k);
+            if (strand == nullptr) continue;
+
+            if (strand->GetMapping().empty()) {
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 2) continue;
+
+                    strand->Map(src.displayName, "Strand");
+                    strand->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+
+            for (unsigned int m = 0; m < strand->GetChildCount(); ++m) {
+                auto* node = strand->GetNthChild(m);
+                if (node == nullptr || !node->GetMapping().empty()) continue;
+
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 3) continue;
+
+                    node->Map(src.displayName, "Node");
+                    node->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+        }
+    }
+}
+
 void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
                  const std::vector<AvailableSource>& available,
                  bool selectOnly,
@@ -1100,6 +1681,41 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
     }
 }
 
+void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
+                              bool selectOnly,
+                              const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                              const std::string& ruleLabel) {
+    bool selectMapTarget = selectOnly && !selectedTargets.empty();
+
+    for (auto* model : roots) {
+        if (model == nullptr || model->IsGroup() || model->IsSkipped()) continue;
+        if (!model->GetMapping().empty()) continue;
+        if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+
+        const std::string targetType = Lower(Trim(model->GetModelType()));
+        if (targetType.empty()) continue;
+
+        const std::string targetName = model->GetCoreModel();
+        auto targetBase = FuzzyBaseTokens(targetName);
+        auto targetSide = FuzzySideSignature(targetName);
+        if (targetBase.empty()) continue;
+
+        for (auto* sibling : roots) {
+            if (sibling == nullptr || sibling == model || sibling->IsGroup()) continue;
+            if (sibling->GetMapping().empty()) continue;
+            if (Lower(Trim(sibling->GetModelType())) != targetType) continue;
+
+            const std::string siblingName = sibling->GetCoreModel();
+            if (FuzzyBaseTokens(siblingName) != targetBase) continue;
+            if (FuzzySideSignature(siblingName) != targetSide) continue;
+
+            model->Map(sibling->GetMapping(), "Model");
+            model->SetMappingRule(ruleLabel);
+            break;
+        }
+    }
+}
+
 namespace {
 
 // True if `m` is a DMX model, or a ModelGroup that (recursively) contains
@@ -1134,6 +1750,51 @@ void RunSkipDMX(const std::vector<ImportMappingNode*>& roots,
         if (ContainsDMXProp(layoutModel, renderContext, visited)) {
             model->SetSkipped(true);
             model->SetMappingRule(ruleLabel);
+        }
+    }
+}
+
+void RunGroupCoverageSkip(const std::vector<ImportMappingNode*>& roots,
+                          RenderContext& renderContext,
+                          const std::string& ruleLabel) {
+    for (auto* group : roots) {
+        if (group == nullptr || !group->IsGroup()) continue;
+        if (group->GetMapping().empty()) continue;
+
+        Model* layoutModel = renderContext.GetModel(group->GetCoreModel());
+        auto* grp = dynamic_cast<ModelGroup*>(layoutModel);
+        if (grp == nullptr) continue;
+
+        auto memberNames = grp->ModelNames();
+        if (memberNames.size() < 2) continue;
+
+        // The group counts as "all one model type" if every member's fuzzy
+        // base tokens (family, ignoring side/number) are identical and
+        // non-empty.
+        std::unordered_set<std::string> commonBase;
+        bool homogeneous = true;
+        for (const auto& name : memberNames) {
+            auto base = FuzzyBaseTokens(name);
+            if (base.empty()) { homogeneous = false; break; }
+            if (commonBase.empty()) {
+                commonBase = base;
+            } else if (base != commonBase) {
+                homogeneous = false;
+                break;
+            }
+        }
+        if (!homogeneous) continue;
+
+        std::set<std::string> memberSet;
+        for (const auto& name : memberNames) memberSet.insert(Lower(Trim(name)));
+
+        for (auto* root : roots) {
+            if (root == nullptr || root == group || root->IsGroup()) continue;
+            if (!root->GetMapping().empty() || root->IsSkipped()) continue;
+            if (memberSet.count(Lower(Trim(root->GetCoreModel()))) != 0) {
+                root->SetSkipped(true);
+                root->SetMappingRule(ruleLabel);
+            }
         }
     }
 }

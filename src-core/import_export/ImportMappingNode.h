@@ -45,6 +45,11 @@ public:
     // implement it.
     virtual std::string GetModelClass() const { return std::string(); }
 
+    // Resolved model "type" tag - the DisplayAsType string (e.g. "Arches",
+    // "Tree 360", "Matrix"). Empty if not applicable/unknown. Default empty
+    // so hosts that don't compute this aren't forced to implement it.
+    virtual std::string GetModelType() const { return std::string(); }
+
     // True if this is a real singing prop: a Custom model with at least one
     // faceInfo entry of Type="NodeRange" that has actual Mouth-*/Eye-*/etc
     // node ranges defined (not just an empty/unused face). Default false so
@@ -60,6 +65,17 @@ public:
     // (IsFloodlight). Default false so hosts that don't compute this aren't
     // forced to implement it.
     virtual bool IsFloodGroup() const { return false; }
+
+    // Structural size info for Custom models - lit node count and the
+    // CustomWidth/CustomHeight grid dimensions. Default 0 (unknown) so hosts
+    // that don't compute this aren't forced to implement it. Used by
+    // AutoMapper::RunCustomDimensionMatch (QuikMap Phase 96) to prefer a
+    // same-type Custom vendor model with a similar node count/shape over a
+    // blind first-available pairing.
+    virtual int GetNodeCount() const { return 0; }
+    virtual int GetWidth() const { return 0; }
+    virtual int GetHeight() const { return 0; }
+    virtual int GetStrandCount() const { return 0; }
 
     // True if QuikMap has determined this destination root (and its
     // subtree) should be skipped entirely - e.g. a DMX model or a group
@@ -106,6 +122,10 @@ struct AvailableSource {
     // bare-model entries, as computed by Model::DetermineClass. Empty for
     // strand/node entries or when unknown.
     std::string modelClass;
+    // Resolved model "type" tag - the DisplayAsType string (e.g. "Arches",
+    // "Tree 360", "Matrix") for bare-model entries, as recorded on the
+    // ImportChannel. Empty for strand/node entries or when unknown.
+    std::string displayType;
     // True if this bare-model entry is a real singing prop (see
     // ImportMappingNode::IsSingingProp). False for strand/node entries.
     bool isSingingProp{ false };
@@ -123,4 +143,12 @@ struct AvailableSource {
     // them.
     int effectCount{ 0 };
     int durationMs{ 0 };
+    // Structural size info for Custom models, mirroring
+    // ImportMappingNode::GetNodeCount/GetWidth/GetHeight/GetStrandCount.
+    // Empty/zero for strand/node entries or when unknown. See
+    // AutoMapper::RunCustomDimensionMatch (QuikMap Phase 96).
+    int nodeCount{ 0 };
+    int width{ 0 };
+    int height{ 0 };
+    int strandCount{ 0 };
 };
