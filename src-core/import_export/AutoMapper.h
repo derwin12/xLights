@@ -25,7 +25,7 @@ namespace AutoMapper {
 // Version tag for the QuikMap report summary (DoQuikMap's `summary` /
 // QuikMapReport.log). Bump this (v1.00 -> v1.01 -> ...) whenever the report
 // format/content changes, so old logs can be told apart from new ones.
-constexpr auto QUIKMAP_REPORT_VERSION = "v1.04";
+constexpr auto QUIKMAP_REPORT_VERSION = "v1.05";
 
 // QuikMap phases, in the order xLightsImportChannelMapDialog::DoQuikMap runs
 // them. Numbers are spaced by 5 so new phases can be inserted between
@@ -62,6 +62,18 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.04";
 //   Phase 25: Last-resort fuzzy matches (token overlap, with numeric/side
 //             signature and model-family guardrails) for anything still
 //             unmapped. See MatchFuzzy, Run().
+//   Phase 26: Group-content fuzzy matches - for unmapped destination groups,
+//             augments the group's own name tokens with the shared family
+//             token of its members when the group is made up entirely of one
+//             kind of prop (e.g. "Cane-1".."Cane-4" -> "cane"), and does the
+//             same for unmapped vendor ModelGroup sources using
+//             AvailableSource::groupMemberNames. Then applies the same
+//             token-Jaccard/family/numeric/side rules as Phase 25 to the
+//             augmented token sets. This lets e.g. a vendor "Canes" group
+//             (members "Cane 1".."Cane 3") match a destination
+//             "Group - Candy Canes" (members "Cane-1".."Cane-4") even though
+//             the group names alone don't overlap enough. See
+//             RunGroupContentFuzzy().
 //   Phase 30: Singing-prop matches - pairs unmapped destination roots that
 //             are real singing props with unmapped singing-prop vendor
 //             models. See RunSingingProp().
@@ -169,6 +181,24 @@ bool MatchRegex(const std::string& target, const std::string& candidate,
 bool MatchFuzzy(const std::string& target, const std::string& candidate,
                 const std::string& extra1, const std::string& extra2,
                 const std::list<std::string>& aliases);
+
+// Group-content fuzzy pass (QuikMap Phase 26), run immediately after the
+// Phase 25 MatchFuzzy pass. For each destination root that is still unmapped,
+// IsGroup(), and not skipped, looks up the corresponding ModelGroup in the
+// layout and - if all of its members share the same non-empty
+// FuzzyBaseTokens (i.e. the group is "all one kind of prop", e.g. all
+// "Cane-N") - adds that shared family token to the group's own FuzzyTokens.
+// Does the same for each unmapped, non-group-source-member, ModelGroup
+// AvailableSource using AvailableSource::groupMemberNames. Then applies
+// MatchFuzzy's family-compatibility/numeric/side-signature guardrails and
+// >= 0.6 token-Jaccard rule to the (possibly augmented) token sets, mapping
+// the first candidate that matches.
+void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
+                          const std::vector<AvailableSource>& available,
+                          RenderContext& renderContext,
+                          bool selectOnly,
+                          const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                          const std::string& ruleLabel = "");
 
 // Run one auto-map pass over the destination tree.
 //

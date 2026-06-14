@@ -723,6 +723,7 @@ protected:
             std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>& aliases)> lambda_node,
             const std::string& extra1, const std::string& extra2, const std::string& mg, const bool& select, const std::string& ruleLabel = "");
         void DoSubModelFallback(bool select, const std::string& ruleLabel = "");
+        void DoGroupContentFuzzy(bool select, const std::string& ruleLabel = "");
         void DoCustomExactDimensionMatch(bool select, const std::string& ruleLabel = "");
         void DoCustomSubmodelOverlapMatch(bool select, const std::string& ruleLabel = "");
         void DoCatchAllFallback(bool select, const std::string& ruleLabel = "");

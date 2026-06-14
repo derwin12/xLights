@@ -3593,6 +3593,19 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
+    // Phase 26: group-content fuzzy matches - for unmapped groups made up
+    // entirely of one kind of prop, fold that prop's family token into the
+    // group's own tokens before retrying the Phase 25 fuzzy match.
+    before = after;
+    if (dlg) dlg->Update(86, "Phase 26: Looking for group-content fuzzy matches...");
+    DoGroupContentFuzzy(select, "Phase 26: GroupContent");
+    after = CountUnmappedRoots();
+    int phase26 = before - after;
+    summary << wxString::Format("Phase 26: Group-content fuzzy matches found: %d\n", phase26);
+    if (dlg) dlg->Update(86, wxString::Format("Phase 26 complete - group-content fuzzy matches found: %d", phase26));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
     // Phase 30: singing-prop matches. Pairs unmapped singing props (Custom
     // models with real faceInfo NodeRange data) with each other, ahead of
     // the coarser best-guess pass.
@@ -3924,6 +3937,44 @@ void xLightsImportChannelMapDialog::DoSubModelFallback(bool select, const std::s
     }
 
     AutoMapper::RunSubModelFallback(roots, available, *xlights, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoGroupContentFuzzy(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr && !ic->groupModels.empty()) {
+                for (const auto& memberName : wxSplit(ic->groupModels, ',')) {
+                    src.groupMemberNames.push_back(memberName.ToStdString());
+                }
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunGroupContentFuzzy(roots, available, *xlights, select, selectedTargets, ruleLabel);
 }
 
 void xLightsImportChannelMapDialog::DoCustomExactDimensionMatch(bool select, const std::string& ruleLabel)

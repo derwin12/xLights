@@ -151,4 +151,9 @@ struct AvailableSource {
     int width{ 0 };
     int height{ 0 };
     int strandCount{ 0 };
+    // For ModelGroup entries, the names of the group's member models (as
+    // recorded on the source's ImportChannel::groupModels). Empty for
+    // non-group entries. See AutoMapper::RunGroupContentFuzzy (QuikMap
+    // Phase 26).
+    std::vector<std::string> groupMemberNames;
 };

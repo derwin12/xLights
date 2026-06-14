@@ -207,6 +207,9 @@ std::unordered_set<std::string> FuzzyTokens(const std::string& name) {
     }
     flush();
     if (normalized.find("candy cane") != std::string::npos || normalized.find("candycane") != std::string::npos) {
+        // "candy" is just a qualifier on "cane" here - drop it so e.g.
+        // "Group - Candy Canes" reduces to the same token set as "Canes".
+        out.erase("candy");
         out.insert("cane");
     }
     return out;
@@ -293,6 +296,25 @@ bool FuzzyFamiliesCompatible(const std::string& a, const std::string& b) {
     return false;
 }
 
+// If every name in `memberNames` reduces to the same non-empty
+// FuzzyBaseTokens set (e.g. a group made up entirely of "Cane-1".."Cane-4"
+// all reduce to {"cane"}), returns that shared set - the group is "all one
+// kind of prop" and that token can stand in for the group's own name when
+// fuzzy-matching. Otherwise returns an empty set.
+std::unordered_set<std::string> FuzzyHomogeneousGroupTokens(const std::vector<std::string>& memberNames) {
+    std::unordered_set<std::string> common;
+    for (const auto& name : memberNames) {
+        auto base = FuzzyBaseTokens(name);
+        if (base.empty()) return {};
+        if (common.empty()) {
+            common = base;
+        } else if (base != common) {
+            return {};
+        }
+    }
+    return common;
+}
+
 double FuzzyJaccard(const std::unordered_set<std::string>& a, const std::unordered_set<std::string>& b) {
     if (a.empty() && b.empty()) return 0.0;
     size_t intersection = 0;
@@ -364,9 +386,14 @@ bool MatchRegex(const std::string& target, const std::string& candidate,
     return std::regex_match(target, r);
 }
 
-bool MatchFuzzy(const std::string& target, const std::string& candidate,
-                const std::string&, const std::string&,
-                const std::list<std::string>&) {
+namespace {
+
+// Shared core for MatchFuzzy / RunGroupContentFuzzy: family-compatibility and
+// numeric/side-signature guardrails on the raw names, then a token Jaccard
+// overlap of >= 0.6 on the (possibly extra-token-augmented) token sets.
+bool FuzzyTokenMatch(const std::string& target, const std::string& candidate,
+                      std::unordered_set<std::string> targetTokens,
+                      std::unordered_set<std::string> candTokens) {
     if (!FuzzyFamiliesCompatible(target, candidate)) {
         return false;
     }
@@ -383,13 +410,81 @@ bool MatchFuzzy(const std::string& target, const std::string& candidate,
         return false;
     }
 
-    auto targetTokens = FuzzyTokens(target);
-    auto candTokens = FuzzyTokens(candidate);
     if (targetTokens.empty() || candTokens.empty()) {
         return false;
     }
 
     return FuzzyJaccard(targetTokens, candTokens) >= 0.6;
+}
+
+} // namespace
+
+bool MatchFuzzy(const std::string& target, const std::string& candidate,
+                const std::string&, const std::string&,
+                const std::list<std::string>&) {
+    return FuzzyTokenMatch(target, candidate, FuzzyTokens(target), FuzzyTokens(candidate));
+}
+
+void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
+                          const std::vector<AvailableSource>& available,
+                          RenderContext& renderContext,
+                          bool selectOnly,
+                          const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                          const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Seed "used" with anything already mapped so this pass doesn't hand out
+    // a source another phase already used.
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+    }
+
+    for (auto* model : roots) {
+        if (model == nullptr || !model->IsGroup() || model->IsSkipped()) continue;
+        if (!model->GetMapping().empty()) continue;
+        if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+
+        const std::string targetName = model->GetCoreModel();
+        auto targetTokens = FuzzyTokens(targetName);
+
+        // If the destination group is made up entirely of one kind of prop
+        // (e.g. "Cane-1".."Cane-4"), fold that prop's family token into the
+        // group's own tokens so e.g. "Group - Candy Canes" picks up "cane"
+        // even if its own name didn't have enough overlap on its own.
+        Model* layoutModel = renderContext.GetModel(model->GetCoreModel());
+        auto* grp = dynamic_cast<ModelGroup*>(layoutModel);
+        if (grp != nullptr) {
+            auto extra = FuzzyHomogeneousGroupTokens(grp->ModelNames());
+            targetTokens.insert(extra.begin(), extra.end());
+        }
+
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (src.modelType != "ModelGroup") continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+
+            auto candTokens = FuzzyTokens(src.displayName);
+            auto extra = FuzzyHomogeneousGroupTokens(src.groupMemberNames);
+            candTokens.insert(extra.begin(), extra.end());
+
+            if (!FuzzyTokenMatch(targetName, src.displayName, targetTokens, candTokens)) continue;
+
+            model->Map(src.displayName, src.modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(src.displayName)));
+            break;
+        }
+    }
 }
 
 void Run(const std::vector<ImportMappingNode*>& roots,
