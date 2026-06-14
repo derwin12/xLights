@@ -137,6 +137,45 @@ const std::vector<std::pair<std::string, std::unordered_set<std::string>>> FUZZY
     { "flood", { "flood", "floodhouse" } },
     { "wreath", { "wreath" } },
     { "stake", { "stake", "pixstake", "mickeystake" } },
+    // The remaining families below are primarily populated via [T:...]
+    // type-hint tags (see ParseTypeHintAliases) rather than common naming
+    // conventions, but are still recognized if they appear as plain tokens.
+    { "cube", { "cube" } },
+    { "cross", { "cross" } },
+    { "icicles", { "icicles" } },
+    { "line", { "line" } },
+    { "sphere", { "sphere" } },
+    { "tunetosign", { "tune" } },
+};
+
+// [T:Xxx] / [T:Xxx_Yyy] type-hint tag (lowercased, matched case-insensitively)
+// -> alias-like text. A "[T:Matrix]" in a model's Description is treated
+// exactly as if the model also had an alias of "Matrix" - it feeds the same
+// alias-based (Phase 10) and family-based (Fuzzy/GroupMemberDimension)
+// matching as a real <alias> entry. Multi-word values use spaces so
+// FuzzyTokens splits them into the individual family keywords (e.g.
+// "Matrix Column" -> {"matrix", "column"}, matching the "matrix" family on
+// the "matrix" token). Unrecognized tags are ignored.
+const std::unordered_map<std::string, std::string> TYPE_HINT_ALIAS_TEXT = {
+    { "arch", "Arch" },
+    { "candycane", "Candy Cane" },
+    { "cross", "Cross" },
+    { "cube", "Cube" },
+    { "flood", "Flood" },
+    { "icicles", "Icicles" },
+    { "line", "Line" },
+    { "matrix", "Matrix" },
+    { "matrix_horizontal", "Matrix Horizontal" },
+    { "matrix_column", "Matrix Column" },
+    { "matrix_pole", "Matrix Pole" },
+    { "megatree", "Mega Tree" },
+    { "snowflake", "Snowflake" },
+    { "sphere", "Sphere" },
+    { "spinner", "Spinner" },
+    { "star", "Star" },
+    { "tuneto", "Tune To" },
+    { "tree", "Tree" },
+    { "windowframe", "Window Frame" },
 };
 
 // Families that should never be considered a match for each other, even
@@ -291,9 +330,8 @@ std::unordered_set<std::string> FuzzyModelFamilies(const std::string& name) {
 // If either side has no recognized family, or the families overlap, they're
 // considered compatible. Otherwise check the explicit incompatible-pairs
 // table; spinner/star are special-cased as co-existing naming conventions.
-bool FuzzyFamiliesCompatible(const std::string& a, const std::string& b) {
-    auto fa = FuzzyModelFamilies(a);
-    auto fb = FuzzyModelFamilies(b);
+// Any other non-overlapping pair of recognized families is incompatible.
+bool FamiliesCompatible(const std::unordered_set<std::string>& fa, const std::unordered_set<std::string>& fb) {
     if (fa.empty() || fb.empty()) return true;
     for (const auto& x : fa) {
         if (fb.count(x)) return true;
@@ -310,6 +348,47 @@ bool FuzzyFamiliesCompatible(const std::string& a, const std::string& b) {
     }
     return false;
 }
+
+// Union of FuzzyModelFamilies(name) and FuzzyModelFamilies(alias) for each
+// alias - lets [T:...] type-hint tags (carried as alias-like strings, see
+// ParseTypeHintAliases) and real aliases broaden a model's recognized
+// families for family-compatibility checks, exactly as if the model had
+// been named after the hint/alias.
+std::unordered_set<std::string> EffectiveModelFamilies(const std::string& name, const std::vector<std::string>& aliases) {
+    auto families = FuzzyModelFamilies(name);
+    for (const auto& alias : aliases) {
+        auto aliasFamilies = FuzzyModelFamilies(alias);
+        families.insert(aliasFamilies.begin(), aliasFamilies.end());
+    }
+    return families;
+}
+
+std::unordered_set<std::string> EffectiveModelFamilies(const std::string& name, const std::list<std::string>& aliases) {
+    auto families = FuzzyModelFamilies(name);
+    for (const auto& alias : aliases) {
+        auto aliasFamilies = FuzzyModelFamilies(alias);
+        families.insert(aliasFamilies.begin(), aliasFamilies.end());
+    }
+    return families;
+}
+
+} // namespace
+
+namespace AutoMapper {
+
+std::vector<std::string> ParseTypeHintAliases(const std::string& description) {
+    std::vector<std::string> result;
+    static const std::regex tagRe(R"(\[T:([A-Za-z_]+)\])");
+    for (auto it = std::sregex_iterator(description.begin(), description.end(), tagRe); it != std::sregex_iterator(); ++it) {
+        auto found = TYPE_HINT_ALIAS_TEXT.find(Lower((*it)[1].str()));
+        if (found != TYPE_HINT_ALIAS_TEXT.end()) result.push_back(found->second);
+    }
+    return result;
+}
+
+} // namespace AutoMapper
+
+namespace {
 
 // If every name in `memberNames` reduces to the same non-empty
 // FuzzyBaseTokens set (e.g. a group made up entirely of "Cane-1".."Cane-4"
@@ -426,8 +505,10 @@ namespace {
 // overlap of >= 0.6 on the (possibly extra-token-augmented) token sets.
 bool FuzzyTokenMatch(const std::string& target, const std::string& candidate,
                       std::unordered_set<std::string> targetTokens,
-                      std::unordered_set<std::string> candTokens) {
-    if (!FuzzyFamiliesCompatible(target, candidate)) {
+                      std::unordered_set<std::string> candTokens,
+                      const std::list<std::string>& targetAliases = {},
+                      const std::vector<std::string>& candAliases = {}) {
+    if (!FamiliesCompatible(EffectiveModelFamilies(target, targetAliases), EffectiveModelFamilies(candidate, candAliases))) {
         return false;
     }
 
@@ -454,8 +535,8 @@ bool FuzzyTokenMatch(const std::string& target, const std::string& candidate,
 
 bool MatchFuzzy(const std::string& target, const std::string& candidate,
                 const std::string&, const std::string&,
-                const std::list<std::string>&) {
-    return FuzzyTokenMatch(target, candidate, FuzzyTokens(target), FuzzyTokens(candidate));
+                const std::list<std::string>& aliases) {
+    return FuzzyTokenMatch(target, candidate, FuzzyTokens(target), FuzzyTokens(candidate), aliases);
 }
 
 void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
@@ -510,7 +591,7 @@ void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
             auto extra = FuzzyHomogeneousGroupTokens(src.groupMemberNames);
             candTokens.insert(extra.begin(), extra.end());
 
-            if (!FuzzyTokenMatch(targetName, src.displayName, targetTokens, candTokens)) continue;
+            if (!FuzzyTokenMatch(targetName, src.displayName, targetTokens, candTokens, model->GetAliases(), src.aliases)) continue;
 
             model->Map(src.displayName, src.modelType);
             model->SetMappingRule(ruleLabel);
@@ -1705,7 +1786,7 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
             // names like "EFlake46"/"ChromaFlake...") match a destination
             // Custom model that is recognizably a different family (and
             // vice versa), even if their node counts happen to be close.
-            if (!FuzzyFamiliesCompatible(targetName, src.displayName)) continue;
+            if (!FamiliesCompatible(EffectiveModelFamilies(targetName, model->GetAliases()), EffectiveModelFamilies(src.displayName, src.aliases))) continue;
 
             // Relative difference in node count - the dominant factor since
             // it best reflects overall prop "size".
@@ -1846,8 +1927,15 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
         }
         if (vendorGroup == nullptr || vendorGroup->groupMemberNames.empty()) continue;
 
+        // If the vendor group is much larger than the destination group, its
+        // members have no real per-member correspondence to the destination
+        // group's members (e.g. a name/fuzzy match landed on a huge "All"
+        // container group) - dimension-only scoring across such a pool tends
+        // to pick wildly unrelated prop types just because node counts happen
+        // to be close. Skip this group rather than guess.
         std::set<std::string> vendorMembers;
         for (const auto& name : vendorGroup->groupMemberNames) vendorMembers.insert(Lower(Trim(name)));
+        if (vendorMembers.size() > destMembers.size() * 3 + 2) continue;
 
         for (auto* model : roots) {
             if (model == nullptr || model->IsGroup() || model->IsSkipped()) continue;
@@ -1862,6 +1950,7 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                 ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
                 : 0.0;
             const std::string targetType = Lower(Trim(model->GetModelType()));
+            const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases());
 
             const AvailableSource* best = nullptr;
             double bestScore = 0.0;
@@ -1871,6 +1960,14 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                 if (src.modelType == "ModelGroup") continue;
                 if (used.count(Lower(Trim(src.displayName))) != 0) continue;
                 if (vendorMembers.count(Lower(Trim(src.displayName))) == 0) continue;
+
+                // A vendor source whose recognized family (including
+                // [T:Xxx]-hint/alias families) is incompatible with the
+                // destination model's is never a real correspondence within
+                // this group, regardless of how close its dimensions are -
+                // this is what previously let e.g. "3D Cube-1" be scored
+                // against "Matrix 2"/"Snowflake 1" purely on node count.
+                if (!FamiliesCompatible(targetFamilies, EffectiveModelFamilies(src.displayName, src.aliases))) continue;
 
                 double score = GroupMemberDimensionScore(targetNodes, targetWidth, targetHeight, targetAspect, targetType, src);
 
@@ -1930,8 +2027,12 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
         }
         if (vendorGroup == nullptr || vendorGroup->groupMemberNames.empty()) continue;
 
+        // Same large-vendor-group guard as RunGroupMemberDimensionMatch - a
+        // vendor group much bigger than the destination group has no real
+        // per-member correspondence to use as a reuse pool.
         std::set<std::string> vendorMembers;
         for (const auto& name : vendorGroup->groupMemberNames) vendorMembers.insert(Lower(Trim(name)));
+        if (vendorMembers.size() > destMembers.size() * 3 + 2) continue;
 
         // Reusable pool - sources already claimed by Phase 110 (or an earlier
         // root in this loop) remain candidates here, since by this point
@@ -1959,10 +2060,14 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
                 ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
                 : 0.0;
             const std::string targetType = Lower(Trim(model->GetModelType()));
+            const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases());
 
             const AvailableSource* best = nullptr;
             double bestScore = 0.0;
             for (const auto* src : pool) {
+                // Same family-compatibility gate as RunGroupMemberDimensionMatch.
+                if (!FamiliesCompatible(targetFamilies, EffectiveModelFamilies(src->displayName, src->aliases))) continue;
+
                 double score = GroupMemberDimensionScore(targetNodes, targetWidth, targetHeight, targetAspect, targetType, *src);
                 if (best == nullptr || score < bestScore) {
                     best = src;

@@ -12,6 +12,7 @@
 
 #include <list>
 #include <string>
+#include <vector>
 
 // Abstract node in the import-mapping tree, exposing only the surface that
 // AutoMapper needs. The desktop's xLightsImportModelNode (a wxDataView tree
@@ -156,4 +157,10 @@ struct AvailableSource {
     // non-group entries. See AutoMapper::RunGroupContentFuzzy (QuikMap
     // Phase 26).
     std::vector<std::string> groupMemberNames;
+    // Aliases for this bare-model entry, including both real <alias> entries
+    // from the vendor file and alias-equivalent strings parsed from
+    // [T:Xxx] type-hint tags in the vendor model's Description (see
+    // AutoMapper::ParseTypeHintAliases). Empty for strand/node entries or
+    // when unknown.
+    std::vector<std::string> aliases;
 };

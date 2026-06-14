@@ -1729,7 +1729,14 @@ void xLightsImportChannelMapDialog::AddModel(Model *m, int &ms) {
         }
     }
 
-    xLightsImportModelNode* lastmodel = new xLightsImportModelNode(nullptr, m->GetName(), std::string(""), true, m->GetAliases(), DisplayAsTypeToString(m->GetDisplayAs()), groupModels, false, modelClass, m->GetNodeCount(), *wxWHITE, (m->GetDisplayAs() == DisplayAsType::ModelGroup), wxString(""), effectCount);
+    // [T:Xxx] type-hint tags in the model's Description are treated as
+    // additional aliases for matching purposes.
+    std::list<std::string> combinedAliases = m->GetAliases();
+    for (auto& hintAlias : AutoMapper::ParseTypeHintAliases(m->GetDescription())) {
+        combinedAliases.push_back(hintAlias);
+    }
+
+    xLightsImportModelNode* lastmodel = new xLightsImportModelNode(nullptr, m->GetName(), std::string(""), true, combinedAliases, DisplayAsTypeToString(m->GetDisplayAs()), groupModels, false, modelClass, m->GetNodeCount(), *wxWHITE, (m->GetDisplayAs() == DisplayAsType::ModelGroup), wxString(""), effectCount);
     lastmodel->SetSingingProp(isSingingProp);
     lastmodel->SetFloodlight(isFloodlight);
     lastmodel->SetFloodGroup(isFloodGroup);
@@ -1759,9 +1766,9 @@ void xLightsImportChannelMapDialog::AddModel(Model *m, int &ms) {
         xLightsImportModelNode* laststrand;
         // note we deliberately passing in the models node count ... as this is most relevant
         if (channelColors.find(subModel->GetName()) != channelColors.end()) {
-            laststrand = new xLightsImportModelNode(lastmodel, wxString(m->GetName()), wxString(subModel->GetName()), std::string(""), true, m->GetAliases(), DisplayAsTypeToString(m->GetDisplayAs()), "", true, "", m->GetNodeCount(), xlColorToWxColour(channelColors.find(subModel->GetName())->second), wxString(""), effectCount);
+            laststrand = new xLightsImportModelNode(lastmodel, wxString(m->GetName()), wxString(subModel->GetName()), std::string(""), true, combinedAliases, DisplayAsTypeToString(m->GetDisplayAs()), "", true, "", m->GetNodeCount(), xlColorToWxColour(channelColors.find(subModel->GetName())->second), wxString(""), effectCount);
         } else {
-            laststrand = new xLightsImportModelNode(lastmodel, wxString(m->GetName()), wxString(subModel->GetName()), std::string(""), true, m->GetAliases(), DisplayAsTypeToString(m->GetDisplayAs()), "", true, "", m->GetNodeCount(), *wxWHITE, wxString(""), effectCount);
+            laststrand = new xLightsImportModelNode(lastmodel, wxString(m->GetName()), wxString(subModel->GetName()), std::string(""), true, combinedAliases, DisplayAsTypeToString(m->GetDisplayAs()), "", true, "", m->GetNodeCount(), *wxWHITE, wxString(""), effectCount);
         }
         laststrand->_strandCount = subModel->GetNumStrands();
         int smW = 0, smH = 0;
@@ -1780,9 +1787,9 @@ void xLightsImportChannelMapDialog::AddModel(Model *m, int &ms) {
         xLightsImportModelNode* laststrand;
         // note we deliberately passing in the models node count ... as this is most relevant
         if (channelColors.find(sn.ToStdString()) != channelColors.end()) {
-            laststrand = new xLightsImportModelNode(lastmodel, wxString(m->GetName()), sn, wxString(""), true, m->GetAliases(), DisplayAsTypeToString(m->GetDisplayAs()), "", false, "", m->GetNodeCount(), xlColorToWxColour(channelColors.find(sn.ToStdString())->second), wxString(""), effectCount);
+            laststrand = new xLightsImportModelNode(lastmodel, wxString(m->GetName()), sn, wxString(""), true, combinedAliases, DisplayAsTypeToString(m->GetDisplayAs()), "", false, "", m->GetNodeCount(), xlColorToWxColour(channelColors.find(sn.ToStdString())->second), wxString(""), effectCount);
         } else {
-            laststrand = new xLightsImportModelNode(lastmodel, wxString(m->GetName()), sn, wxString(""), true, m->GetAliases(), DisplayAsTypeToString(m->GetDisplayAs()), "", false, "", m->GetNodeCount(), *wxWHITE, wxString(""), effectCount);
+            laststrand = new xLightsImportModelNode(lastmodel, wxString(m->GetName()), sn, wxString(""), true, combinedAliases, DisplayAsTypeToString(m->GetDisplayAs()), "", false, "", m->GetNodeCount(), *wxWHITE, wxString(""), effectCount);
         }
         lastmodel->Append(laststrand);
         for (int n = 0; n < m->GetStrandLength(s); ++n) {
@@ -1793,9 +1800,9 @@ void xLightsImportChannelMapDialog::AddModel(Model *m, int &ms) {
             effectCount = 0;
             xLightsImportModelNode* lastnode;
             if (channelColors.find(nn.ToStdString()) != channelColors.end()) {
-                lastnode = new xLightsImportModelNode(laststrand, m->GetName(), sn, nn, std::string(""), true, m->GetAliases(), DisplayAsTypeToString(m->GetDisplayAs()), "", false, "", m->GetNodeCount(), xlColorToWxColour(channelColors.find(nn.ToStdString())->second), wxString(""), effectCount);
+                lastnode = new xLightsImportModelNode(laststrand, m->GetName(), sn, nn, std::string(""), true, combinedAliases, DisplayAsTypeToString(m->GetDisplayAs()), "", false, "", m->GetNodeCount(), xlColorToWxColour(channelColors.find(nn.ToStdString())->second), wxString(""), effectCount);
             } else {
-                lastnode = new xLightsImportModelNode(laststrand, m->GetName(), sn, nn, std::string(""), true, m->GetAliases(), DisplayAsTypeToString(m->GetDisplayAs()), "", false, "", m->GetNodeCount(), *wxWHITE, wxString(""), effectCount);
+                lastnode = new xLightsImportModelNode(laststrand, m->GetName(), sn, nn, std::string(""), true, combinedAliases, DisplayAsTypeToString(m->GetDisplayAs()), "", false, "", m->GetNodeCount(), *wxWHITE, wxString(""), effectCount);
             }
             laststrand->Insert(lastnode, n);
         }
@@ -3929,7 +3936,7 @@ void xLightsImportChannelMapDialog::DoAutoMap(
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -3970,7 +3977,7 @@ void xLightsImportChannelMapDialog::DoSubModelFallback(bool select, const std::s
         if (src.canonicalName.find('/') == std::string::npos) {
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -4045,7 +4052,7 @@ void xLightsImportChannelMapDialog::DoCustomExactDimensionMatch(bool select, con
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
@@ -4087,7 +4094,7 @@ void xLightsImportChannelMapDialog::DoCustomSubmodelOverlapMatch(bool select, co
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.displayType = ic->type;
             }
         }
@@ -4198,7 +4205,7 @@ void xLightsImportChannelMapDialog::DoCatchAllFallback(bool select, const std::s
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -4255,7 +4262,7 @@ void xLightsImportChannelMapDialog::DoCustomDimensionMatch(bool select, const st
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
@@ -4297,7 +4304,7 @@ void xLightsImportChannelMapDialog::DoGroupMemberDimensionMatch(bool select, con
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
@@ -4344,7 +4351,7 @@ void xLightsImportChannelMapDialog::DoGroupMemberDimensionBackfill(bool select, 
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
@@ -4391,7 +4398,7 @@ void xLightsImportChannelMapDialog::DoModelTypeCatchAll(bool select, const std::
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.displayType = ic->type;
             }
         }
@@ -4429,7 +4436,7 @@ void xLightsImportChannelMapDialog::DoSingingProp(bool select, const std::string
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -4466,7 +4473,7 @@ void xLightsImportChannelMapDialog::DoSingingPropBackfill(bool select, const std
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -4503,7 +4510,7 @@ void xLightsImportChannelMapDialog::DoFloodlight(bool select, const std::string&
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.isFloodlight = ic->isFloodlight;
                 src.isFloodGroup = ic->isFloodGroup;
             }
@@ -4542,7 +4549,7 @@ void xLightsImportChannelMapDialog::DoFloodlightBackfill(bool select, const std:
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.isFloodlight = ic->isFloodlight;
                 src.isFloodGroup = ic->isFloodGroup;
             }
@@ -4581,7 +4588,7 @@ void xLightsImportChannelMapDialog::DoBestGuess(bool select, const std::string& 
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-                src.isSingingProp = ic->isSingingProp;
+src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -4940,6 +4947,13 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                     if (mm->type == XmlNodeKeys::SingleLineType) {
                         int nodesPerString = getAttr(XmlNodeKeys::NodesPerStringAttribute, XmlNodeKeys::Parm2Attribute);
                         mm->isFloodlight = (nodesPerString == 1);
+                    }
+
+                    // [T:Xxx] type-hint tags in the vendor model's Description
+                    // are treated as additional aliases for matching purposes.
+                    std::string description = node.attribute(XmlNodeKeys::DescriptionAttribute).as_string();
+                    for (auto& hintAlias : AutoMapper::ParseTypeHintAliases(description)) {
+                        mm->aliases.push_back(hintAlias);
                     }
                 }
                 // Collect submodel names, aliases, and mark submodel channels

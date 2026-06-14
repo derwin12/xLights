@@ -584,15 +584,20 @@ void RunModelTypeCatchAll(const std::vector<ImportMappingNode*>& roots,
 // corresponding layout ModelGroup (renderContext.GetModel) has at least one
 // member, builds the destination group's member-name set
 // (ModelGroup::ModelNames) and looks up the mapped vendor ModelGroup's
-// AvailableSource::groupMemberNames for its member-name set. For each
-// still-unmapped, non-group, non-skipped destination root whose
-// GetCoreModel() is one of the destination group's members, scores every
-// still-unmapped, non-group vendor model that is one of the vendor group's
-// members by node-count (and, for Custom models, grid-shape) closeness, and
-// maps to the closest one. As with the other catch-all-style phases, any
-// newly-mapped root's still-unmapped Strand/Node children are then filled
-// from not-yet-used `<mappedVendorModel>/...` sources of the corresponding
-// depth.
+// AvailableSource::groupMemberNames for its member-name set. If the vendor
+// group's member count is more than 3x the destination group's (plus a
+// small slack), the pairing is skipped entirely - a vendor group that much
+// larger has no real per-member correspondence (e.g. a name/fuzzy match
+// landed on a huge "All"-style container group), and dimension-only scoring
+// across such a pool tends to pick unrelated prop types just because node
+// counts happen to be close. Otherwise, for each still-unmapped, non-group,
+// non-skipped destination root whose GetCoreModel() is one of the
+// destination group's members, scores every still-unmapped, non-group vendor
+// model that is one of the vendor group's members by node-count (and, for
+// Custom models, grid-shape) closeness, and maps to the closest one. As with
+// the other catch-all-style phases, any newly-mapped root's still-unmapped
+// Strand/Node children are then filled from not-yet-used
+// `<mappedVendorModel>/...` sources of the corresponding depth.
 void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                                    const std::vector<AvailableSource>& available,
                                    RenderContext& renderContext,
@@ -603,7 +608,8 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
 // Group-member dimension backfill pass (QuikMap Phase 115), run immediately
 // after RunGroupMemberDimensionMatch and before RunCatchAll. Uses the same
 // name-based-mapped destination-group <-> vendor-ModelGroup pairings as
-// RunGroupMemberDimensionMatch, but for any destination group member that is
+// RunGroupMemberDimensionMatch (including the same large-vendor-group skip),
+// but for any destination group member that is
 // still unmapped (e.g. the destination group has more members than the
 // vendor group), reuses the closest-by-node-count vendor group member - even
 // one already claimed by Phase 110 or an earlier root in this phase - so the
@@ -623,5 +629,12 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
 void RunSkipDMX(const std::vector<ImportMappingNode*>& roots,
                 RenderContext& renderContext,
                 const std::string& ruleLabel = "");
+
+// Parses [T:Xxx] / [T:Xxx_Yyy] type-hint tags out of a model's Description
+// field and returns the corresponding alias-like strings - a "[T:Matrix]"
+// hint is treated exactly as if the model had an alias of "Matrix" for both
+// alias-based (Phase 10) and family-based (Fuzzy/GroupContentFuzzy/
+// GroupMemberDimension) matching. Unrecognized tags are ignored.
+std::vector<std::string> ParseTypeHintAliases(const std::string& description);
 
 } // namespace AutoMapper
