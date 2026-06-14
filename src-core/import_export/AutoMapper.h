@@ -111,19 +111,19 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.09";
 //             count and CustomWidth/CustomHeight grid shape exactly match an
 //             already-mapped same-family sibling's, reuses that sibling's
 //             mapped vendor source (duplicate assignment) rather than leaving
-//             it for Phase 97's blind same-type pairing. See
+//             it for Phase 105's blind same-type pairing. See
 //             RunLikeModelBackfill().
 //   Phase 95: Group-coverage skip - for each already-mapped destination group
 //             whose members all belong to the same model family (e.g. a
 //             "group of arches"), marks those member models as skipped so
-//             Phase 100 doesn't separately (and redundantly) map them. See
+//             Phase 120 doesn't separately (and redundantly) map them. See
 //             RunGroupCoverageSkip().
-//   Phase 96: Custom-dimension match - for each destination root still
+//   Phase 100: Custom-dimension match - for each destination root still
 //             unmapped and not skipped whose model "type" is "Custom" and
 //             has a known node count, pairs it with the still-unmapped
 //             vendor Custom model/group (model<->model, group<->group) whose
 //             node count (and CustomWidth/CustomHeight grid shape) is the
-//             closest match, rather than the first-available pairing Phase 97
+//             closest match, rather than the first-available pairing Phase 105
 //             would otherwise make. Candidates are also gated by
 //             FuzzyFamiliesCompatible (using FuzzyModelFamilies, which
 //             recognizes compound names like "EFlake46"/"ChromaFlake..."/
@@ -131,20 +131,20 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.09";
 //             "Snowflake 1".."Snowflake N" is only matched against
 //             recognizably flake/star/spinner-family destination Custom
 //             models, picking the closest by node count among those. Runs
-//             after Phase 95 and before Phase 97 so two same-shaped custom
+//             after Phase 95 and before Phase 105 so two same-shaped custom
 //             props (e.g. two similarly-sized snowflakes) are preferred over
 //             an arbitrary custom/custom pairing. See
 //             RunCustomDimensionMatch().
-//   Phase 97: Model-type catch-all - for each destination root still
+//   Phase 105: Model-type catch-all - for each destination root still
 //             unmapped and not skipped, pairs it with a still-unmapped
 //             vendor model/group of the same kind (model<->model,
 //             group<->group) AND the same model "type"
 //             (ImportMappingNode::GetModelType / AvailableSource::displayType,
 //             e.g. "Arches", "Tree 360", "Matrix"), regardless of name. Runs
-//             after Phase 96 and before the unconditional Phase 100
+//             after Phase 100 and before the unconditional Phase 120
 //             catch-all, so like-for-like model types are preferred over a
 //             blind pairing. See RunModelTypeCatchAll().
-//   Phase 98: Group-member dimension match - for each destination root that
+//   Phase 110: Group-member dimension match - for each destination root that
 //             IsGroup(), is already mapped to a vendor ModelGroup, and whose
 //             corresponding layout ModelGroup has members, looks up that
 //             vendor ModelGroup's AvailableSource::groupMemberNames. For each
@@ -158,22 +158,22 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.09";
 //             individual members (e.g. "EFlake46"/"HFlake1"/"ChromaFlake...")
 //             that didn't fuzzy-match a vendor name directly (e.g. vendor
 //             "Snowflake 1".."Snowflake 6"), so those generic-numbered vendor
-//             models aren't left for the unconstrained Phase 100 catch-all to
+//             models aren't left for the unconstrained Phase 120 catch-all to
 //             hand to an unrelated destination (e.g. "3D Cube-2"). Only
 //             considers destination groups whose mapping rule does not
-//             contain "Catchall" (Phase 97/100) - a blind type-based
+//             contain "Catchall" (Phase 105/120) - a blind type-based
 //             group<->group pairing carries no real member correspondence.
-//             Runs after Phase 97 and before Phase 99. See
+//             Runs after Phase 105 and before Phase 115. See
 //             RunGroupMemberDimensionMatch().
-//   Phase 99: Group-member dimension backfill - same group<->group pairings
-//             as Phase 98, but for any destination group member still
-//             unmapped after Phase 98 (e.g. there are more destination group
+//   Phase 115: Group-member dimension backfill - same group<->group pairings
+//             as Phase 110, but for any destination group member still
+//             unmapped after Phase 110 (e.g. there are more destination group
 //             members than vendor group members), reuses the closest-by-
-//             node-count vendor group member even if Phase 98 (or an earlier
+//             node-count vendor group member even if Phase 110 (or an earlier
 //             root in this phase) already claimed it - same vendor source may
-//             end up assigned to multiple destinations. Runs after Phase 98
-//             and before Phase 100. See RunGroupMemberDimensionBackfill().
-//   Phase 100: Final catch-all - pairs any still-unmapped vendor model/group
+//             end up assigned to multiple destinations. Runs after Phase 110
+//             and before Phase 120. See RunGroupMemberDimensionBackfill().
+//   Phase 120: Final catch-all - pairs any still-unmapped vendor model/group
 //             with any still-unmapped user model/group of the same kind,
 //             regardless of name. See RunCatchAll().
 
@@ -268,7 +268,7 @@ void Run(const std::vector<ImportMappingNode*>& roots,
 // with GetNodeCount() > 0, finds the first still-unmapped, non-group vendor
 // Custom model (AvailableSource::displayType == "Custom") whose nodeCount,
 // width, and height are all exactly equal, and maps to it. Unlike
-// RunCustomDimensionMatch (Phase 96, a tolerance-based last resort), this
+// RunCustomDimensionMatch (Phase 100, a tolerance-based last resort), this
 // requires an exact structural match - two props with identical pixel
 // counts and grid shape are treated as the same prop regardless of name. As
 // with the other catch-all-style phases, any newly-mapped root's still-
@@ -425,7 +425,7 @@ void RunLikeModelBackfill(const std::vector<ImportMappingNode*>& roots,
 // looks up the corresponding ModelGroup in the layout and checks whether all
 // of its member models share the same fuzzy "base" tokens (i.e. the group is
 // e.g. "all Arches"). If so, marks each member model's destination root (if
-// still unmapped) as skipped via ImportMappingNode::SetSkipped, so Phase 100
+// still unmapped) as skipped via ImportMappingNode::SetSkipped, so Phase 120
 // doesn't separately map e.g. "Arches-1-Left"/"Arches-6-R" when the
 // containing "Arches" group has already been mapped to a vendor "Arches"
 // group.
@@ -433,7 +433,7 @@ void RunGroupCoverageSkip(const std::vector<ImportMappingNode*>& roots,
                           RenderContext& renderContext,
                           const std::string& ruleLabel = "");
 
-// Last-resort catch-all pass (QuikMap Phase 100). Ignores naming entirely:
+// Last-resort catch-all pass (QuikMap Phase 120). Ignores naming entirely:
 // for each destination root still unmapped, claims the next not-yet-used
 // available source of the matching kind (ModelGroup destinations only draw
 // from ModelGroup sources, everything else only draws from non-ModelGroup
@@ -449,7 +449,7 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
                  const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                  const std::string& ruleLabel = "");
 
-// Sibling-reuse backfill pass (QuikMap Phase 101), run after RunCatchAll. For
+// Sibling-reuse backfill pass (QuikMap Phase 125), run after RunCatchAll. For
 // each destination root that is still unmapped, not skipped, and not a group,
 // looks for an already-mapped sibling root (same FuzzyBaseTokens and
 // FuzzySideSignature, e.g. "Md Star - 01"/"Md Star - 02" share base "md star"
@@ -465,7 +465,7 @@ void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
                               const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                               const std::string& ruleLabel = "");
 
-// Custom-dimension match pass (QuikMap Phase 96), run after
+// Custom-dimension match pass (QuikMap Phase 100), run after
 // RunGroupCoverageSkip and before RunModelTypeCatchAll. For each destination
 // root that is still unmapped, not skipped, and whose
 // ImportMappingNode::GetModelType() is "Custom" (case-insensitive) with
@@ -474,7 +474,7 @@ void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
 // == "Custom") by similarity of AvailableSource::nodeCount and
 // width/height aspect ratio, and maps to the closest match if it is within a
 // reasonable tolerance. Destination roots with no candidate within tolerance
-// are left unmapped for Phase 97/100. As with RunModelTypeCatchAll, any
+// are left unmapped for Phase 105/120. As with RunModelTypeCatchAll, any
 // newly-mapped root's still-unmapped Strand/Node children are then filled
 // from not-yet-used `<mappedVendorModel>/...` sources of the corresponding
 // depth.
@@ -484,7 +484,7 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                               const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                               const std::string& ruleLabel = "");
 
-// Model-type catch-all pass (QuikMap Phase 97), run after
+// Model-type catch-all pass (QuikMap Phase 105), run after
 // RunGroupCoverageSkip and before RunCatchAll. For each destination root
 // that is still unmapped and not skipped, claims the next not-yet-used
 // available source of the matching kind (ModelGroup destinations only draw
@@ -496,7 +496,7 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
 // unconditional pairing. Destination roots whose GetModelType() is "Custom"
 // are skipped entirely - "Custom" covers too wide a range of shapes (e.g. a
 // 3D Cube and a flat Snowflake) for a type-only match to be meaningful, so
-// those are left for Phase 96's dimension-based match or Phase 100. As with
+// those are left for Phase 100's dimension-based match or Phase 120. As with
 // RunCatchAll, any newly-mapped root's still-
 // unmapped Strand/Node children are then filled from not-yet-used
 // `<mappedVendorModel>/...` sources of the corresponding depth.
@@ -506,7 +506,7 @@ void RunModelTypeCatchAll(const std::vector<ImportMappingNode*>& roots,
                           const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                           const std::string& ruleLabel = "");
 
-// Group-member dimension match pass (QuikMap Phase 98), run after
+// Group-member dimension match pass (QuikMap Phase 110), run after
 // RunModelTypeCatchAll and before RunCatchAll. For each destination root that
 // IsGroup(), is already mapped to a vendor ModelGroup, and whose
 // corresponding layout ModelGroup (renderContext.GetModel) has at least one
@@ -528,13 +528,13 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                                    const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                                    const std::string& ruleLabel = "");
 
-// Group-member dimension backfill pass (QuikMap Phase 99), run immediately
+// Group-member dimension backfill pass (QuikMap Phase 115), run immediately
 // after RunGroupMemberDimensionMatch and before RunCatchAll. Uses the same
 // name-based-mapped destination-group <-> vendor-ModelGroup pairings as
 // RunGroupMemberDimensionMatch, but for any destination group member that is
 // still unmapped (e.g. the destination group has more members than the
 // vendor group), reuses the closest-by-node-count vendor group member - even
-// one already claimed by Phase 98 or an earlier root in this phase - so the
+// one already claimed by Phase 110 or an earlier root in this phase - so the
 // same vendor source may end up assigned to multiple destinations.
 void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& roots,
                                       const std::vector<AvailableSource>& available,

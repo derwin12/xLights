@@ -69,7 +69,7 @@ public:
     // Structural size info for Custom models - lit node count and the
     // CustomWidth/CustomHeight grid dimensions. Default 0 (unknown) so hosts
     // that don't compute this aren't forced to implement it. Used by
-    // AutoMapper::RunCustomDimensionMatch (QuikMap Phase 96) to prefer a
+    // AutoMapper::RunCustomDimensionMatch (QuikMap Phase 100) to prefer a
     // same-type Custom vendor model with a similar node count/shape over a
     // blind first-available pairing.
     virtual int GetNodeCount() const { return 0; }
@@ -146,7 +146,7 @@ struct AvailableSource {
     // Structural size info for Custom models, mirroring
     // ImportMappingNode::GetNodeCount/GetWidth/GetHeight/GetStrandCount.
     // Empty/zero for strand/node entries or when unknown. See
-    // AutoMapper::RunCustomDimensionMatch (QuikMap Phase 96).
+    // AutoMapper::RunCustomDimensionMatch (QuikMap Phase 100).
     int nodeCount{ 0 };
     int width{ 0 };
     int height{ 0 };

@@ -1272,7 +1272,7 @@ void RunLikeModelBackfill(const std::vector<ImportMappingNode*>& roots,
     // grid shape exactly match an already-mapped same-family sibling's (e.g.
     // "Cane-3", same 100x51 shape), reuse that sibling's mapped vendor source.
     // This keeps a genuinely like-shaped destination paired with its closest
-    // relative instead of falling through to Phase 97's blind same-type
+    // relative instead of falling through to Phase 105's blind same-type
     // (e.g. Custom<->Custom) pairing with an unrelated prop.
     for (auto* model : roots) {
         if (model == nullptr || model->IsGroup() || model->IsSkipped()) continue;
@@ -1550,7 +1550,7 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
         }
 
         // Only accept a close match - node counts within ~25% of each other.
-        // Anything looser is left for Phase 97/100 to pair by type alone.
+        // Anything looser is left for Phase 105/120 to pair by type alone.
         if (best != nullptr && bestScore <= 0.25) {
             model->Map(best->displayName, best->modelType);
             model->SetMappingRule(ruleLabel);
@@ -1642,7 +1642,7 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
 
         // Only trust group<->group pairings that came from a name-based
         // match (Exact/Alias/Community/Fuzzy/GroupContent etc). A
-        // catch-all-style group<->group pairing (Phase 97/100, e.g. a huge
+        // catch-all-style group<->group pairing (Phase 105/120, e.g. a huge
         // "01 Everything" group matched purely on type) carries no real
         // correspondence between the two groups' members, so using it here
         // would let an unrelated destination model (e.g. "3D Cube-2") steal
@@ -1756,7 +1756,7 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
         std::set<std::string> vendorMembers;
         for (const auto& name : vendorGroup->groupMemberNames) vendorMembers.insert(Lower(Trim(name)));
 
-        // Reusable pool - sources already claimed by Phase 98 (or an earlier
+        // Reusable pool - sources already claimed by Phase 110 (or an earlier
         // root in this loop) remain candidates here, since by this point
         // there may be more destination group members than vendor ones.
         std::vector<const AvailableSource*> pool;
@@ -1849,8 +1849,8 @@ void RunModelTypeCatchAll(const std::vector<ImportMappingNode*>& roots,
 
         // "Custom" covers wildly different shapes (a 3D Cube and a Snowflake
         // are both "Custom"), so a blind type match here is meaningless.
-        // Custom models that didn't get a dimension-based match in Phase 96
-        // are left for Phase 100 instead.
+        // Custom models that didn't get a dimension-based match in Phase 100
+        // are left for Phase 120 instead.
         if (targetType == "custom") continue;
 
         for (const auto& src : available) {

@@ -3686,105 +3686,105 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
 
     // Phase 95: group-coverage skip. If an already-mapped destination group
     // is made up entirely of one model type (e.g. a group of Arches), mark
-    // its individual member models as skipped so Phase 100 doesn't
+    // its individual member models as skipped so Phase 120 doesn't
     // separately/redundantly map them.
     if (dlg) dlg->Update(89, "Phase 95: Checking group coverage...");
     DoGroupCoverageSkip("Phase 95: GroupCoverage");
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
-    // Phase 96: custom-dimension match. For still-unmapped Custom-type
+    // Phase 100: custom-dimension match. For still-unmapped Custom-type
     // destination roots, prefer a still-unmapped vendor Custom model/group
     // whose node count and grid shape closely match, over the blind
-    // first-available pairing Phase 97 would otherwise make.
+    // first-available pairing Phase 105 would otherwise make.
     before = after;
-    if (dlg) dlg->Update(89, "Phase 96: Looking for custom-dimension matches...");
-    DoCustomDimensionMatch(select, "Phase 96: CustomDimension");
+    if (dlg) dlg->Update(89, "Phase 100: Looking for custom-dimension matches...");
+    DoCustomDimensionMatch(select, "Phase 100: CustomDimension");
     after = CountUnmappedRoots();
-    int phase96 = before - after;
-    summary << wxString::Format("Phase 96: Custom-dimension matches found: %d\n", phase96);
-    if (dlg) dlg->Update(89, wxString::Format("Phase 96 complete - custom-dimension matches found: %d", phase96));
+    int phase100 = before - after;
+    summary << wxString::Format("Phase 100: Custom-dimension matches found: %d\n", phase100);
+    if (dlg) dlg->Update(89, wxString::Format("Phase 100 complete - custom-dimension matches found: %d", phase100));
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
-    // Phase 97: model-type catch-all. Maps any still-unmapped destination
+    // Phase 105: model-type catch-all. Maps any still-unmapped destination
     // root to a still-unmapped vendor model/group of the same kind AND the
     // same model "type" (e.g. "Arches" to "Arches"), ignoring names. Runs
-    // ahead of the unconditional Phase 100 catch-all so like-for-like model
+    // ahead of the unconditional Phase 120 catch-all so like-for-like model
     // types are preferred.
     before = after;
-    if (dlg) dlg->Update(89, "Phase 97: Looking for like-model-type matches...");
-    DoModelTypeCatchAll(select, "Phase 97: ModelTypeCatchall");
+    if (dlg) dlg->Update(89, "Phase 105: Looking for like-model-type matches...");
+    DoModelTypeCatchAll(select, "Phase 105: ModelTypeCatchall");
     after = CountUnmappedRoots();
-    int phase97 = before - after;
-    summary << wxString::Format("Phase 97: Model-type catch-all matches found: %d\n", phase97);
-    if (dlg) dlg->Update(90, wxString::Format("Phase 97 complete - model-type catch-all matches found: %d", phase97));
+    int phase105 = before - after;
+    summary << wxString::Format("Phase 105: Model-type catch-all matches found: %d\n", phase105);
+    if (dlg) dlg->Update(90, wxString::Format("Phase 105 complete - model-type catch-all matches found: %d", phase105));
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
-    // Phase 98: group-member dimension match. For a destination group already
+    // Phase 110: group-member dimension match. For a destination group already
     // mapped to a vendor ModelGroup (e.g. "Group - Snowflakes" -> "Snowflakes"),
     // maps the destination group's still-unmapped individual members (e.g.
     // "EFlake46", "HFlake1") to the closest-by-node-count still-unmapped
     // member of the vendor group (e.g. "Snowflake 1".."Snowflake 6"), so they
-    // aren't left for the unconstrained Phase 100 catch-all.
+    // aren't left for the unconstrained Phase 120 catch-all.
     before = after;
-    if (dlg) dlg->Update(90, "Phase 98: Looking for group-member dimension matches...");
-    DoGroupMemberDimensionMatch(select, "Phase 98: GroupMemberDimension");
+    if (dlg) dlg->Update(90, "Phase 110: Looking for group-member dimension matches...");
+    DoGroupMemberDimensionMatch(select, "Phase 110: GroupMemberDimension");
     after = CountUnmappedRoots();
-    int phase98 = before - after;
-    summary << wxString::Format("Phase 98: Group-member dimension matches found: %d\n", phase98);
-    if (dlg) dlg->Update(90, wxString::Format("Phase 98 complete - group-member dimension matches found: %d", phase98));
+    int phase110 = before - after;
+    summary << wxString::Format("Phase 110: Group-member dimension matches found: %d\n", phase110);
+    if (dlg) dlg->Update(90, wxString::Format("Phase 110 complete - group-member dimension matches found: %d", phase110));
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
-    // Phase 99: group-member dimension backfill. For any destination group
-    // member still unmapped after Phase 98 (more destination members than
+    // Phase 115: group-member dimension backfill. For any destination group
+    // member still unmapped after Phase 110 (more destination members than
     // vendor group members), reuse the closest-by-node-count vendor group
-    // member even if Phase 98 already claimed it.
+    // member even if Phase 110 already claimed it.
     before = after;
-    if (dlg) dlg->Update(90, "Phase 99: Backfilling group-member dimension matches...");
-    DoGroupMemberDimensionBackfill(select, "Phase 99: GroupMemberDimensionBackfill");
+    if (dlg) dlg->Update(90, "Phase 115: Backfilling group-member dimension matches...");
+    DoGroupMemberDimensionBackfill(select, "Phase 115: GroupMemberDimensionBackfill");
     after = CountUnmappedRoots();
-    int phase99 = before - after;
-    summary << wxString::Format("Phase 99: Group-member dimension backfill matches found: %d\n", phase99);
-    if (dlg) dlg->Update(90, wxString::Format("Phase 99 complete - group-member dimension backfill matches found: %d", phase99));
+    int phase115 = before - after;
+    summary << wxString::Format("Phase 115: Group-member dimension backfill matches found: %d\n", phase115);
+    if (dlg) dlg->Update(90, wxString::Format("Phase 115 complete - group-member dimension backfill matches found: %d", phase115));
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
-    // Phase 100: last-resort catch-all. Maps anything still unmapped on the
+    // Phase 120: last-resort catch-all. Maps anything still unmapped on the
     // vendor side to anything still unmapped on the user's layout, as long
     // as model maps to model, group maps to group, and type matches type
     // (e.g. SubModel/Strand/Node only match the same kind).
     before = after;
-    if (dlg) dlg->Update(90, "Phase 100: Mapping remaining unmapped items...");
-    DoCatchAllFallback(select, "Phase 100: Catchall");
+    if (dlg) dlg->Update(90, "Phase 120: Mapping remaining unmapped items...");
+    DoCatchAllFallback(select, "Phase 120: Catchall");
     after = CountUnmappedRoots();
-    int phase100 = before - after;
-    summary << wxString::Format("Phase 100: Catch-all matches found: %d\n", phase100);
-    if (dlg) dlg->Update(100, wxString::Format("Phase 100 complete - catch-all matches found: %d", phase100));
+    int phase120 = before - after;
+    summary << wxString::Format("Phase 120: Catch-all matches found: %d\n", phase120);
+    if (dlg) dlg->Update(100, wxString::Format("Phase 120 complete - catch-all matches found: %d", phase120));
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
-    // Phase 101: sibling-reuse backfill. For any destination root still
-    // unmapped after Phase 100 (e.g. a numbered family with more destination
+    // Phase 125: sibling-reuse backfill. For any destination root still
+    // unmapped after Phase 120 (e.g. a numbered family with more destination
     // props than like-typed vendor props), reuse an already-mapped sibling's
     // vendor mapping (same fuzzy base/side, same model type).
     before = after;
-    if (dlg) dlg->Update(100, "Phase 101: Looking for sibling-reuse matches...");
-    DoSiblingReuseBackfill(select, "Phase 101: SiblingReuse");
+    if (dlg) dlg->Update(100, "Phase 125: Looking for sibling-reuse matches...");
+    DoSiblingReuseBackfill(select, "Phase 125: SiblingReuse");
     after = CountUnmappedRoots();
-    int phase101 = before - after;
-    summary << wxString::Format("Phase 101: Sibling-reuse matches found: %d\n", phase101);
-    if (dlg) dlg->Update(100, wxString::Format("Phase 101 complete - sibling-reuse matches found: %d", phase101));
+    int phase125 = before - after;
+    summary << wxString::Format("Phase 125: Sibling-reuse matches found: %d\n", phase125);
+    if (dlg) dlg->Update(100, wxString::Format("Phase 125 complete - sibling-reuse matches found: %d", phase125));
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
     // catchall summary listing - only show if it found any matches, since it's just a repeat of the final state of the tree but without the mapping rules in the report.
-    if (phase97 > 0) {
-        summary << "\nModel-type catch-all matches (Phase 97):\n";
+    if (phase105 > 0) {
+        summary << "\nModel-type catch-all matches (Phase 105):\n";
         std::function<void(xLightsImportModelNode*)> walkModelTypeCatchAll = [&](xLightsImportModelNode* node) {
-            if (node->IsMapped() && node->GetMappingRule() == "Phase 97: ModelTypeCatchall") {
+            if (node->IsMapped() && node->GetMappingRule() == "Phase 105: ModelTypeCatchall") {
                 summary << wxString::Format("  %s -> %s\n", node->GetModelName(), wxString(node->GetMapping()));
             }
             for (unsigned int i = 0; i < node->GetChildCount(); ++i) {
@@ -3796,10 +3796,10 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         }
     }
 
-    if (phase100 > 0) {
-        summary << "\nCatch-all matches (Phase 100):\n";
+    if (phase120 > 0) {
+        summary << "\nCatch-all matches (Phase 120):\n";
         std::function<void(xLightsImportModelNode*)> walkCatchAll = [&](xLightsImportModelNode* node) {
-            if (node->IsMapped() && node->GetMappingRule() == "Phase 100: Catchall") {
+            if (node->IsMapped() && node->GetMappingRule() == "Phase 120: Catchall") {
                 summary << wxString::Format("  %s -> %s\n", node->GetModelName(), wxString(node->GetMapping()));
             }
             for (unsigned int i = 0; i < node->GetChildCount(); ++i) {
@@ -3811,10 +3811,10 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         }
     }
 
-    if (phase101 > 0) {
-        summary << "\nSibling-reuse matches (Phase 101):\n";
+    if (phase125 > 0) {
+        summary << "\nSibling-reuse matches (Phase 125):\n";
         std::function<void(xLightsImportModelNode*)> walkSiblingReuse = [&](xLightsImportModelNode* node) {
-            if (node->IsMapped() && node->GetMappingRule() == "Phase 101: SiblingReuse") {
+            if (node->IsMapped() && node->GetMappingRule() == "Phase 125: SiblingReuse") {
                 summary << wxString::Format("  %s -> %s\n", node->GetModelName(), wxString(node->GetMapping()));
             }
             for (unsigned int i = 0; i < node->GetChildCount(); ++i) {
