@@ -2337,7 +2337,16 @@ void xLightsImportChannelMapDialog::LoadXMapMapping(wxString const& filename, bo
         wxString mapping;
         wxColor color = *wxWHITE;
 
-        if (CountChar(line, '\t') == 4) {
+        wxString rule;
+        int tabCount = CountChar(line, '\t');
+        if (tabCount >= 5) {
+            model = FindTab(line);
+            strand = FindTab(line);
+            node = FindTab(line);
+            mapping = FindTab(line);
+            color = wxColor(FindTab(line));
+            rule = FindTab(line);
+        } else if (tabCount == 4) {
             model = FindTab(line);
             strand = FindTab(line);
             node = FindTab(line);
@@ -2388,12 +2397,16 @@ void xLightsImportChannelMapDialog::LoadXMapMapping(wxString const& filename, bo
                     wxDataViewItem targetItem(targetNode);
                     if (targetNode->_mapping.empty()) {
                         ApplyMappingItem(mapping, targetItem, color);
+                        if (!rule.empty())
+                            TreeListCtrl_Mapping->GetModel()->SetValue(wxVariant(rule), targetItem, 5);
                     } else if (!targetNode->_mappingExists) {
                         // existing mapping is invalid (red) — stash it and apply the new one
                         _stashedMappings.emplace_back(new StashedMapping(
                             wxString(targetNode->_model), wxString(targetNode->_strand), wxString(targetNode->_node),
                             wxString(targetNode->_mapping), targetNode->_color));
                         ApplyMappingItem(mapping, targetItem, color);
+                        if (!rule.empty())
+                            TreeListCtrl_Mapping->GetModel()->SetValue(wxVariant(rule), targetItem, 5);
                     } else {
                         // destination already has a valid mapping — stack the incoming one
                         wxDataViewItem baseItem = FindLastItem(model, strand, node);
@@ -2457,6 +2470,7 @@ void xLightsImportChannelMapDialog::SaveXMapMapping(wxString const& filename)
                     +"\t" +
                     +"\t" + sm->_mapping
                     + "\t" + sm->_color.GetAsString()
+                    + "\t"
                     + "\n");
             } else {
                 text.WriteString(mn
@@ -2464,6 +2478,7 @@ void xLightsImportChannelMapDialog::SaveXMapMapping(wxString const& filename)
                     +"\t" +
                     +"\t" + m->_mapping
                     + "\t" + m->_color.GetAsString()
+                    + "\t" + wxString(m->_mappingRule)
                     + "\n");
             }
             for (size_t j = 0; j < m->GetChildCount(); ++j) {
@@ -2476,6 +2491,7 @@ void xLightsImportChannelMapDialog::SaveXMapMapping(wxString const& filename)
                             + "\t" +
                             +"\t" + sm->_mapping
                             + "\t" + sm->_color.GetAsString()
+                            + "\t"
                             + "\n");
                     } else {
                         text.WriteString(mn
@@ -2483,6 +2499,7 @@ void xLightsImportChannelMapDialog::SaveXMapMapping(wxString const& filename)
                             + "\t" +
                             +"\t" + s->_mapping
                             + "\t" + s->_color.GetAsString()
+                            + "\t" + wxString(s->_mappingRule)
                             + "\n");
                     }
                     for (size_t k = 0; k < s->GetChildCount(); ++k) {
@@ -2494,6 +2511,7 @@ void xLightsImportChannelMapDialog::SaveXMapMapping(wxString const& filename)
                                 + "\t" + sm->_node
                                 + "\t" + sm->_mapping
                                 + "\t" + sm->_color.GetAsString()
+                                + "\t"
                                 + "\n");
                         } else {
                             if (n->HasMapping()) {
@@ -2502,6 +2520,7 @@ void xLightsImportChannelMapDialog::SaveXMapMapping(wxString const& filename)
                                     + "\t" + n->_node
                                     + "\t" + n->_mapping
                                     + "\t" + n->_color.GetAsString()
+                                    + "\t" + wxString(n->_mappingRule)
                                     + "\n");
                             }
                         }

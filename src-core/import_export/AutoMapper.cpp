@@ -1594,6 +1594,7 @@ void RunSpecialKeywordGroupMatch(const std::vector<ImportMappingNode*>& roots,
         }
         if (!matches) continue;
 
+        const AvailableSource* best = nullptr;
         for (const auto& src : available) {
             if (selectMapAvail && !src.selected) continue;
             if (src.canonicalName.find('/') != std::string::npos) continue;
@@ -1601,10 +1602,23 @@ void RunSpecialKeywordGroupMatch(const std::vector<ImportMappingNode*>& roots,
             if (used.count(Lower(Trim(src.displayName))) != 0) continue;
             if (!containsKeyword(src.displayName)) continue;
 
-            model->Map(src.displayName, src.modelType);
+            if (best == nullptr) {
+                best = &src;
+                continue;
+            }
+            bool srcHasEffects = src.effectCount > 0;
+            bool bestHasEffects = best->effectCount > 0;
+            if (srcHasEffects && !bestHasEffects) {
+                best = &src;
+            } else if (srcHasEffects == bestHasEffects &&
+                       src.groupMemberNames.size() > best->groupMemberNames.size()) {
+                best = &src;
+            }
+        }
+        if (best != nullptr) {
+            model->Map(best->displayName, best->modelType);
             model->SetMappingRule(ruleLabel);
-            used.insert(Lower(Trim(src.displayName)));
-            break;
+            used.insert(Lower(Trim(best->displayName)));
         }
     }
 

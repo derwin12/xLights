@@ -35,26 +35,47 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 //   Phase  0: Skip pass - marks destination roots that are DMX models, or
 //             groups that (recursively) contain at least one DMX model, as
 //             skipped so no later phase maps them. See RunSkipDMX().
+//             e.g. dest "DMX-Spot-1" (DMX model) → skipped; never mapped.
+//
 //   Phase  5: Exact name matches (case-insensitive) between vendor models/
 //             groups and the user's models/groups. See MatchNorm, Run().
-//   Phase 10: Matches between vendor mduodels/groups and aliases defined on
+//             e.g. dest "Cane-1" matches vendor "cane-1" (same name,
+//             different case).
+//
+//   Phase 10: Matches between vendor models/groups and aliases defined on
 //             the user's models/groups (also tolerant of punctuation
 //             differences). See MatchAggressive, Run().
+//             e.g. dest "Holiday Tree" carries alias "Christmas Tree" →
+//             matches vendor "Christmas Tree" even though the base names
+//             differ.
+//
 //   Phase 12: Custom-model exact-dimension matches - pairs an unmapped
 //             destination Custom model with an unmapped vendor Custom model
 //             whose node count, CustomWidth, and CustomHeight are all exactly
 //             equal, regardless of name. Runs before the alias/community/
 //             fuzzy passes since an exact structural match is a stronger
 //             signal than a name guess. See RunCustomExactDimensionMatch().
+//             e.g. dest "MyFlake-A" (48 nodes, 8×6 grid) matches vendor
+//             "Snowflake 3" (48 nodes, 8×6 grid) — identical structure
+//             despite sharing no name tokens.
+//
 //   Phase 13: Custom-model submodel-overlap matches - pairs an unmapped
 //             destination Custom model with an unmapped vendor Custom model
 //             that shares at least 3 submodel names (case-insensitive),
 //             regardless of the parent model's name. See
 //             RunCustomSubmodelOverlapMatch().
+//             e.g. dest "BigStar" has submodels "Ring 1", "Ring 2", "Ring 3",
+//             "Ring 4" → matches vendor "Star" which also has "Ring 1",
+//             "Ring 2", "Ring 3" (3 shared submodel names).
+//
 //   Phase 15: Matches against a locally-cached community alias pack
 //             (crowdsourced vendor-name -> user-name pairs from
 //             mapper.xlights.info). Skipped if no cache is present. See
 //             CommunityAliasPack::Matches, Run().
+//             e.g. community pack contains pair "xmas tree" → "Holiday Pine"
+//             → dest "Holiday Pine" matches vendor "xmas tree" with no local
+//             alias required.
+//
 //   Phase 16: "Everything"/"all" group matches - for an unmapped destination
 //             ModelGroup root whose name or aliases contain an "everything"
 //             or "all" token, matches it against an unmapped vendor
@@ -63,23 +84,36 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 //             when either side has more than one such candidate, the
 //             candidate with the highest member count is preferred. See
 //             RunEverythingGroupMatch().
+//             e.g. dest "01 Everything" (208 members) matches vendor "All
+//             Props" (240 members) — both contain the "all" token and are the
+//             largest such groups on their respective sides.
+//
 //   Phase 17: Special-keyword group matches - for an unmapped destination
 //             ModelGroup root whose name or aliases contain one of a small
 //             set of special keywords ("last", "override", "bottom"), matches
-//             it against an unmapped vendor ModelGroup whose name also
-//             contains one of those keywords (not necessarily the same one).
-//             These keywords mark groups with special sequencer meaning (e.g. a
-//             "Last" or "Override" group that takes priority over normal
-//             groups, or a "Bottom" group at the base of a stack) where a
-//             name-based match is more reliable than the generic fuzzy/
-//             catch-all passes. See RunSpecialKeywordGroupMatch().
+//             it against the unmapped vendor ModelGroup whose name also
+//             contains one of those keywords that has the most effects; among
+//             candidates with effects, the one with the most members wins.
+//             See RunSpecialKeywordGroupMatch().
+//             e.g. dest "98 All Override (last group)" matches vendor "All
+//             with no faces (put on bottom for FADES)" — dest has "last",
+//             vendor has "bottom", and that vendor group has effects while
+//             other keyword-group candidates do not.
+//
 //   Phase 20: Submodel/strand fallback matches by name or alias, matching
 //             submodels of unmapped models only against non-group available
 //             sources (group roots and group sources are skipped). See
 //             RunSubModelFallback().
+//             e.g. dest model "WreathA" has no top-level vendor match, but
+//             its submodel "Ring 1" matches vendor source "Ring 1" directly.
+//
 //   Phase 25: Last-resort fuzzy matches (token overlap, with numeric/side
 //             signature and model-family guardrails) for anything still
 //             unmapped. See MatchFuzzy, Run().
+//             e.g. dest "Candy-Cane-Left-1" fuzzy-matches vendor "Cane 1
+//             Left" — shared tokens {cane, 1, left} give Jaccard ≥ 0.6 and
+//             numeric/side signatures agree.
+//
 //   Phase 26: Group-content fuzzy matches - for unmapped destination groups,
 //             augments the group's own name tokens with the shared family
 //             token of its members when the group is made up entirely of one
@@ -92,15 +126,30 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 //             "Group - Candy Canes" (members "Cane-1".."Cane-4") even though
 //             the group names alone don't overlap enough. See
 //             RunGroupContentFuzzy().
+//             e.g. dest "Group - Candy Canes" (all "Cane-N" members →
+//             augmented with "cane") fuzzy-matches vendor "Canes" group (all
+//             "Cane N" members → also augmented with "cane"), even though
+//             "Group - Candy Canes" vs "Canes" alone is below the 0.6
+//             Jaccard threshold.
+//
 //   Phase 30: Singing-prop matches - pairs unmapped destination roots that
 //             are real singing props with unmapped singing-prop vendor
 //             models. See RunSingingProp().
+//             e.g. dest "Santa" (Custom with populated NodeRange face
+//             mapping) matches vendor "Santa Face" (also a singing prop),
+//             claimed before Phase 65's coarser modelClass pairing can grab
+//             it.
+//
 //   Phase 32: Singing-prop backfill - for any destination roots that are
 //             still-unmapped real singing props (e.g. there were more
 //             destination singing props than vendor singing models in
 //             Phase 30), reuses vendor singing-prop models round-robin,
 //             same vendor model assigned to multiple destinations if
 //             needed. See RunSingingPropBackfill().
+//             e.g. dest has "Santa", "Snowman", "Elf" (all singing props);
+//             vendor has only "Santa Face" and "Snowman Face" → "Elf" reuses
+//             "Santa Face" (first in the pool).
+//
 //   Phase 40: Floodlight matches. A "floodlight" model is a non-group,
 //             single-line model with one node per string
 //             (IsFloodlightModel). A "flood group" is a ModelGroup whose
@@ -109,15 +158,26 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 //             groups; unmapped individual destination floodlights are then
 //             matched 1:1 to unmapped individual vendor floodlights. See
 //             RunFloodlight().
+//             e.g. dest "Group - Floods" (4 single-node flood members)
+//             matches vendor "Flood Lights" (also a flood group); then dest
+//             "Flood-Left" matches vendor "Flood L" 1:1.
+//
 //   Phase 41: Floodlight backfill - for any destination roots that are still
 //             unmapped flood groups or individual floodlights (e.g. there
 //             were more destination flood groups/floodlights than vendor
 //             ones in Phase 40), reuses vendor flood-group/floodlight
 //             sources round-robin, same vendor source assigned to multiple
 //             destinations if needed. See RunFloodlightBackfill().
+//             e.g. dest has 4 individual floods; vendor has only 2 → flood-3
+//             reuses vendor flood-1, flood-4 reuses vendor flood-2.
+//
 //   Phase 65: Best-guess matches by shared model "class" for anything still
 //             unmapped, excluding singing props (handled by Phase 30). See
 //             RunBestGuess().
+//             e.g. dest "SpiralPumpkin" has modelClass "SpiralTree" →
+//             matches vendor "SpiralTree 1" (same modelClass), even though
+//             no name tokens overlap.
+//
 //   Phase 90: Like-model backfill - for an unmapped destination model that is
 //             a numbered sibling of an already-mapped destination model of
 //             the same family (e.g. "Cane-4" alongside mapped "Cane-1"),
@@ -131,11 +191,19 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 //             mapped vendor source (duplicate assignment) rather than leaving
 //             it for Phase 105's blind same-type pairing. See
 //             RunLikeModelBackfill().
+//             e.g. dest "Cane-4" is unmapped; sibling "Cane-1" maps to
+//             vendor "Cane 1" → candidate "Cane 4" is found and assigned.
+//
 //   Phase 95: Group-coverage skip - for each already-mapped destination group
 //             whose members all belong to the same model family (e.g. a
 //             "group of arches"), marks those member models as skipped so
 //             Phase 120 doesn't separately (and redundantly) map them. See
 //             RunGroupCoverageSkip().
+//             e.g. dest "Group - Arches" (all "Arch-N" members) is already
+//             mapped → "Arch-1".."Arch-6" are marked skipped so Phase 120
+//             doesn't pair each arch individually to an unrelated vendor
+//             model.
+//
 //   Phase 100: Custom-dimension match - for each destination root still
 //             unmapped and not skipped whose model "type" is "Custom" and
 //             has a known node count, pairs it with the still-unmapped
@@ -153,6 +221,10 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 //             props (e.g. two similarly-sized snowflakes) are preferred over
 //             an arbitrary custom/custom pairing. See
 //             RunCustomDimensionMatch().
+//             e.g. dest "HFlake1" (46 nodes, Custom) matches vendor
+//             "Snowflake 2" (46 nodes, Custom) — same family ("flake"
+//             keyword), closest node count among available vendor Customs.
+//
 //   Phase 105: Model-type catch-all - for each destination root still
 //             unmapped and not skipped, pairs it with a still-unmapped
 //             vendor model/group of the same kind (model<->model,
@@ -162,6 +234,9 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 //             after Phase 100 and before the unconditional Phase 120
 //             catch-all, so like-for-like model types are preferred over a
 //             blind pairing. See RunModelTypeCatchAll().
+//             e.g. dest "MyArch-3" (type "Arches") matches vendor "Arch C"
+//             (type "Arches") purely by model type — no name overlap needed.
+//
 //   Phase 110: Group-member dimension match - for each destination root that
 //             IsGroup(), is already mapped to a vendor ModelGroup, and whose
 //             corresponding layout ModelGroup has members, looks up that
@@ -171,18 +246,19 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 //             model that is one of the vendor group's members and has the
 //             closest node count (and grid shape, for Custom models), and
 //             maps to it. This uses an already-established group<->group
-//             mapping (e.g. destination "Group - Snowflakes" -> vendor
-//             "Snowflakes") as a high-confidence pool of candidates for its
-//             individual members (e.g. "EFlake46"/"HFlake1"/"ChromaFlake...")
-//             that didn't fuzzy-match a vendor name directly (e.g. vendor
-//             "Snowflake 1".."Snowflake 6"), so those generic-numbered vendor
-//             models aren't left for the unconstrained Phase 120 catch-all to
-//             hand to an unrelated destination (e.g. "3D Cube-2"). Only
-//             considers destination groups whose mapping rule does not
-//             contain "Catchall" (Phase 105/120) - a blind type-based
-//             group<->group pairing carries no real member correspondence.
-//             Runs after Phase 105 and before Phase 115. See
+//             mapping as a high-confidence pool for its individual members
+//             that didn't fuzzy-match a vendor name directly, so those
+//             generic-numbered vendor models aren't left for the unconstrained
+//             Phase 120 catch-all. Only considers destination groups whose
+//             mapping rule came from a name-based phase — groups matched by
+//             EverythingGroup (16), SpecialKeywordGroup (17), or Catchall
+//             (105/120) carry no real per-member correspondence and are
+//             skipped. Runs after Phase 105 and before Phase 115. See
 //             RunGroupMemberDimensionMatch().
+//             e.g. dest "Group - Snowflakes" → vendor "Snowflakes" (Phase 25
+//             fuzzy); member "EFlake46" (46 nodes) → vendor "Snowflake 2"
+//             (46 nodes, closest in the vendor group's member pool).
+//
 //   Phase 115: Group-member dimension backfill - same group<->group pairings
 //             as Phase 110, but for any destination group member still
 //             unmapped after Phase 110 (e.g. there are more destination group
@@ -191,6 +267,10 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 //             root in this phase) already claimed it - same vendor source may
 //             end up assigned to multiple destinations. Runs after Phase 110
 //             and before Phase 120. See RunGroupMemberDimensionBackfill().
+//             e.g. dest "Group - Stars" → vendor "Stars" (3 members: "Star
+//             1".."Star 3"); dest has 4 star members → the 4th destination
+//             star reuses vendor "Star 1" (closest node count).
+//
 //   Phase 120: Final catch-all - pairs any still-unmapped vendor model/group
 //             with any still-unmapped user model/group of the same kind,
 //             regardless of name. Exception: a still-unmapped vendor
@@ -200,6 +280,19 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 //             didn't already pair it by name/alias, it's left unmapped (along
 //             with the destination group under consideration) rather than
 //             handed out blindly. See RunCatchAll().
+//             e.g. dest "PropX" (type "Tree 360") is still unmapped after
+//             all earlier phases; vendor "LeftoverA" (also "Tree 360") is
+//             also still unmapped → paired blindly by kind (model<->model)
+//             with no name check.
+//
+//   Phase 125: Sibling-reuse backfill - for each destination root that is
+//             still unmapped, not skipped, and not a group, looks for an
+//             already-mapped sibling root (same FuzzyBaseTokens + side
+//             signature) and reuses that sibling's vendor mapping verbatim.
+//             See RunSiblingReuseBackfill().
+//             e.g. dest "Md Star - 02" is unmapped; sibling "Md Star - 01"
+//             maps to vendor "Star 1" → "Md Star - 02" reuses "Star 1"
+//             (duplicate assignment).
 
 // Source-vs-destination matcher. Called per (destination_name, candidate)
 // pair. Extra slots are reused by the regex matcher for the regex pattern
