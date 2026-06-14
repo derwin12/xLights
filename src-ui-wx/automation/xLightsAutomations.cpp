@@ -1123,8 +1123,9 @@ bool xLightsFrame::ProcessAutomation(std::vector<std::string> &paths,
         }
         bool reportOnly = ReadBool(params["reportonly"]);
         bool detailedReport = ReadBool(params["detailedreport"]);
+        auto saveMapFile = params["savemapfile"];
         wxString quikMapSummary;
-        ImportXLights(wxFileName(filename), mapname, autoMap, importMedia, quikMap, &quikMapSummary, reportOnly, detailedReport);
+        ImportXLights(wxFileName(filename), mapname, autoMap, importMedia, quikMap, &quikMapSummary, reportOnly, detailedReport, saveMapFile);
 
         wxCommandEvent eventRowHeaderChanged(EVT_ROW_HEADINGS_CHANGED);
         wxPostEvent(this, eventRowHeaderChanged);

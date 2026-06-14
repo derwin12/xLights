@@ -1899,14 +1899,16 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
         if (group->GetMapping().empty()) continue;
 
         // Only trust group<->group pairings that came from a name-based
-        // match (Exact/Alias/Community/Fuzzy/GroupContent etc). A
-        // catch-all-style group<->group pairing (Phase 105/120, e.g. a huge
-        // "01 Everything" group matched purely on type) carries no real
-        // correspondence between the two groups' members, so using it here
-        // would let an unrelated destination model (e.g. "3D Cube-2") steal
-        // a vendor source intended for a member of a *different*,
-        // meaningfully-matched group (e.g. "Group - Snowflakes").
+        // match (Exact/Alias/Community/Fuzzy/GroupContent etc). Show-wide
+        // aggregation groups matched by EverythingGroup (Phase 16),
+        // SpecialKeyword (Phase 17), or Catchall (Phase 105/120) carry no
+        // real per-member correspondence between the two groups' members —
+        // using them here would let an unrelated destination model (e.g.
+        // "3D Cube-2") steal a vendor source intended for a member of a
+        // *different*, meaningfully-matched group (e.g. "Group - Snowflakes").
         if (group->GetMappingRule().find("Catchall") != std::string::npos) continue;
+        if (group->GetMappingRule().find("EverythingGroup") != std::string::npos) continue;
+        if (group->GetMappingRule().find("SpecialKeywordGroup") != std::string::npos) continue;
 
         Model* layoutModel = renderContext.GetModel(group->GetCoreModel());
         auto* grp = dynamic_cast<ModelGroup*>(layoutModel);
@@ -2006,9 +2008,14 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
     for (auto* group : roots) {
         if (group == nullptr || !group->IsGroup()) continue;
         if (group->GetMapping().empty()) continue;
-        // Same restriction as RunGroupMemberDimensionMatch - only trust
-        // name-based group<->group pairings as a member-reuse pool.
+        // Same restriction as RunGroupMemberDimensionMatch — only trust
+        // name-based group<->group pairings as a member-reuse pool. Show-wide
+        // aggregation groups matched by EverythingGroup (Phase 16) or
+        // SpecialKeyword (Phase 17) have no real per-member correspondence
+        // and must not be used as backfill anchors.
         if (group->GetMappingRule().find("Catchall") != std::string::npos) continue;
+        if (group->GetMappingRule().find("EverythingGroup") != std::string::npos) continue;
+        if (group->GetMappingRule().find("SpecialKeywordGroup") != std::string::npos) continue;
 
         Model* layoutModel = renderContext.GetModel(group->GetCoreModel());
         auto* grp = dynamic_cast<ModelGroup*>(layoutModel);

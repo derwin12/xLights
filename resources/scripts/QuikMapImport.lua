@@ -7,10 +7,10 @@
 --      sized to match the source's duration/frame rate.
 --   2. Runs QuikMap to import the source's effects into it (mapmethod =
 --      'quikmap', media not copied).
---   3. Saves the result as "<name>_QuikMap.xsq" in QuikMapResults\ next to
---      the source, so you can open it later and visually compare the
---      mapping against the original.
---   4. Appends the QuikMap phase summary + detailed per-node mapping report
+--   3. Saves the QuikMap channel mapping as "<name>.xmap" in QuikMapResults\
+--      so it can be reloaded directly for future imports of the same vendor.
+--   4. Saves the result sequence as "<name>_QuikMap.xsq" in QuikMapResults\.
+--   5. Appends the QuikMap phase summary + detailed per-node mapping report
 --      (target -> mapped source [rule]) to a single log file.
 --
 -- NOTE: this closes whatever sequence you currently have open (without
@@ -71,11 +71,15 @@ for _, seq in pairs(listResult['sequences']) do
             goto continue
         end
 
+        local outName = path:match('([^\\/]+)%.[^.]+$') or ('sequence_' .. tostring(count))
+        local mapPath = outputFolder .. '\\' .. outName .. '.xmap'
+
         local result = RunCommand('importXLightsSequence', {
             filename    = path,
             importmedia = 'false',
             mapmethod   = 'quikmap',
-            detailedreport = 'true'
+            detailedreport = 'true',
+            savemapfile = mapPath
         })
 
         if result == nil or result['worked'] ~= 'true' then
@@ -84,8 +88,8 @@ for _, seq in pairs(listResult['sequences']) do
         end
 
         log:write((result['quikMapSummary'] or '(no summary returned)') .. '\n\n')
+        log:write('Mapping saved: ' .. mapPath .. '\n\n')
 
-        local outName = path:match('([^\\/]+)%.[^.]+$') or ('sequence_' .. tostring(count))
         local outPath = outputFolder .. '\\' .. outName .. '_QuikMap.xsq'
         local saveResult = RunCommand('saveSequence', { seq = outPath })
         if saveResult == nil or saveResult['res'] ~= 200 then

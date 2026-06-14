@@ -573,6 +573,7 @@ class xLightsImportChannelMapDialog: public wxDialog
         void AutoMap();
         void DoQuikMap(bool select, bool headless = false, wxString* outSummary = nullptr, bool detailedReport = false);
         wxString GenerateQuikMapDetailReport() const;
+        void SaveXMapMapping(wxString const& filename);
 
         xLightsImportTreeModel *_dataModel;
 
@@ -754,7 +755,6 @@ protected:
         void LoadXMapMapping(wxString const& filename, bool hideWarnings);
         void LoadJSONMapping(wxString const& filename, bool hideWarnings);
         void loadMapHintsFile(wxString const& filename);
-        void SaveXMapMapping(wxString const& filename);
         void SaveJSONMapping(wxString const& filename);
         void generateMapHintsFile(wxString const& filename);
         void RefreshTimelineColumnImages();
