@@ -25,7 +25,7 @@ namespace AutoMapper {
 // Version tag for the QuikMap report summary (DoQuikMap's `summary` /
 // QuikMapReport.log). Bump this (v1.00 -> v1.01 -> ...) whenever the report
 // format/content changes, so old logs can be told apart from new ones.
-constexpr auto QUIKMAP_REPORT_VERSION = "v1.06";
+constexpr auto QUIKMAP_REPORT_VERSION = "v1.09";
 
 // QuikMap phases, in the order xLightsImportChannelMapDialog::DoQuikMap runs
 // them. Numbers are spaced by 5 so new phases can be inserted between
@@ -144,6 +144,35 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.06";
 //             after Phase 96 and before the unconditional Phase 100
 //             catch-all, so like-for-like model types are preferred over a
 //             blind pairing. See RunModelTypeCatchAll().
+//   Phase 98: Group-member dimension match - for each destination root that
+//             IsGroup(), is already mapped to a vendor ModelGroup, and whose
+//             corresponding layout ModelGroup has members, looks up that
+//             vendor ModelGroup's AvailableSource::groupMemberNames. For each
+//             still-unmapped, non-group destination root that is one of the
+//             destination group's members, picks the still-unmapped vendor
+//             model that is one of the vendor group's members and has the
+//             closest node count (and grid shape, for Custom models), and
+//             maps to it. This uses an already-established group<->group
+//             mapping (e.g. destination "Group - Snowflakes" -> vendor
+//             "Snowflakes") as a high-confidence pool of candidates for its
+//             individual members (e.g. "EFlake46"/"HFlake1"/"ChromaFlake...")
+//             that didn't fuzzy-match a vendor name directly (e.g. vendor
+//             "Snowflake 1".."Snowflake 6"), so those generic-numbered vendor
+//             models aren't left for the unconstrained Phase 100 catch-all to
+//             hand to an unrelated destination (e.g. "3D Cube-2"). Only
+//             considers destination groups whose mapping rule does not
+//             contain "Catchall" (Phase 97/100) - a blind type-based
+//             group<->group pairing carries no real member correspondence.
+//             Runs after Phase 97 and before Phase 99. See
+//             RunGroupMemberDimensionMatch().
+//   Phase 99: Group-member dimension backfill - same group<->group pairings
+//             as Phase 98, but for any destination group member still
+//             unmapped after Phase 98 (e.g. there are more destination group
+//             members than vendor group members), reuses the closest-by-
+//             node-count vendor group member even if Phase 98 (or an earlier
+//             root in this phase) already claimed it - same vendor source may
+//             end up assigned to multiple destinations. Runs after Phase 98
+//             and before Phase 100. See RunGroupMemberDimensionBackfill().
 //   Phase 100: Final catch-all - pairs any still-unmapped vendor model/group
 //             with any still-unmapped user model/group of the same kind,
 //             regardless of name. See RunCatchAll().
@@ -476,6 +505,43 @@ void RunModelTypeCatchAll(const std::vector<ImportMappingNode*>& roots,
                           bool selectOnly,
                           const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                           const std::string& ruleLabel = "");
+
+// Group-member dimension match pass (QuikMap Phase 98), run after
+// RunModelTypeCatchAll and before RunCatchAll. For each destination root that
+// IsGroup(), is already mapped to a vendor ModelGroup, and whose
+// corresponding layout ModelGroup (renderContext.GetModel) has at least one
+// member, builds the destination group's member-name set
+// (ModelGroup::ModelNames) and looks up the mapped vendor ModelGroup's
+// AvailableSource::groupMemberNames for its member-name set. For each
+// still-unmapped, non-group, non-skipped destination root whose
+// GetCoreModel() is one of the destination group's members, scores every
+// still-unmapped, non-group vendor model that is one of the vendor group's
+// members by node-count (and, for Custom models, grid-shape) closeness, and
+// maps to the closest one. As with the other catch-all-style phases, any
+// newly-mapped root's still-unmapped Strand/Node children are then filled
+// from not-yet-used `<mappedVendorModel>/...` sources of the corresponding
+// depth.
+void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
+                                   const std::vector<AvailableSource>& available,
+                                   RenderContext& renderContext,
+                                   bool selectOnly,
+                                   const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                                   const std::string& ruleLabel = "");
+
+// Group-member dimension backfill pass (QuikMap Phase 99), run immediately
+// after RunGroupMemberDimensionMatch and before RunCatchAll. Uses the same
+// name-based-mapped destination-group <-> vendor-ModelGroup pairings as
+// RunGroupMemberDimensionMatch, but for any destination group member that is
+// still unmapped (e.g. the destination group has more members than the
+// vendor group), reuses the closest-by-node-count vendor group member - even
+// one already claimed by Phase 98 or an earlier root in this phase - so the
+// same vendor source may end up assigned to multiple destinations.
+void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& roots,
+                                      const std::vector<AvailableSource>& available,
+                                      RenderContext& renderContext,
+                                      bool selectOnly,
+                                      const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                                      const std::string& ruleLabel = "");
 
 // Skip pass (QuikMap Phase 0), run before any other phase. Marks each
 // destination root that is a DMX model, or a ModelGroup that (recursively)

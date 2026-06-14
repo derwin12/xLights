@@ -730,6 +730,8 @@ protected:
         void DoSiblingReuseBackfill(bool select, const std::string& ruleLabel = "");
         void DoCustomDimensionMatch(bool select, const std::string& ruleLabel = "");
         void DoModelTypeCatchAll(bool select, const std::string& ruleLabel = "");
+        void DoGroupMemberDimensionMatch(bool select, const std::string& ruleLabel = "");
+        void DoGroupMemberDimensionBackfill(bool select, const std::string& ruleLabel = "");
         void DoSingingProp(bool select, const std::string& ruleLabel = "");
         void DoSingingPropBackfill(bool select, const std::string& ruleLabel = "");
         void DoFloodlight(bool select, const std::string& ruleLabel = "");

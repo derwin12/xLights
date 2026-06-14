@@ -3722,6 +3722,36 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
+    // Phase 98: group-member dimension match. For a destination group already
+    // mapped to a vendor ModelGroup (e.g. "Group - Snowflakes" -> "Snowflakes"),
+    // maps the destination group's still-unmapped individual members (e.g.
+    // "EFlake46", "HFlake1") to the closest-by-node-count still-unmapped
+    // member of the vendor group (e.g. "Snowflake 1".."Snowflake 6"), so they
+    // aren't left for the unconstrained Phase 100 catch-all.
+    before = after;
+    if (dlg) dlg->Update(90, "Phase 98: Looking for group-member dimension matches...");
+    DoGroupMemberDimensionMatch(select, "Phase 98: GroupMemberDimension");
+    after = CountUnmappedRoots();
+    int phase98 = before - after;
+    summary << wxString::Format("Phase 98: Group-member dimension matches found: %d\n", phase98);
+    if (dlg) dlg->Update(90, wxString::Format("Phase 98 complete - group-member dimension matches found: %d", phase98));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
+    // Phase 99: group-member dimension backfill. For any destination group
+    // member still unmapped after Phase 98 (more destination members than
+    // vendor group members), reuse the closest-by-node-count vendor group
+    // member even if Phase 98 already claimed it.
+    before = after;
+    if (dlg) dlg->Update(90, "Phase 99: Backfilling group-member dimension matches...");
+    DoGroupMemberDimensionBackfill(select, "Phase 99: GroupMemberDimensionBackfill");
+    after = CountUnmappedRoots();
+    int phase99 = before - after;
+    summary << wxString::Format("Phase 99: Group-member dimension backfill matches found: %d\n", phase99);
+    if (dlg) dlg->Update(90, wxString::Format("Phase 99 complete - group-member dimension backfill matches found: %d", phase99));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
     // Phase 100: last-resort catch-all. Maps anything still unmapped on the
     // vendor side to anything still unmapped on the user's layout, as long
     // as model maps to model, group maps to group, and type matches type
@@ -4154,6 +4184,100 @@ void xLightsImportChannelMapDialog::DoCustomDimensionMatch(bool select, const st
     }
 
     AutoMapper::RunCustomDimensionMatch(roots, available, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoGroupMemberDimensionMatch(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.modelClass = ic->modelClass;
+                src.isSingingProp = ic->isSingingProp;
+                src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
+                src.width = ic->width;
+                src.height = ic->height;
+                src.strandCount = ic->strandCount;
+                if (!ic->groupModels.empty()) {
+                    for (const auto& memberName : wxSplit(ic->groupModels, ',')) {
+                        src.groupMemberNames.push_back(memberName.ToStdString());
+                    }
+                }
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunGroupMemberDimensionMatch(roots, available, *xlights, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoGroupMemberDimensionBackfill(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.modelClass = ic->modelClass;
+                src.isSingingProp = ic->isSingingProp;
+                src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
+                src.width = ic->width;
+                src.height = ic->height;
+                src.strandCount = ic->strandCount;
+                if (!ic->groupModels.empty()) {
+                    for (const auto& memberName : wxSplit(ic->groupModels, ',')) {
+                        src.groupMemberNames.push_back(memberName.ToStdString());
+                    }
+                }
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunGroupMemberDimensionBackfill(roots, available, *xlights, select, selectedTargets, ruleLabel);
 }
 
 void xLightsImportChannelMapDialog::DoModelTypeCatchAll(bool select, const std::string& ruleLabel)

@@ -340,6 +340,24 @@ double FuzzyJaccard(const std::unordered_set<std::string>& a, const std::unorder
     return unionSize == 0 ? 0.0 : static_cast<double>(intersection) / static_cast<double>(unionSize);
 }
 
+// Shared by RunGroupMemberDimensionMatch/RunGroupMemberDimensionBackfill:
+// lower is better. If both sides have a known node count, scores on relative
+// node-count difference (plus a smaller weight for aspect-ratio difference);
+// otherwise falls back to a coarse same-type-or-not score.
+double GroupMemberDimensionScore(int targetNodes, int targetWidth, int targetHeight, double targetAspect,
+                                  const std::string& targetType, const AvailableSource& src) {
+    if (targetNodes > 0 && src.nodeCount > 0) {
+        double nodeDiff = std::abs(src.nodeCount - targetNodes) / static_cast<double>(std::max(src.nodeCount, targetNodes));
+        double aspectDiff = 0.0;
+        if (targetAspect > 0.0 && src.width > 0 && src.height > 0) {
+            double srcAspect = static_cast<double>(src.width) / static_cast<double>(src.height);
+            aspectDiff = std::abs(srcAspect - targetAspect) / std::max(srcAspect, targetAspect);
+        }
+        return nodeDiff + (0.25 * aspectDiff);
+    }
+    return (Lower(Trim(src.displayType)) == targetType) ? 0.0 : 1.0;
+}
+
 } // namespace
 
 namespace AutoMapper {
@@ -1580,6 +1598,204 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                     used.insert(Lower(Trim(src.displayName)));
                     break;
                 }
+            }
+        }
+    }
+}
+
+void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
+                                   const std::vector<AvailableSource>& available,
+                                   RenderContext& renderContext,
+                                   bool selectOnly,
+                                   const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                                   const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Seed "used" with anything already mapped (by name, lowered/trimmed) so
+    // this pass doesn't hand out a source a previous phase already used.
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    for (auto* group : roots) {
+        if (group == nullptr || !group->IsGroup()) continue;
+        if (group->GetMapping().empty()) continue;
+
+        // Only trust group<->group pairings that came from a name-based
+        // match (Exact/Alias/Community/Fuzzy/GroupContent etc). A
+        // catch-all-style group<->group pairing (Phase 97/100, e.g. a huge
+        // "01 Everything" group matched purely on type) carries no real
+        // correspondence between the two groups' members, so using it here
+        // would let an unrelated destination model (e.g. "3D Cube-2") steal
+        // a vendor source intended for a member of a *different*,
+        // meaningfully-matched group (e.g. "Group - Snowflakes").
+        if (group->GetMappingRule().find("Catchall") != std::string::npos) continue;
+
+        Model* layoutModel = renderContext.GetModel(group->GetCoreModel());
+        auto* grp = dynamic_cast<ModelGroup*>(layoutModel);
+        if (grp == nullptr) continue;
+
+        std::set<std::string> destMembers;
+        for (const auto& name : grp->ModelNames()) destMembers.insert(Lower(Trim(name)));
+        if (destMembers.empty()) continue;
+
+        // Find the vendor ModelGroup this destination group was mapped to,
+        // and its member-name list.
+        const std::string vendorGroupName = Lower(Trim(group->GetMapping()));
+        const AvailableSource* vendorGroup = nullptr;
+        for (const auto& src : available) {
+            if (src.modelType != "ModelGroup") continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (Lower(Trim(src.displayName)) == vendorGroupName) { vendorGroup = &src; break; }
+        }
+        if (vendorGroup == nullptr || vendorGroup->groupMemberNames.empty()) continue;
+
+        std::set<std::string> vendorMembers;
+        for (const auto& name : vendorGroup->groupMemberNames) vendorMembers.insert(Lower(Trim(name)));
+
+        for (auto* model : roots) {
+            if (model == nullptr || model->IsGroup() || model->IsSkipped()) continue;
+            if (!model->GetMapping().empty()) continue;
+            if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+            if (destMembers.count(Lower(Trim(model->GetCoreModel()))) == 0) continue;
+
+            const int targetNodes = model->GetNodeCount();
+            const int targetWidth = model->GetWidth();
+            const int targetHeight = model->GetHeight();
+            const double targetAspect = (targetWidth > 0 && targetHeight > 0)
+                ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
+                : 0.0;
+            const std::string targetType = Lower(Trim(model->GetModelType()));
+
+            const AvailableSource* best = nullptr;
+            double bestScore = 0.0;
+            for (const auto& src : available) {
+                if (selectMapAvail && !src.selected) continue;
+                if (src.canonicalName.find('/') != std::string::npos) continue;
+                if (src.modelType == "ModelGroup") continue;
+                if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                if (vendorMembers.count(Lower(Trim(src.displayName))) == 0) continue;
+
+                double score = GroupMemberDimensionScore(targetNodes, targetWidth, targetHeight, targetAspect, targetType, src);
+
+                if (best == nullptr || score < bestScore) {
+                    best = &src;
+                    bestScore = score;
+                }
+            }
+
+            if (best != nullptr) {
+                model->Map(best->displayName, best->modelType);
+                model->SetMappingRule(ruleLabel);
+                used.insert(Lower(Trim(best->displayName)));
+            }
+        }
+    }
+
+    FillMappedModelChildren(roots, available, selectMapAvail, used, ruleLabel);
+}
+
+void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& roots,
+                                      const std::vector<AvailableSource>& available,
+                                      RenderContext& renderContext,
+                                      bool selectOnly,
+                                      const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                                      const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    for (auto* group : roots) {
+        if (group == nullptr || !group->IsGroup()) continue;
+        if (group->GetMapping().empty()) continue;
+        // Same restriction as RunGroupMemberDimensionMatch - only trust
+        // name-based group<->group pairings as a member-reuse pool.
+        if (group->GetMappingRule().find("Catchall") != std::string::npos) continue;
+
+        Model* layoutModel = renderContext.GetModel(group->GetCoreModel());
+        auto* grp = dynamic_cast<ModelGroup*>(layoutModel);
+        if (grp == nullptr) continue;
+
+        std::set<std::string> destMembers;
+        for (const auto& name : grp->ModelNames()) destMembers.insert(Lower(Trim(name)));
+        if (destMembers.empty()) continue;
+
+        const std::string vendorGroupName = Lower(Trim(group->GetMapping()));
+        const AvailableSource* vendorGroup = nullptr;
+        for (const auto& src : available) {
+            if (src.modelType != "ModelGroup") continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (Lower(Trim(src.displayName)) == vendorGroupName) { vendorGroup = &src; break; }
+        }
+        if (vendorGroup == nullptr || vendorGroup->groupMemberNames.empty()) continue;
+
+        std::set<std::string> vendorMembers;
+        for (const auto& name : vendorGroup->groupMemberNames) vendorMembers.insert(Lower(Trim(name)));
+
+        // Reusable pool - sources already claimed by Phase 98 (or an earlier
+        // root in this loop) remain candidates here, since by this point
+        // there may be more destination group members than vendor ones.
+        std::vector<const AvailableSource*> pool;
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (src.modelType == "ModelGroup") continue;
+            if (vendorMembers.count(Lower(Trim(src.displayName))) == 0) continue;
+            pool.push_back(&src);
+        }
+        if (pool.empty()) continue;
+
+        for (auto* model : roots) {
+            if (model == nullptr || model->IsGroup() || model->IsSkipped()) continue;
+            if (!model->GetMapping().empty()) continue;
+            if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+            if (destMembers.count(Lower(Trim(model->GetCoreModel()))) == 0) continue;
+
+            const int targetNodes = model->GetNodeCount();
+            const int targetWidth = model->GetWidth();
+            const int targetHeight = model->GetHeight();
+            const double targetAspect = (targetWidth > 0 && targetHeight > 0)
+                ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
+                : 0.0;
+            const std::string targetType = Lower(Trim(model->GetModelType()));
+
+            const AvailableSource* best = nullptr;
+            double bestScore = 0.0;
+            for (const auto* src : pool) {
+                double score = GroupMemberDimensionScore(targetNodes, targetWidth, targetHeight, targetAspect, targetType, *src);
+                if (best == nullptr || score < bestScore) {
+                    best = src;
+                    bestScore = score;
+                }
+            }
+
+            if (best != nullptr) {
+                model->Map(best->displayName, best->modelType);
+                model->SetMappingRule(ruleLabel);
             }
         }
     }
