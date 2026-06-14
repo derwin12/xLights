@@ -1457,6 +1457,183 @@ void RunCustomSubmodelOverlapMatch(const std::vector<ImportMappingNode*>& roots,
     FillMappedModelChildren(roots, available, selectMapAvail, used, ruleLabel);
 }
 
+// Shared by RunSpecialKeywordGroupMatch (Phase 17) and RunCatchAll
+// (Phase 120) - true if `name` contains (case-insensitive) one of the
+// special-sequencer-meaning group keywords ("last", "override", "bottom").
+bool IsSpecialKeywordGroupName(const std::string& name) {
+    static const std::vector<std::string> keywords = { "last", "override", "bottom" };
+    const std::string lowered = Lower(Trim(name));
+    for (const auto& kw : keywords) {
+        if (lowered.find(kw) != std::string::npos) return true;
+    }
+    return false;
+}
+
+void RunSpecialKeywordGroupMatch(const std::vector<ImportMappingNode*>& roots,
+                                  const std::vector<AvailableSource>& available,
+                                  bool selectOnly,
+                                  const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                                  const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    auto containsKeyword = IsSpecialKeywordGroupName;
+
+    for (auto* model : roots) {
+        if (model == nullptr || !model->IsGroup() || model->IsSkipped()) continue;
+        if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+        if (!model->GetMapping().empty()) continue;
+        bool matches = containsKeyword(model->GetModelName());
+        if (!matches) {
+            for (const auto& alias : model->GetAliases()) {
+                if (containsKeyword(alias)) { matches = true; break; }
+            }
+        }
+        if (!matches) continue;
+
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (src.modelType != "ModelGroup") continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+            if (!containsKeyword(src.displayName)) continue;
+
+            model->Map(src.displayName, src.modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(src.displayName)));
+            break;
+        }
+    }
+
+    FillMappedModelChildren(roots, available, selectMapAvail, used, ruleLabel);
+}
+
+// Returns true if `name`, once normalized into whitespace-separated tokens,
+// contains a whole-word "everything" or "all" token (so "Waterfall"/"Hallway"
+// don't match, but "Group - All Props" and "Everything" do).
+bool ContainsEverythingOrAllToken(const std::string& name) {
+    const std::string normalized = FuzzyNormalize(name);
+    std::string cur;
+    auto isMatch = [&]() { return cur == "everything" || cur == "all"; };
+    for (char c : normalized) {
+        if (c == ' ') {
+            if (isMatch()) return true;
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    return isMatch();
+}
+
+void RunEverythingGroupMatch(const std::vector<ImportMappingNode*>& roots,
+                              const std::vector<AvailableSource>& available,
+                              RenderContext& renderContext,
+                              bool selectOnly,
+                              const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                              const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    auto matchesEverything = [](const ImportMappingNode* model) {
+        if (ContainsEverythingOrAllToken(model->GetModelName())) return true;
+        for (const auto& alias : model->GetAliases()) {
+            if (ContainsEverythingOrAllToken(alias)) return true;
+        }
+        return false;
+    };
+
+    // Find the still-unmapped destination group with an "everything"/"all"
+    // name or alias and the highest member count.
+    ImportMappingNode* bestDest = nullptr;
+    size_t bestDestCount = 0;
+    for (auto* model : roots) {
+        if (model == nullptr || !model->IsGroup() || model->IsSkipped()) continue;
+        if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+        if (!model->GetMapping().empty()) continue;
+        if (!matchesEverything(model)) continue;
+
+        size_t count = 0;
+        if (auto* grp = dynamic_cast<ModelGroup*>(renderContext.GetModel(model->GetCoreModel()))) {
+            count = grp->ModelNames().size();
+        }
+        if (bestDest == nullptr || count > bestDestCount) {
+            bestDest = model;
+            bestDestCount = count;
+        }
+    }
+    if (bestDest == nullptr) return;
+
+    // Find the still-unmapped vendor ModelGroup with an "everything"/"all"
+    // name and the highest member count.
+    const AvailableSource* bestSrc = nullptr;
+    size_t bestSrcCount = 0;
+    for (const auto& src : available) {
+        if (selectMapAvail && !src.selected) continue;
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (src.modelType != "ModelGroup") continue;
+        if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+        if (!ContainsEverythingOrAllToken(src.displayName)) continue;
+
+        const size_t count = src.groupMemberNames.size();
+        if (bestSrc == nullptr || count > bestSrcCount) {
+            bestSrc = &src;
+            bestSrcCount = count;
+        }
+    }
+    if (bestSrc == nullptr) return;
+
+    bestDest->Map(bestSrc->displayName, bestSrc->modelType);
+    bestDest->SetMappingRule(ruleLabel);
+    used.insert(Lower(Trim(bestSrc->displayName)));
+
+    FillMappedModelChildren(roots, available, selectMapAvail, used, ruleLabel);
+}
+
 void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                               const std::vector<AvailableSource>& available,
                               bool selectOnly,
@@ -1961,6 +2138,14 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
             if (used.count(Lower(Trim(src.displayName))) != 0) continue;
             bool srcIsGroup = (src.modelType == "ModelGroup");
             if (srcIsGroup != model->IsGroup()) continue;
+
+            // Vendor ModelGroups carrying "Last"/"Override"/"Bottom" special
+            // sequencer-meaning names (see RunSpecialKeywordGroupMatch /
+            // Phase 17) are reserved for a name-based match. If they weren't
+            // claimed by an earlier phase, leave them - and the destination
+            // group under consideration - unmapped rather than pairing them
+            // blindly here.
+            if (srcIsGroup && IsSpecialKeywordGroupName(src.displayName)) continue;
 
             model->Map(src.displayName, src.modelType);
             model->SetMappingRule(ruleLabel);

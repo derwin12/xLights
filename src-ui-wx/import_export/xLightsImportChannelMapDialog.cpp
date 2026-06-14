@@ -3571,6 +3571,32 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         TreeListCtrl_Mapping->Refresh();
     }
 
+    // Phase 16: "everything"/"all" group matches - the destination/vendor
+    // ModelGroup with that name (or alias, on the destination side) and the
+    // highest member count, on each side, are paired together.
+    before = after;
+    if (dlg) dlg->Update(50, "Phase 16: Looking for an 'everything' group match...");
+    DoEverythingGroupMatch(select, "Phase 16: EverythingGroup");
+    after = CountUnmappedRoots();
+    int phase16 = before - after;
+    summary << wxString::Format("Phase 16: Everything group matches found: %d\n", phase16);
+    if (dlg) dlg->Update(50, wxString::Format("Phase 16 complete - everything group matches found: %d", phase16));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
+    // Phase 17: special-keyword group matches (e.g. "Last"/"Override"/
+    // "Bottom" groups), matched against vendor groups with the same kind of
+    // keyword in their name.
+    before = after;
+    if (dlg) dlg->Update(51, "Phase 17: Looking for special-keyword group matches...");
+    DoSpecialKeywordGroupMatch(select, "Phase 17: SpecialKeywordGroup");
+    after = CountUnmappedRoots();
+    int phase17 = before - after;
+    summary << wxString::Format("Phase 17: Special-keyword group matches found: %d\n", phase17);
+    if (dlg) dlg->Update(51, wxString::Format("Phase 17 complete - special-keyword group matches found: %d", phase17));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
     // Phase 20: submodel/strand fallback matches by name or alias.
     int beforeDesc = CountUnmappedDescendants();
     if (dlg) dlg->Update(52, "Phase 20: Looking for submodel matches...");
@@ -4085,6 +4111,79 @@ void xLightsImportChannelMapDialog::DoCustomSubmodelOverlapMatch(bool select, co
     }
 
     AutoMapper::RunCustomSubmodelOverlapMatch(roots, available, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoEverythingGroupMatch(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                if (!ic->groupModels.empty()) {
+                    for (const auto& memberName : wxSplit(ic->groupModels, ',')) {
+                        src.groupMemberNames.push_back(memberName.ToStdString());
+                    }
+                }
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunEverythingGroupMatch(roots, available, *xlights, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoSpecialKeywordGroupMatch(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunSpecialKeywordGroupMatch(roots, available, select, selectedTargets, ruleLabel);
 }
 
 void xLightsImportChannelMapDialog::DoCatchAllFallback(bool select, const std::string& ruleLabel)

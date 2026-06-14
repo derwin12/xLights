@@ -25,7 +25,7 @@ namespace AutoMapper {
 // Version tag for the QuikMap report summary (DoQuikMap's `summary` /
 // QuikMapReport.log). Bump this (v1.00 -> v1.01 -> ...) whenever the report
 // format/content changes, so old logs can be told apart from new ones.
-constexpr auto QUIKMAP_REPORT_VERSION = "v1.09";
+constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 
 // QuikMap phases, in the order xLightsImportChannelMapDialog::DoQuikMap runs
 // them. Numbers are spaced by 5 so new phases can be inserted between
@@ -37,7 +37,7 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.09";
 //             skipped so no later phase maps them. See RunSkipDMX().
 //   Phase  5: Exact name matches (case-insensitive) between vendor models/
 //             groups and the user's models/groups. See MatchNorm, Run().
-//   Phase 10: Matches between vendor models/groups and aliases defined on
+//   Phase 10: Matches between vendor mduodels/groups and aliases defined on
 //             the user's models/groups (also tolerant of punctuation
 //             differences). See MatchAggressive, Run().
 //   Phase 12: Custom-model exact-dimension matches - pairs an unmapped
@@ -55,6 +55,24 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.09";
 //             (crowdsourced vendor-name -> user-name pairs from
 //             mapper.xlights.info). Skipped if no cache is present. See
 //             CommunityAliasPack::Matches, Run().
+//   Phase 16: "Everything"/"all" group matches - for an unmapped destination
+//             ModelGroup root whose name or aliases contain an "everything"
+//             or "all" token, matches it against an unmapped vendor
+//             ModelGroup whose name also contains one of those tokens. These
+//             groups are typically catch-all groups containing every prop, so
+//             when either side has more than one such candidate, the
+//             candidate with the highest member count is preferred. See
+//             RunEverythingGroupMatch().
+//   Phase 17: Special-keyword group matches - for an unmapped destination
+//             ModelGroup root whose name or aliases contain one of a small
+//             set of special keywords ("last", "override", "bottom"), matches
+//             it against an unmapped vendor ModelGroup whose name also
+//             contains one of those keywords (not necessarily the same one).
+//             These keywords mark groups with special sequencer meaning (e.g. a
+//             "Last" or "Override" group that takes priority over normal
+//             groups, or a "Bottom" group at the base of a stack) where a
+//             name-based match is more reliable than the generic fuzzy/
+//             catch-all passes. See RunSpecialKeywordGroupMatch().
 //   Phase 20: Submodel/strand fallback matches by name or alias, matching
 //             submodels of unmapped models only against non-group available
 //             sources (group roots and group sources are skipped). See
@@ -175,7 +193,13 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.09";
 //             and before Phase 120. See RunGroupMemberDimensionBackfill().
 //   Phase 120: Final catch-all - pairs any still-unmapped vendor model/group
 //             with any still-unmapped user model/group of the same kind,
-//             regardless of name. See RunCatchAll().
+//             regardless of name. Exception: a still-unmapped vendor
+//             ModelGroup whose name contains a special-sequencer-meaning
+//             keyword ("last", "override", "bottom" - see Phase 17/
+//             IsSpecialKeywordGroupName) is never used here - if Phase 17
+//             didn't already pair it by name/alias, it's left unmapped (along
+//             with the destination group under consideration) rather than
+//             handed out blindly. See RunCatchAll().
 
 // Source-vs-destination matcher. Called per (destination_name, candidate)
 // pair. Extra slots are reused by the regex matcher for the regex pattern
@@ -297,6 +321,48 @@ void RunCustomSubmodelOverlapMatch(const std::vector<ImportMappingNode*>& roots,
                                     bool selectOnly,
                                     const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                                     const std::string& ruleLabel = "");
+
+// Special-keyword group match pass (QuikMap Phase 17), run after the
+// "everything"/"all" group match pass (Phase 16) and before the submodel
+// fallback pass (Phase 20). For each destination root that IsGroup(), is not
+// skipped, is still unmapped, and whose GetModelName() or any GetAliases()
+// entry contains (case-insensitive) one of a small set of special keywords
+// ("last", "override", "bottom"), finds the first still-unmapped vendor
+// ModelGroup source whose name also
+// contains one of those keywords - not necessarily the same one - and maps
+// to it. These keywords identify groups with special sequencer semantics
+// (e.g. a catch-all "Last"/"Override" group, or a "Bottom" layer group)
+// that a plain name/alias/fuzzy match is unlikely to pair correctly. As with
+// the other catch-all-style phases, any newly-mapped root's still-unmapped
+// Strand/Node children are then filled from not-yet-used
+// `<mappedVendorModel>/...` sources of the corresponding depth.
+void RunSpecialKeywordGroupMatch(const std::vector<ImportMappingNode*>& roots,
+                                  const std::vector<AvailableSource>& available,
+                                  bool selectOnly,
+                                  const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                                  const std::string& ruleLabel = "");
+
+// "Everything"/"all" group match pass (QuikMap Phase 16), run after the
+// community alias pack pass (Phase 15) and before the special-keyword group
+// pass (Phase 17). For each destination root that IsGroup(), is not skipped,
+// is still unmapped, and whose GetModelName() or any GetAliases() entry
+// contains an "everything" or "all" token (whole-word, e.g. "Group - All
+// Props" or "Everything" but not "Waterfall"), and for each still-unmapped
+// vendor ModelGroup source whose displayName contains one of those tokens,
+// maps the destination candidate to the vendor candidate. If more than one
+// candidate is found on either side, the one with the highest model/member
+// count is used (destination counts come from the corresponding layout
+// ModelGroup::ModelNames via renderContext; vendor counts come from
+// AvailableSource::groupMemberNames). As with the other catch-all-style
+// phases, any newly-mapped root's still-unmapped Strand/Node children are
+// then filled from not-yet-used `<mappedVendorModel>/...` sources of the
+// corresponding depth.
+void RunEverythingGroupMatch(const std::vector<ImportMappingNode*>& roots,
+                              const std::vector<AvailableSource>& available,
+                              RenderContext& renderContext,
+                              bool selectOnly,
+                              const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                              const std::string& ruleLabel = "");
 
 // Called once after all Run() passes complete. For destination models
 // (group roots are skipped - groups have no submodels) that didn't get a
@@ -437,7 +503,13 @@ void RunGroupCoverageSkip(const std::vector<ImportMappingNode*>& roots,
 // for each destination root still unmapped, claims the next not-yet-used
 // available source of the matching kind (ModelGroup destinations only draw
 // from ModelGroup sources, everything else only draws from non-ModelGroup
-// sources). For a root that ends up mapped (here or in an earlier phase),
+// sources). Exception: for ModelGroup destinations, a candidate vendor
+// ModelGroup whose name matches IsSpecialKeywordGroupName (the "last"/
+// "override"/"bottom" keywords used by Phase 17) is skipped - if it wasn't
+// claimed by Phase 17's name/alias-based match, it's left unmapped rather
+// than handed to an unrelated destination group here, and so is the
+// destination group under consideration. For a root that ends up mapped
+// (here or in an earlier phase),
 // any still-unmapped Strand/Node children are then matched against
 // not-yet-used `<mappedVendorModel>/...` sources of the corresponding depth
 // (2-part paths -> Strand children, 3-part paths -> Node children), so
