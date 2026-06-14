@@ -263,12 +263,27 @@ std::unordered_set<std::string> FuzzyModelFamilies(const std::string& name) {
     auto tokens = FuzzyTokens(name);
     std::unordered_set<std::string> families;
     for (const auto& [family, keywords] : FUZZY_FAMILY_KEYWORDS) {
+        bool found = false;
         for (const auto& tok : tokens) {
             if (keywords.count(tok)) {
-                families.insert(family);
+                found = true;
                 break;
             }
+            // Compound-name fallback: a token like "eflake46", "chromaflake"
+            // or "hspinner1" doesn't exactly equal a family keyword, but
+            // contains one as a substring (e.g. "flake", "spinner",
+            // "snowflake"). Only do this for keywords of 5+ chars to avoid
+            // false positives from short keywords (e.g. "cane" inside
+            // "hurricane").
+            for (const auto& kw : keywords) {
+                if (kw.size() >= 5 && tok.size() > kw.size() && tok.find(kw) != std::string::npos) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) break;
         }
+        if (found) families.insert(family);
     }
     return families;
 }
@@ -1470,6 +1485,7 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
         const std::string targetType = Lower(Trim(model->GetModelType()));
         if (targetType != "custom") continue;
 
+        const std::string targetName = model->GetCoreModel();
         const int targetNodes = model->GetNodeCount();
         if (targetNodes <= 0) continue;
         const int targetWidth = model->GetWidth();
@@ -1489,6 +1505,12 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
             if (srcIsGroup != model->IsGroup()) continue;
             if (Lower(Trim(src.displayType)) != "custom") continue;
             if (src.nodeCount <= 0) continue;
+            // Family guardrail: e.g. don't let a "Snowflake"-family vendor
+            // model (recognized via FuzzyModelFamilies, including compound
+            // names like "EFlake46"/"ChromaFlake...") match a destination
+            // Custom model that is recognizably a different family (and
+            // vice versa), even if their node counts happen to be close.
+            if (!FuzzyFamiliesCompatible(targetName, src.displayName)) continue;
 
             // Relative difference in node count - the dominant factor since
             // it best reflects overall prop "size".

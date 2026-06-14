@@ -25,7 +25,7 @@ namespace AutoMapper {
 // Version tag for the QuikMap report summary (DoQuikMap's `summary` /
 // QuikMapReport.log). Bump this (v1.00 -> v1.01 -> ...) whenever the report
 // format/content changes, so old logs can be told apart from new ones.
-constexpr auto QUIKMAP_REPORT_VERSION = "v1.05";
+constexpr auto QUIKMAP_REPORT_VERSION = "v1.06";
 
 // QuikMap phases, in the order xLightsImportChannelMapDialog::DoQuikMap runs
 // them. Numbers are spaced by 5 so new phases can be inserted between
@@ -124,10 +124,17 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.05";
 //             vendor Custom model/group (model<->model, group<->group) whose
 //             node count (and CustomWidth/CustomHeight grid shape) is the
 //             closest match, rather than the first-available pairing Phase 97
-//             would otherwise make. Runs after Phase 95 and before Phase 97
-//             so two same-shaped custom props (e.g. two similarly-sized
-//             snowflakes) are preferred over an arbitrary custom/custom
-//             pairing. See RunCustomDimensionMatch().
+//             would otherwise make. Candidates are also gated by
+//             FuzzyFamiliesCompatible (using FuzzyModelFamilies, which
+//             recognizes compound names like "EFlake46"/"ChromaFlake..."/
+//             "HFlake1"/"HSpinner1" via substring keywords) so e.g. a vendor
+//             "Snowflake 1".."Snowflake N" is only matched against
+//             recognizably flake/star/spinner-family destination Custom
+//             models, picking the closest by node count among those. Runs
+//             after Phase 95 and before Phase 97 so two same-shaped custom
+//             props (e.g. two similarly-sized snowflakes) are preferred over
+//             an arbitrary custom/custom pairing. See
+//             RunCustomDimensionMatch().
 //   Phase 97: Model-type catch-all - for each destination root still
 //             unmapped and not skipped, pairs it with a still-unmapped
 //             vendor model/group of the same kind (model<->model,
