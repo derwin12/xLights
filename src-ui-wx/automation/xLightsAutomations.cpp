@@ -1112,19 +1112,31 @@ bool xLightsFrame::ProcessAutomation(std::vector<std::string> &paths,
         auto mapmethod = params["mapmethod"];
         if (mapmethod.empty()) mapmethod = "file";
         bool autoMap = (mapmethod == "auto") || (mapmethod == "both");
+        bool quikMap = (mapmethod == "quikmap");
         auto importMediaParam = params["importmedia"];
         bool importMedia = importMediaParam.empty() ? true : ReadBool(importMediaParam);
         auto mapname = params["mapfile"];
-        if (mapmethod != "auto") {
+        if (mapmethod != "auto" && mapmethod != "quikmap") {
             if (mapname == "" || mapname == "null" || !wxFile::Exists(mapname)) {
                 return sendResponse("Mapping File not valid.", "msg", 503, false);
             }
         }
-        ImportXLights(wxFileName(filename), mapname, autoMap, importMedia);
+        bool reportOnly = ReadBool(params["reportonly"]);
+        bool detailedReport = ReadBool(params["detailedreport"]);
+        wxString quikMapSummary;
+        ImportXLights(wxFileName(filename), mapname, autoMap, importMedia, quikMap, &quikMapSummary, reportOnly, detailedReport);
 
         wxCommandEvent eventRowHeaderChanged(EVT_ROW_HEADINGS_CHANGED);
         wxPostEvent(this, eventRowHeaderChanged);
         mainSequencer->PanelEffectGrid->Refresh();
+
+        if (quikMap) {
+            nlohmann::json resp;
+            resp["msg"] = "Imported XLights Sequence.";
+            resp["worked"] = "true";
+            resp["quikMapSummary"] = ToStdString(quikMapSummary);
+            return sendResponse(resp.dump(), "", 200, true);
+        }
 
         std::string response = "{\"msg\":\"Imported XLights Sequence.\",\"worked\":\"true\"}";
         return sendResponse(response, "", 200, true);

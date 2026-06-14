@@ -158,7 +158,7 @@ void xLightsFrame::OnMenuItemImportEffects(wxCommandEvent& event)
     }
 }
 
-void xLightsFrame::ImportXLights(const wxFileName& filename, std::string const& mapFile, bool autoMap, bool importMedia)
+void xLightsFrame::ImportXLights(const wxFileName& filename, std::string const& mapFile, bool autoMap, bool importMedia, bool quikMap, wxString* quikMapSummary, bool reportOnly, bool detailedReport)
 {
     SequencePackage xsqPkg(std::filesystem::path(ToStdString(filename.GetFullPath())),
                            GetShowDirectory(), ToStdString(GetSeqXmlFileName()), &AllModels);
@@ -197,9 +197,11 @@ void xLightsFrame::ImportXLights(const wxFileName& filename, std::string const& 
         Element* el = se.GetElement(e);
         elements.push_back(el);
     }
-    ImportXLights(se, elements, xsqPkg, supportsModelBlending, true, false, false, mapFile, xlf.GetSequenceDurationMS(), autoMap, importMedia);
+    ImportXLights(se, elements, xsqPkg, supportsModelBlending, true, false, false, mapFile, xlf.GetSequenceDurationMS(), autoMap, importMedia, quikMap, quikMapSummary, reportOnly, detailedReport);
 
-    SetStatusText(wxString::Format("'%s' imported.", filename.GetPath()));
+    if (!reportOnly) {
+        SetStatusText(wxString::Format("'%s' imported.", filename.GetPath()));
+    }
 }
 
 ModelElement* AddModel(Model* m, SequenceElements& se)
@@ -246,7 +248,7 @@ static std::vector<std::pair<int,int>> BuildMergedIntervals(Element* el)
 }
 
 void xLightsFrame::ImportXLights(SequenceElements& se, const std::vector<Element*>& elements, SequencePackage& xsqPkg,
-                                 bool modelBlending, bool showModelBlending, bool allowAllModels, bool clearSrc, std::string const& mapFile, int sequenceDurationMS, bool autoMap, bool importMedia)
+                                 bool modelBlending, bool showModelBlending, bool allowAllModels, bool clearSrc, std::string const& mapFile, int sequenceDurationMS, bool autoMap, bool importMedia, bool quikMap, wxString* quikMapSummary, bool reportOnly, bool detailedReport)
 {
     std::map<std::string, EffectLayer*> layerMap;
     std::map<std::string, Element*> elementMap;
@@ -348,7 +350,12 @@ void xLightsFrame::ImportXLights(SequenceElements& se, const std::vector<Element
     if (!mapFile.empty()) {
         dlg.LoadMappingFile(mapFile, true);
     }
-    if (autoMap) {
+    if (quikMap) {
+        dlg.DoQuikMap(false, true, quikMapSummary, detailedReport);
+        if (reportOnly) {
+            return;
+        }
+    } else if (autoMap) {
         dlg.AutoMap();
     } else if (mapFile.empty()) {
         if (!ok || dlg.ShowModal() != wxID_OK) {

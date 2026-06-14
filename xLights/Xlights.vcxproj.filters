@@ -31,6 +31,7 @@
     <ClCompile Include="..\src-core\media\FFmpegAudioDecoder.cpp" />
     <ClCompile Include="..\src-core\media\SDLAudioOutput.cpp" />
     <ClCompile Include="..\src-core\import_export\AutoMapper.cpp" />
+    <ClCompile Include="..\src-core\import_export\CommunityAliasPack.cpp" />
     <ClCompile Include="..\src-core\import_export\EffectMapper.cpp" />
     <ClCompile Include="..\src-core\import_export\MapHintsIO.cpp" />
     <ClCompile Include="..\src-core\import_export\SuperStarImporter.cpp" />
@@ -150,6 +151,7 @@
     <ClCompile Include="..\src-ui-wx\shared\utils\xlGridCanvas.cpp" />
     <ClCompile Include="..\src-ui-wx\xLightsApp.cpp" />
     <ClCompile Include="..\src-ui-wx\import_export\xLightsImportChannelMapDialog.cpp" />
+    <ClCompile Include="..\src-ui-wx\import_export\xLightsImportChannelMapDialogAI.cpp" />
     <ClCompile Include="..\src-ui-wx\xLightsMain.cpp" />
     <ClCompile Include="..\src-ui-wx\CommandPaletteDialog.cpp" />
     <ClCompile Include="..\src-ui-wx\sequencer\LRCLIBSearchDialog.cpp" />
@@ -1427,6 +1429,7 @@
     <ClInclude Include="..\src-core\media\xLightsVamp.h" />
     <ClInclude Include="..\src-core\effects\BufferStyles.h" />
     <ClInclude Include="..\src-core\import_export\AutoMapper.h" />
+    <ClInclude Include="..\src-core\import_export\CommunityAliasPack.h" />
     <ClInclude Include="..\src-core\import_export\BasicImportMappingNode.h" />
     <ClInclude Include="..\src-core\import_export\EffectMapper.h" />
     <ClInclude Include="..\src-core\import_export\ImportMappingNode.h" />
@@ -1547,6 +1550,7 @@
     <ClInclude Include="..\src-ui-wx\shared\utils\xlGridCanvas.h" />
     <ClInclude Include="..\src-ui-wx\xLightsApp.h" />
     <ClInclude Include="..\src-ui-wx\import_export\xLightsImportChannelMapDialog.h" />
+    <ClInclude Include="..\src-ui-wx\import_export\xLightsImportChannelMapDialogAI.h" />
     <ClInclude Include="..\src-ui-wx\xLightsMain.h" />
     <ClInclude Include="..\src-ui-wx\CommandPaletteDialog.h" />
     <ClInclude Include="..\src-ui-wx\CommandPaletteHelper.h" />

@@ -39,6 +39,8 @@
 #include <list>
 #include <memory>
 #include <optional>
+#include "import_export/AutoMapper.h"
+#include "import_export/CommunityAliasPack.h"
 #include "import_export/ImportMappingNode.h"
 #include "render/SequencePackage.h"
 
@@ -168,6 +170,8 @@ public:
         _mapping = "";
         _color = *wxWHITE;
         _mappingModelType = "";
+        _mappingRule = "";
+        _skipped = false;
         size_t count = m_children.GetCount();
         for (size_t i = 0; i < count; ++i) {
             GetNthChild(i)->ClearMapping();
@@ -175,6 +179,19 @@ public:
     }
 
     bool IsGroup() const override { return _group; }
+    bool IsSkipped() const override { return _skipped; }
+    void SetSkipped(bool skipped) override { _skipped = skipped; }
+
+    std::string GetModelClass() const override { return _modelClass; }
+
+    bool IsSingingProp() const override { return _isSingingProp; }
+    void SetSingingProp(bool b) { _isSingingProp = b; }
+
+    bool IsFloodlight() const override { return _isFloodlight; }
+    void SetFloodlight(bool b) { _isFloodlight = b; }
+
+    bool IsFloodGroup() const override { return _isFloodGroup; }
+    void SetFloodGroup(bool b) { _isFloodGroup = b; }
 
     std::list<std::string> GetAliases() const override {
         return _aliases;
@@ -189,7 +206,11 @@ public:
         _mapping = mapTo;
         _mappingExists = true;
         _mappingModelType = mappingModelType;
+        _mappingRule = "Manual";
     }
+
+    void SetMappingRule(const std::string& rule) override { _mappingRule = rule; }
+    std::string GetMappingRule() const override { return _mappingRule; }
 
     // ImportMappingNode interface — string-field accessors used by AutoMapper.
     const std::string& GetCoreModel() const override { return _model; }
@@ -277,6 +298,7 @@ public:     // public to avoid getters/setters
     std::string                 _mapping;
     wxColor                     _color;
     bool                        _group = false;
+    bool                        _skipped = false;
     bool                        _mappingExists = false;
     std::list<std::string> _aliases;
     std::string _modelType;
@@ -289,6 +311,10 @@ public:     // public to avoid getters/setters
     int _height = 0;
     int _effectCount = 0;
     std::string _mappingModelType;
+    std::string _mappingRule;
+    bool _isSingingProp = false;
+    bool _isFloodlight = false;
+    bool _isFloodGroup = false;
     bool _isStackDuplicate = false;
 
     // TODO/FIXME:
@@ -375,7 +401,7 @@ public:
     void Delete(const wxDataViewItem &item);
     virtual unsigned int GetColumnCount() const wxOVERRIDE
     {
-        return 2;
+        return 6;
     }
     virtual bool HasContainerColumns(const wxDataViewItem &item) const wxOVERRIDE
     {
@@ -434,6 +460,17 @@ struct ImportChannel
     bool isUsed = false;
     std::string groupModels;
     std::string modelClass;
+    // True if this model has at least one faceInfo entry with Type="NodeRange"
+    // and at least one non-empty Mouth-*/Eye-*/etc node-range mapping - i.e.
+    // it's a real singing prop, not just a Custom model that happens to have
+    // an empty/unused face definition.
+    bool isSingingProp = false;
+    // True if this is a non-group, single-line model with one node per
+    // string (a "floodlight"). See ImportMappingNode::IsFloodlight.
+    bool isFloodlight = false;
+    // True if this is a ModelGroup whose members are all floodlights. See
+    // ImportMappingNode::IsFloodGroup.
+    bool isFloodGroup = false;
     int nodeCount = 0;
     int strandCount = 0;
     int width = 0;
@@ -494,16 +531,9 @@ class xLightsImportChannelMapDialog: public wxDialog
     std::list<std::unique_ptr<StashedMapping>> _stashedMappings;
     StashedMapping* GetStashedMapping(wxString const& modelName, wxString const& strandName, wxString const& nodeName);
     bool AnyStashedMappingExists(wxString const& modelName, wxString const& strandName);
-    bool AIModelMap(wxProgressDialog* dlg, const std::list<ImportChannel*>& sourceModels, const std::list<xLightsImportModelNode*>& targetModels);
-    bool AISubModelMap(wxProgressDialog* dlg, const std::list<ImportChannel*>& sourceModels, const std::list<xLightsImportModelNode*>& targetModels);
-    bool AIStrandMap(wxProgressDialog* dlg, const std::list<ImportChannel*>& sourceModels, const std::list<xLightsImportModelNode*>& targetModels);
-    bool AINodeMap(wxProgressDialog* dlg, const std::list<ImportChannel*>& sourceModels, const std::list<xLightsImportModelNode*>& targetModels);
-    std::string GetAIPrompt(const std::string& promptType);
-    std::string BuildSourceModelPrompt(const std::list<ImportChannel*>& sourceModels, std::function<bool(const ImportChannel*)> filter);
-    std::string BuildTargetModelPrompt(const std::list<xLightsImportModelNode*>& targetModels, std::function<bool(const xLightsImportModelNode*)> filter);
-    std::string BuildAlreadyMappedPrompt(const std::list<xLightsImportModelNode*>& targetModels, std::function<bool(const xLightsImportModelNode*)> filter);
-    bool RunAIPrompt(wxProgressDialog* dlg, const std::string& prompt, const std::list<ImportChannel*>& sourceModels, const std::list<xLightsImportModelNode*>& targetModels);
-    bool DoStructuredAIMapping(const std::list<ImportChannel*>& sourceModels, const std::list<xLightsImportModelNode*>& targetModels);
+    // AI-driven mapping helpers - declared in their own header so the
+    // implementations can live in xLightsImportChannelMapDialogAI.cpp.
+    #include "import_export/xLightsImportChannelMapDialogAI.h"
 
     bool _dirty;
     wxFileName _filename;
@@ -536,6 +566,8 @@ class xLightsImportChannelMapDialog: public wxDialog
         void SetSequenceDuration(int durationMS) { _sequenceDurationMS = durationMS; }
         void LoadMappingFile(wxString const& filepath, bool hideWarnings = false);
         void AutoMap();
+        void DoQuikMap(bool select, bool headless = false, wxString* outSummary = nullptr, bool detailedReport = false);
+        wxString GenerateQuikMapDetailReport() const;
 
         xLightsImportTreeModel *_dataModel;
 
@@ -684,9 +716,16 @@ protected:
             std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>& aliases)> lambda_model,
             std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>& aliases)> lambda_strand,
             std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>& aliases)> lambda_node,
-            const std::string& extra1, const std::string& extra2, const std::string& mg, const bool& select);
-        void DoSubModelFallback(bool select);
-        void DoAIAutoMap(bool select);
+            const std::string& extra1, const std::string& extra2, const std::string& mg, const bool& select, const std::string& ruleLabel = "");
+        void DoSubModelFallback(bool select, const std::string& ruleLabel = "");
+        void DoCatchAllFallback(bool select, const std::string& ruleLabel = "");
+        void DoSingingProp(bool select, const std::string& ruleLabel = "");
+        void DoSingingPropBackfill(bool select, const std::string& ruleLabel = "");
+        void DoFloodlight(bool select, const std::string& ruleLabel = "");
+        void DoFloodlightBackfill(bool select, const std::string& ruleLabel = "");
+        void DoBestGuess(bool select, const std::string& ruleLabel = "");
+        int CountUnmappedRoots() const;
+        int CountUnmappedDescendants() const;
 
 
         void UpdateStashWarning();
@@ -730,6 +769,12 @@ protected:
                 return (::Lower(::Trim(s)) == c);
             };
 
+        // Last-resort fuzzy matcher used by QuikMap Phase 25 - see AutoMapper::MatchFuzzy.
+        std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>&)> fuzzy =
+            [](const std::string& s, const std::string& c, const std::string& extra1, const std::string& extra2, const std::list<std::string>& aliases) {
+                return AutoMapper::MatchFuzzy(s, c, extra1, extra2, aliases);
+            };
+
         std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>&)> regex =
             [](const std::string& s, const std::string& c, const std::string& pattern, const std::string& replacement, const std::list<std::string>& aliases) {
                 static wxRegEx r;
@@ -750,6 +795,19 @@ protected:
                 }
                 return false;
             };
+
+        // QuikMap Phase 15: community-sourced (vendor name -> user name)
+        // alias pairs, loaded from a local cache of mapper.xlights.info's
+        // /xlights/pairs. Empty if no cache file is present.
+        CommunityAliasPack _communityAliasPack;
+
+        // Matches QuikMap Phase 15 - see CommunityAliasPack::Matches.
+        std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>&)> communityAlias =
+            [this](const std::string& s, const std::string& c, const std::string& extra1, const std::string& extra2, const std::list<std::string>& aliases) {
+                return _communityAliasPack.Matches(s, c);
+            };
+
+        bool _quikMapMode{ false };
 
         SequencePackage* _xsqPkg {nullptr};
         int _sequenceDurationMS {0};

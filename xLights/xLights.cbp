@@ -213,6 +213,8 @@
 		<Unit filename="../src-core/effects/BufferStyles.h" />
 		<Unit filename="../src-core/import_export/AutoMapper.cpp" />
 		<Unit filename="../src-core/import_export/AutoMapper.h" />
+		<Unit filename="../src-core/import_export/CommunityAliasPack.cpp" />
+		<Unit filename="../src-core/import_export/CommunityAliasPack.h" />
 		<Unit filename="../src-core/import_export/BasicImportMappingNode.h" />
 		<Unit filename="../src-core/import_export/EffectMapper.cpp" />
 		<Unit filename="../src-core/import_export/EffectMapper.h" />
@@ -1595,6 +1597,8 @@
 		<Unit filename="../src-ui-wx/xLightsApp.h" />
 		<Unit filename="../src-ui-wx/import_export/xLightsImportChannelMapDialog.cpp" />
 		<Unit filename="../src-ui-wx/import_export/xLightsImportChannelMapDialog.h" />
+		<Unit filename="../src-ui-wx/import_export/xLightsImportChannelMapDialogAI.cpp" />
+		<Unit filename="../src-ui-wx/import_export/xLightsImportChannelMapDialogAI.h" />
 		<Unit filename="../src-ui-wx/xLightsMain.cpp" />
 		<Unit filename="../src-ui-wx/xLightsMain.h" />
 		<Unit filename="../src-ui-wx/shared/utils/ExternalHooksUI.h" />

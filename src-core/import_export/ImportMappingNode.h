@@ -39,6 +39,36 @@ public:
 
     virtual bool IsGroup() const = 0;
 
+    // Simplified model "class" (e.g. "SingingFace", "SpiralTree") as
+    // computed by Model::DetermineClass. Empty if not applicable/unknown.
+    // Default empty so hosts that don't compute this aren't forced to
+    // implement it.
+    virtual std::string GetModelClass() const { return std::string(); }
+
+    // True if this is a real singing prop: a Custom model with at least one
+    // faceInfo entry of Type="NodeRange" that has actual Mouth-*/Eye-*/etc
+    // node ranges defined (not just an empty/unused face). Default false so
+    // hosts that don't compute this aren't forced to implement it.
+    virtual bool IsSingingProp() const { return false; }
+
+    // True if this is a "floodlight" model: a non-group, single-line model
+    // with one node per string. Default false so hosts that don't compute
+    // this aren't forced to implement it.
+    virtual bool IsFloodlight() const { return false; }
+
+    // True if this is a ModelGroup whose members are all floodlight models
+    // (IsFloodlight). Default false so hosts that don't compute this aren't
+    // forced to implement it.
+    virtual bool IsFloodGroup() const { return false; }
+
+    // True if QuikMap has determined this destination root (and its
+    // subtree) should be skipped entirely - e.g. a DMX model or a group
+    // containing DMX props (QuikMap Phase 0, see AutoMapper::RunSkipDMX).
+    // Default false/no-op so hosts that don't need this aren't forced to
+    // implement it.
+    virtual bool IsSkipped() const { return false; }
+    virtual void SetSkipped(bool skipped) {}
+
     // Composite "model[/strand[/node]]" name. Already exists on
     // xLightsImportModelNode.
     virtual std::string GetModelName() const = 0;
@@ -47,6 +77,14 @@ public:
     // (e.g. "Strand", "Node", "SubModel", "Unknown") that downstream UI may
     // surface in its column.
     virtual void Map(const std::string& mapTo, const std::string& mappingModelType) = 0;
+
+    // Short human-readable label for how this mapping was chosen (e.g.
+    // "Exact", "Alias", "Community", "Submodel", "Fuzzy", "Catchall",
+    // "Manual"). Surfaced in the desktop UI's "Mapping Rule" column.
+    // Default no-op/empty so hosts that don't need this (e.g. a future iPad
+    // implementation) aren't forced to implement it.
+    virtual void SetMappingRule(const std::string& rule) {}
+    virtual std::string GetMappingRule() const { return std::string(); }
 
     virtual unsigned int GetChildCount() const = 0;
     virtual ImportMappingNode* GetNthChild(unsigned int n) = 0;
@@ -64,6 +102,19 @@ struct AvailableSource {
     std::string displayName;
     std::string canonicalName;
     std::string modelType;
+    // Simplified model "class" (e.g. "SingingFace", "SpiralTree") for
+    // bare-model entries, as computed by Model::DetermineClass. Empty for
+    // strand/node entries or when unknown.
+    std::string modelClass;
+    // True if this bare-model entry is a real singing prop (see
+    // ImportMappingNode::IsSingingProp). False for strand/node entries.
+    bool isSingingProp{ false };
+    // True if this bare-model entry is a floodlight (see
+    // ImportMappingNode::IsFloodlight). False for strand/node entries.
+    bool isFloodlight{ false };
+    // True if this is a ModelGroup whose members are all floodlights (see
+    // ImportMappingNode::IsFloodGroup).
+    bool isFloodGroup{ false };
     bool selected{ false };
     // Lightweight per-source timeline summary surfaced in the import mapping UI
     // (the iPad analogue of the desktop per-row timeline column). `effectCount`

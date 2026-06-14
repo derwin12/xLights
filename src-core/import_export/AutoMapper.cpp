@@ -12,13 +12,17 @@
 
 #include "ImportMappingNode.h"
 #include "models/Model.h"
+#include "models/ModelGroup.h"
 #include "render/RenderContext.h"
 #include "utils/string_utils.h"
 
 #include <spdlog/spdlog.h>
 
+#include <cctype>
 #include <regex>
+#include <set>
 #include <string>
+#include <unordered_map>
 
 namespace {
 
@@ -56,6 +60,177 @@ std::vector<std::string> SplitSlash(const std::string& s) {
     }
     parts.push_back(cur);
     return parts;
+}
+
+// --- Fuzzy matcher helpers -------------------------------------------------
+// Mirrors the tokenization / signature / family-compatibility rules from the
+// xLightsMapper Python prototype's STRATEGIES.md, scoped down to a single
+// last-resort matcher (MatchFuzzy).
+
+const std::unordered_set<std::string> FUZZY_STOPWORDS = {
+    "group", "model", "lights", "light", "the", "and", "all"
+};
+
+// Token -> canonical family name. A name can belong to multiple families.
+const std::vector<std::pair<std::string, std::unordered_set<std::string>>> FUZZY_FAMILY_KEYWORDS = {
+    { "cane", { "cane", "candycane" } },
+    { "tree", { "tree", "mega", "flaketree" } },
+    { "star", { "star", "flake", "snowflake", "stickstar", "stick" } },
+    { "arch", { "arch", "arches" } },
+    { "outline", { "outline", "eaves", "garage", "roof", "vertical", "window", "frame" } },
+    { "matrix", { "matrix" } },
+    { "spinner", { "spinner" } },
+    { "bulb", { "bulb", "bigbulb", "c9" } },
+    { "flood", { "flood", "floodhouse" } },
+    { "wreath", { "wreath" } },
+    { "stake", { "stake", "pixstake", "mickeystake" } },
+};
+
+// Families that should never be considered a match for each other, even
+// when no family overlaps (used as the "incompatible pairs" guardrail).
+const std::set<std::pair<std::string, std::string>> FUZZY_INCOMPATIBLE_FAMILIES = {
+    { "bulb", "star" }, { "bulb", "flood" }, { "bulb", "tree" }, { "bulb", "arch" },
+    { "cane", "outline" }, { "cane", "flood" },
+    { "flood", "tree" }, { "flood", "star" },
+};
+
+// Lowercase, replace separators with spaces, strip anything that isn't
+// alphanumeric/space, then collapse whitespace.
+std::string FuzzyNormalize(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    bool lastWasSpace = false;
+    for (char c : in) {
+        char lc = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lc == ' ' || lc == '_' || lc == '-' || lc == '/') {
+            lc = ' ';
+        } else if (!((lc >= 'a' && lc <= 'z') || (lc >= '0' && lc <= '9'))) {
+            continue;
+        }
+        if (lc == ' ') {
+            if (lastWasSpace || out.empty()) continue;
+            lastWasSpace = true;
+        } else {
+            lastWasSpace = false;
+        }
+        out.push_back(lc);
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+// Singular/plural + domain-synonym normalization for a single token.
+std::string FuzzyCanonicalToken(const std::string& token) {
+    std::string t = token;
+    if (t.size() > 4) {
+        if (t.size() > 2 && t.substr(t.size() - 2) == "es" &&
+            (t == "canes" || t == "arches" || t == "trees" || t == "stars" || t == "flakes")) {
+            t.pop_back();
+        } else if (t.back() == 's') {
+            t.pop_back();
+        }
+    }
+    static const std::unordered_map<std::string, std::string> synonyms = {
+        { "candycane", "cane" }, { "c9", "bulb" }, { "bulbs", "bulb" }, { "floodlights", "flood" },
+    };
+    auto it = synonyms.find(t);
+    return it != synonyms.end() ? it->second : t;
+}
+
+// Tokenize a name: normalize, split on spaces, drop stopwords, canonicalize.
+std::unordered_set<std::string> FuzzyTokens(const std::string& name) {
+    std::unordered_set<std::string> out;
+    std::string normalized = FuzzyNormalize(name);
+    std::string cur;
+    auto flush = [&]() {
+        if (!cur.empty() && FUZZY_STOPWORDS.find(cur) == FUZZY_STOPWORDS.end()) {
+            out.insert(FuzzyCanonicalToken(cur));
+        }
+        cur.clear();
+    };
+    for (char c : normalized) {
+        if (c == ' ') flush();
+        else cur.push_back(c);
+    }
+    flush();
+    if (normalized.find("candy cane") != std::string::npos || normalized.find("candycane") != std::string::npos) {
+        out.insert("cane");
+    }
+    return out;
+}
+
+// Sequence of digit runs in the (un-normalized) name, e.g. "Arch-12" -> {"12"}.
+std::vector<std::string> FuzzyNumericSignature(const std::string& name) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : name) {
+        if (c >= '0' && c <= '9') {
+            cur.push_back(c);
+        } else if (!cur.empty()) {
+            out.push_back(cur);
+            cur.clear();
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+// Left/right/top/bottom side tags present in the normalized name, in a
+// fixed order so two equivalent names produce identical signatures.
+std::vector<std::string> FuzzySideSignature(const std::string& name) {
+    std::vector<std::string> out;
+    auto tokens = FuzzyTokens(name);
+    for (const auto& tag : { "left", "right", "upper", "lower", "top", "bottom", "l", "r" }) {
+        if (tokens.count(tag)) out.push_back(tag);
+    }
+    return out;
+}
+
+std::unordered_set<std::string> FuzzyModelFamilies(const std::string& name) {
+    auto tokens = FuzzyTokens(name);
+    std::unordered_set<std::string> families;
+    for (const auto& [family, keywords] : FUZZY_FAMILY_KEYWORDS) {
+        for (const auto& tok : tokens) {
+            if (keywords.count(tok)) {
+                families.insert(family);
+                break;
+            }
+        }
+    }
+    return families;
+}
+
+// If either side has no recognized family, or the families overlap, they're
+// considered compatible. Otherwise check the explicit incompatible-pairs
+// table; spinner/star are special-cased as co-existing naming conventions.
+bool FuzzyFamiliesCompatible(const std::string& a, const std::string& b) {
+    auto fa = FuzzyModelFamilies(a);
+    auto fb = FuzzyModelFamilies(b);
+    if (fa.empty() || fb.empty()) return true;
+    for (const auto& x : fa) {
+        if (fb.count(x)) return true;
+    }
+    for (const auto& x : fa) {
+        for (const auto& y : fb) {
+            if (FUZZY_INCOMPATIBLE_FAMILIES.count({ x, y }) || FUZZY_INCOMPATIBLE_FAMILIES.count({ y, x })) {
+                return false;
+            }
+        }
+    }
+    if ((fa.count("spinner") && fb.count("star")) || (fa.count("star") && fb.count("spinner"))) {
+        return true;
+    }
+    return false;
+}
+
+double FuzzyJaccard(const std::unordered_set<std::string>& a, const std::unordered_set<std::string>& b) {
+    if (a.empty() && b.empty()) return 0.0;
+    size_t intersection = 0;
+    for (const auto& tok : a) {
+        if (b.count(tok)) intersection++;
+    }
+    size_t unionSize = a.size() + b.size() - intersection;
+    return unionSize == 0 ? 0.0 : static_cast<double>(intersection) / static_cast<double>(unionSize);
 }
 
 } // namespace
@@ -119,6 +294,34 @@ bool MatchRegex(const std::string& target, const std::string& candidate,
     return std::regex_match(target, r);
 }
 
+bool MatchFuzzy(const std::string& target, const std::string& candidate,
+                const std::string&, const std::string&,
+                const std::list<std::string>&) {
+    if (!FuzzyFamiliesCompatible(target, candidate)) {
+        return false;
+    }
+
+    auto targetNum = FuzzyNumericSignature(target);
+    auto candNum = FuzzyNumericSignature(candidate);
+    if (!targetNum.empty() && !candNum.empty() && targetNum != candNum) {
+        return false;
+    }
+
+    auto targetSide = FuzzySideSignature(target);
+    auto candSide = FuzzySideSignature(candidate);
+    if (!targetSide.empty() && !candSide.empty() && targetSide != candSide) {
+        return false;
+    }
+
+    auto targetTokens = FuzzyTokens(target);
+    auto candTokens = FuzzyTokens(candidate);
+    if (targetTokens.empty() || candTokens.empty()) {
+        return false;
+    }
+
+    return FuzzyJaccard(targetTokens, candTokens) >= 0.6;
+}
+
 void Run(const std::vector<ImportMappingNode*>& roots,
          const std::vector<AvailableSource>& available,
          RenderContext& renderContext,
@@ -126,7 +329,8 @@ void Run(const std::vector<ImportMappingNode*>& roots,
          const std::string& extra1, const std::string& extra2,
          const std::string& mg,
          bool selectOnly,
-         const std::unordered_set<const ImportMappingNode*>& selectedTargets) {
+         const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+         const std::string& ruleLabel) {
     bool selectMapAvail = false;
     bool selectMapTarget = false;
     if (selectOnly) {
@@ -141,6 +345,7 @@ void Run(const std::vector<ImportMappingNode*>& roots,
             spdlog::warn("AutoMapper::Run: null root encountered, skipping");
             continue;
         }
+        if (model->IsSkipped()) continue;
         bool isTargetSelected = selectedTargets.count(model) != 0;
         if (selectMapTarget && !isTargetSelected) {
             continue;
@@ -185,6 +390,7 @@ void Run(const std::vector<ImportMappingNode*>& roots,
                         if (parts.size() == 2) {
                             if (strand->GetMapping().empty()) {
                                 strand->Map(src.displayName, "Strand");
+                                strand->SetMappingRule(ruleLabel);
                             }
                         } else {
                             for (unsigned int m = 0; m < strand->GetChildCount(); ++m) {
@@ -194,6 +400,7 @@ void Run(const std::vector<ImportMappingNode*>& roots,
                                 if (lambda_node(node->GetCoreNode(), parts[2], extra1, extra2, aliases)) {
                                     if (parts.size() == 3) {
                                         node->Map(src.displayName, "Node");
+                                        node->SetMappingRule(ruleLabel);
                                     }
                                 }
                             }
@@ -205,6 +412,7 @@ void Run(const std::vector<ImportMappingNode*>& roots,
                 if (model->GetMapping().empty() &&
                     lambda_model(model->GetCoreModel(), availName, extra1, extra2, aliases)) {
                     model->Map(src.displayName, src.modelType);
+                    model->SetMappingRule(ruleLabel);
                 }
             }
         }
@@ -234,11 +442,13 @@ void Run(const std::vector<ImportMappingNode*>& roots,
 
                     if (lambda_strand(submodel->GetModelName(), availName, extra1, extra2, smAliases)) {
                         submodel->Map(src.displayName, "SubModel");
+                        submodel->SetMappingRule(ruleLabel);
                     } else {
                         for (const auto& modelAlias : mAliases) {
                             if (lambda_strand(modelAlias + "/" + submodel->GetCoreStrand(),
                                               availName, extra1, extra2, smAliases)) {
                                 submodel->Map(src.displayName, "SubModel");
+                                submodel->SetMappingRule(ruleLabel);
                                 break;
                             }
                         }
@@ -253,7 +463,8 @@ void RunSubModelFallback(const std::vector<ImportMappingNode*>& roots,
                          const std::vector<AvailableSource>& available,
                          RenderContext& renderContext,
                          bool selectOnly,
-                         const std::unordered_set<const ImportMappingNode*>& selectedTargets) {
+                         const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                         const std::string& ruleLabel) {
     bool selectMapAvail = false;
     bool selectMapTarget = false;
     if (selectOnly) {
@@ -265,12 +476,19 @@ void RunSubModelFallback(const std::vector<ImportMappingNode*>& roots,
 
     for (auto* model : roots) {
         if (model == nullptr) continue;
+        // Submodels only exist on regular models, and only non-slashed
+        // bare-model sources are matched below (groups never appear there
+        // since group entries are excluded by findModelType/modelType
+        // checks at the call site), so skip group roots entirely.
+        if (model->IsGroup()) continue;
+        if (model->IsSkipped()) continue;
         if (!model->GetMapping().empty()) continue;
         if (selectMapTarget && selectedTargets.count(model) == 0) continue;
 
         Model* layoutModel = renderContext.GetModel(model->GetCoreModel());
 
-        // Step 1: match unmapped submodels by name against non-slashed sources.
+        // Step 1: match unmapped submodels by name against non-slashed,
+        // non-group sources (submodels only come from models, not groups).
         for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
             auto* sm = model->GetNthChild(k);
             if (sm == nullptr || !sm->GetMapping().empty()) continue;
@@ -280,8 +498,14 @@ void RunSubModelFallback(const std::vector<ImportMappingNode*>& roots,
                 if (!sm->GetMapping().empty()) break;
                 const std::string& availName = src.canonicalName;
                 if (availName.find('/') != std::string::npos) continue;
+                if (src.modelType == "ModelGroup") continue;
+                // Singing props are reserved for Phase 30/32 - a vendor
+                // singing prop should never get claimed as a generic
+                // submodel match.
+                if (src.isSingingProp) continue;
                 if (smName == availName) {
                     sm->Map(src.displayName, "Unknown");
+                    sm->SetMappingRule(ruleLabel);
                 }
             }
         }
@@ -300,15 +524,616 @@ void RunSubModelFallback(const std::vector<ImportMappingNode*>& roots,
                 if (!sm->GetMapping().empty()) break;
                 const std::string& availName = src.canonicalName;
                 if (availName.find('/') != std::string::npos) continue;
+                if (src.modelType == "ModelGroup") continue;
+                // Singing props are reserved for Phase 30/32 - a vendor
+                // singing prop should never get claimed as a generic
+                // submodel match.
+                if (src.isSingingProp) continue;
                 const std::string strippedAvail = StripPunctuation(availName);
                 for (const auto& alias : smAliases) {
                     std::string aliasNorm = Lower(Trim(alias));
                     if (aliasNorm == availName || StripPunctuation(aliasNorm) == strippedAvail) {
                         sm->Map(src.displayName, "Unknown");
+                        sm->SetMappingRule(ruleLabel);
                         break;
                     }
                 }
             }
+        }
+    }
+}
+
+void RunSingingProp(const std::vector<ImportMappingNode*>& roots,
+                    const std::vector<AvailableSource>& available,
+                    bool selectOnly,
+                    const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                    const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Seed "used" with anything already mapped (by name, lowered/trimmed) so
+    // this pass doesn't hand out a source a previous phase already used.
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    // Top-level pass: model<->model only, matched purely on both sides being
+    // a real singing prop (a Custom model with at least one populated
+    // faceInfo NodeRange). Groups are not considered singing props.
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (selectMapAvail || selectMapTarget) {
+            bool isTargetSelected = selectedTargets.count(model) != 0;
+            if (selectMapTarget && !isTargetSelected) continue;
+        }
+        if (!model->GetMapping().empty()) continue;
+        if (model->IsSkipped()) continue;
+        if (model->IsGroup()) continue;
+        if (!model->IsSingingProp()) continue;
+
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+            if (src.modelType == "ModelGroup") continue;
+            if (!src.isSingingProp) continue;
+
+            model->Map(src.displayName, src.modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(src.displayName)));
+            break;
+        }
+    }
+
+    // Strand/Node pass: for any root that ended up mapped (here or earlier),
+    // fill its still-unmapped Strand/Node children from `<vendorModel>/...`
+    // sources of the same depth, ignoring names.
+    for (auto* model : roots) {
+        if (model == nullptr || model->GetMapping().empty()) continue;
+        const std::string vendorPrefix = Lower(Trim(model->GetMapping())) + "/";
+
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* strand = model->GetNthChild(k);
+            if (strand == nullptr) continue;
+
+            if (strand->GetMapping().empty()) {
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 2) continue;
+
+                    strand->Map(src.displayName, "Strand");
+                    strand->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+
+            for (unsigned int m = 0; m < strand->GetChildCount(); ++m) {
+                auto* node = strand->GetNthChild(m);
+                if (node == nullptr || !node->GetMapping().empty()) continue;
+
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 3) continue;
+
+                    node->Map(src.displayName, "Node");
+                    node->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void RunSingingPropBackfill(const std::vector<ImportMappingNode*>& roots,
+                            const std::vector<AvailableSource>& available,
+                            bool selectOnly,
+                            const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                            const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Vendor singing-prop sources, reused round-robin - unlike Phase 30,
+    // these are not removed from consideration once used, since by this
+    // point there are more singing-face destinations than vendor singing
+    // models to pair them with 1:1.
+    std::vector<const AvailableSource*> singingSources;
+    for (const auto& src : available) {
+        if (selectMapAvail && !src.selected) continue;
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (src.modelType == "ModelGroup") continue;
+        if (!src.isSingingProp) continue;
+        singingSources.push_back(&src);
+    }
+    if (singingSources.empty()) return;
+
+    size_t nextSource = 0;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (selectMapAvail || selectMapTarget) {
+            bool isTargetSelected = selectedTargets.count(model) != 0;
+            if (selectMapTarget && !isTargetSelected) continue;
+        }
+        if (!model->GetMapping().empty()) continue;
+        if (model->IsSkipped()) continue;
+        if (model->IsGroup()) continue;
+        if (!model->IsSingingProp()) continue;
+
+        const AvailableSource* src = singingSources[nextSource % singingSources.size()];
+        ++nextSource;
+
+        model->Map(src->displayName, src->modelType);
+        model->SetMappingRule(ruleLabel);
+
+        // Fill still-unmapped Strand/Node children from the reused vendor
+        // model's `<vendorModel>/...` sources of the same depth, ignoring
+        // names (and allowing reuse, same as the top-level mapping).
+        const std::string vendorPrefix = Lower(Trim(src->displayName)) + "/";
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* strand = model->GetNthChild(k);
+            if (strand == nullptr) continue;
+
+            if (strand->GetMapping().empty()) {
+                for (const auto& s : available) {
+                    if (selectMapAvail && !s.selected) continue;
+                    if (s.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(s.canonicalName).size() != 2) continue;
+
+                    strand->Map(s.displayName, "Strand");
+                    strand->SetMappingRule(ruleLabel);
+                    break;
+                }
+            }
+
+            for (unsigned int m = 0; m < strand->GetChildCount(); ++m) {
+                auto* node = strand->GetNthChild(m);
+                if (node == nullptr || !node->GetMapping().empty()) continue;
+
+                for (const auto& s : available) {
+                    if (selectMapAvail && !s.selected) continue;
+                    if (s.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(s.canonicalName).size() != 3) continue;
+
+                    node->Map(s.displayName, "Node");
+                    node->SetMappingRule(ruleLabel);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void RunFloodlight(const std::vector<ImportMappingNode*>& roots,
+                   const std::vector<AvailableSource>& available,
+                   bool selectOnly,
+                   const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                   const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    // Step 1: flood group <-> flood group.
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (selectMapAvail || selectMapTarget) {
+            bool isTargetSelected = selectedTargets.count(model) != 0;
+            if (selectMapTarget && !isTargetSelected) continue;
+        }
+        if (!model->GetMapping().empty()) continue;
+        if (model->IsSkipped()) continue;
+        if (!model->IsGroup()) continue;
+        if (!model->IsFloodGroup()) continue;
+
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+            if (src.modelType != "ModelGroup") continue;
+            if (!src.isFloodGroup) continue;
+
+            model->Map(src.displayName, src.modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(src.displayName)));
+            break;
+        }
+    }
+
+    // Step 2: individual floodlight <-> individual floodlight.
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (selectMapAvail || selectMapTarget) {
+            bool isTargetSelected = selectedTargets.count(model) != 0;
+            if (selectMapTarget && !isTargetSelected) continue;
+        }
+        if (!model->GetMapping().empty()) continue;
+        if (model->IsSkipped()) continue;
+        if (model->IsGroup()) continue;
+        if (!model->IsFloodlight()) continue;
+
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+            if (src.modelType == "ModelGroup") continue;
+            if (!src.isFloodlight) continue;
+
+            model->Map(src.displayName, src.modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(src.displayName)));
+            break;
+        }
+    }
+}
+
+void RunFloodlightBackfill(const std::vector<ImportMappingNode*>& roots,
+                           const std::vector<AvailableSource>& available,
+                           bool selectOnly,
+                           const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                           const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Vendor flood-group sources, reused round-robin.
+    std::vector<const AvailableSource*> floodGroupSources;
+    for (const auto& src : available) {
+        if (selectMapAvail && !src.selected) continue;
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (src.modelType != "ModelGroup") continue;
+        if (!src.isFloodGroup) continue;
+        floodGroupSources.push_back(&src);
+    }
+
+    // Vendor individual-floodlight sources, reused round-robin.
+    std::vector<const AvailableSource*> floodlightSources;
+    for (const auto& src : available) {
+        if (selectMapAvail && !src.selected) continue;
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (src.modelType == "ModelGroup") continue;
+        if (!src.isFloodlight) continue;
+        floodlightSources.push_back(&src);
+    }
+
+    // Step 1: flood-group backfill.
+    if (!floodGroupSources.empty()) {
+        size_t nextSource = 0;
+        for (auto* model : roots) {
+            if (model == nullptr) continue;
+            if (selectMapAvail || selectMapTarget) {
+                bool isTargetSelected = selectedTargets.count(model) != 0;
+                if (selectMapTarget && !isTargetSelected) continue;
+            }
+            if (!model->GetMapping().empty()) continue;
+            if (model->IsSkipped()) continue;
+            if (!model->IsGroup()) continue;
+            if (!model->IsFloodGroup()) continue;
+
+            const AvailableSource* src = floodGroupSources[nextSource % floodGroupSources.size()];
+            ++nextSource;
+
+            model->Map(src->displayName, src->modelType);
+            model->SetMappingRule(ruleLabel);
+        }
+    }
+
+    // Step 2: individual-floodlight backfill.
+    if (!floodlightSources.empty()) {
+        size_t nextSource = 0;
+        for (auto* model : roots) {
+            if (model == nullptr) continue;
+            if (selectMapAvail || selectMapTarget) {
+                bool isTargetSelected = selectedTargets.count(model) != 0;
+                if (selectMapTarget && !isTargetSelected) continue;
+            }
+            if (!model->GetMapping().empty()) continue;
+            if (model->IsSkipped()) continue;
+            if (model->IsGroup()) continue;
+            if (!model->IsFloodlight()) continue;
+
+            const AvailableSource* src = floodlightSources[nextSource % floodlightSources.size()];
+            ++nextSource;
+
+            model->Map(src->displayName, src->modelType);
+            model->SetMappingRule(ruleLabel);
+        }
+    }
+}
+
+void RunBestGuess(const std::vector<ImportMappingNode*>& roots,
+                  const std::vector<AvailableSource>& available,
+                  bool selectOnly,
+                  const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                  const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Seed "used" with anything already mapped (by name, lowered/trimmed) so
+    // this pass doesn't hand out a source a previous phase already used.
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    // Top-level pass: model<->model, group<->group, matched purely on a
+    // shared non-empty model class (e.g. both "SingingFace").
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (selectMapAvail || selectMapTarget) {
+            bool isTargetSelected = selectedTargets.count(model) != 0;
+            if (selectMapTarget && !isTargetSelected) continue;
+        }
+        if (!model->GetMapping().empty()) continue;
+        if (model->IsSkipped()) continue;
+
+        std::string targetClass = model->GetModelClass();
+        if (targetClass.empty() || targetClass == "SingingFace") continue;
+
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+            bool srcIsGroup = (src.modelType == "ModelGroup");
+            if (srcIsGroup != model->IsGroup()) continue;
+            if (src.modelClass != targetClass) continue;
+
+            model->Map(src.displayName, src.modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(src.displayName)));
+            break;
+        }
+    }
+
+    // Strand/Node pass: for any root that ended up mapped (here or earlier),
+    // fill its still-unmapped Strand/Node children from `<vendorModel>/...`
+    // sources of the same depth, ignoring names.
+    for (auto* model : roots) {
+        if (model == nullptr || model->GetMapping().empty()) continue;
+        const std::string vendorPrefix = Lower(Trim(model->GetMapping())) + "/";
+
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* strand = model->GetNthChild(k);
+            if (strand == nullptr) continue;
+
+            if (strand->GetMapping().empty()) {
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 2) continue;
+
+                    strand->Map(src.displayName, "Strand");
+                    strand->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+
+            for (unsigned int m = 0; m < strand->GetChildCount(); ++m) {
+                auto* node = strand->GetNthChild(m);
+                if (node == nullptr || !node->GetMapping().empty()) continue;
+
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 3) continue;
+
+                    node->Map(src.displayName, "Node");
+                    node->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
+                 const std::vector<AvailableSource>& available,
+                 bool selectOnly,
+                 const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                 const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Seed "used" with anything already mapped (by name, lowered/trimmed) so
+    // the catch-all doesn't hand out a source a previous phase already used.
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    // Top-level pass: model<->model, group<->group, ignoring names entirely.
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (selectMapAvail || selectMapTarget) {
+            bool isTargetSelected = selectedTargets.count(model) != 0;
+            if (selectMapTarget && !isTargetSelected) continue;
+        }
+        if (!model->GetMapping().empty()) continue;
+        if (model->IsSkipped()) continue;
+
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+            bool srcIsGroup = (src.modelType == "ModelGroup");
+            if (srcIsGroup != model->IsGroup()) continue;
+
+            model->Map(src.displayName, src.modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(src.displayName)));
+            break;
+        }
+    }
+
+    // Strand/Node pass: for any root that ended up mapped (here or earlier),
+    // fill its still-unmapped Strand/Node children from `<vendorModel>/...`
+    // sources of the same depth, ignoring names.
+    for (auto* model : roots) {
+        if (model == nullptr || model->GetMapping().empty()) continue;
+        const std::string vendorPrefix = Lower(Trim(model->GetMapping())) + "/";
+
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* strand = model->GetNthChild(k);
+            if (strand == nullptr) continue;
+
+            if (strand->GetMapping().empty()) {
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 2) continue;
+
+                    strand->Map(src.displayName, "Strand");
+                    strand->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+
+            for (unsigned int m = 0; m < strand->GetChildCount(); ++m) {
+                auto* node = strand->GetNthChild(m);
+                if (node == nullptr || !node->GetMapping().empty()) continue;
+
+                for (const auto& src : available) {
+                    if (selectMapAvail && !src.selected) continue;
+                    if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+                    if (src.canonicalName.rfind(vendorPrefix, 0) != 0) continue;
+                    if (SplitSlash(src.canonicalName).size() != 3) continue;
+
+                    node->Map(src.displayName, "Node");
+                    node->SetMappingRule(ruleLabel);
+                    used.insert(Lower(Trim(src.displayName)));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+namespace {
+
+// True if `m` is a DMX model, or a ModelGroup that (recursively) contains
+// at least one DMX model. `visited` guards against group cycles.
+bool ContainsDMXProp(Model* m, RenderContext& renderContext, std::set<std::string>& visited) {
+    if (m == nullptr) return false;
+    if (m->IsDMXModel()) return true;
+    if (m->GetDisplayAs() != DisplayAsType::ModelGroup) return false;
+    if (!visited.insert(m->GetName()).second) return false;
+
+    auto* grp = dynamic_cast<ModelGroup*>(m);
+    if (grp == nullptr) return false;
+    for (const auto& name : grp->ModelNames()) {
+        if (ContainsDMXProp(renderContext.GetModel(name), renderContext, visited)) return true;
+    }
+    return false;
+}
+
+} // anonymous namespace
+
+void RunSkipDMX(const std::vector<ImportMappingNode*>& roots,
+                RenderContext& renderContext,
+                const std::string& ruleLabel) {
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty() || model->IsSkipped()) continue;
+
+        Model* layoutModel = renderContext.GetModel(model->GetCoreModel());
+        if (layoutModel == nullptr) continue;
+
+        std::set<std::string> visited;
+        if (ContainsDMXProp(layoutModel, renderContext, visited)) {
+            model->SetSkipped(true);
+            model->SetMappingRule(ruleLabel);
         }
     }
 }

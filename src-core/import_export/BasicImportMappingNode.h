@@ -50,6 +50,8 @@ public:
     const std::string& GetMapping() const override { return _mapping; }
     std::list<std::string> GetAliases() const override { return _aliases; }
     bool IsGroup() const override { return _group; }
+    bool IsSkipped() const override { return _skipped; }
+    void SetSkipped(bool skipped) override { _skipped = skipped; }
     std::string GetModelName() const override {
         std::string name = _model;
         if (!_strand.empty()) name += "/" + _strand;
@@ -80,6 +82,7 @@ public:
         _mappingModelType.clear();
         _stackedMappings.clear();
         _stackedMappingModelTypes.clear();
+        _skipped = false;
         for (auto& c : _children) c->ClearMapping();
     }
 
@@ -109,6 +112,7 @@ public:
     std::string _node;
     std::string _mapping;
     bool _group{ false };
+    bool _skipped{ false };
     bool _mappingExists{ false };
     std::list<std::string> _aliases;
     std::string _modelType;
