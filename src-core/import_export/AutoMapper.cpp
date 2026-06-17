@@ -1315,6 +1315,10 @@ void RunLikeModelBackfill(const std::vector<ImportMappingNode*>& roots,
         for (auto* sibling : roots) {
             if (sibling == nullptr || sibling == model || sibling->IsGroup()) continue;
             if (sibling->GetMapping().empty()) continue;
+            // 3D models must not donate mappings to flat models and vice versa.
+            if (sibling->GetDepth() > 1 || model->GetDepth() > 1) {
+                if (sibling->GetDepth() != model->GetDepth()) continue;
+            }
 
             const std::string siblingName = sibling->GetCoreModel();
             if (FuzzyBaseTokens(siblingName) != targetBase) continue;
@@ -1377,6 +1381,9 @@ void RunLikeModelBackfill(const std::vector<ImportMappingNode*>& roots,
             if (Lower(Trim(sibling->GetModelType())) != "custom") continue;
             if (sibling->GetNodeCount() != targetNodes) continue;
             if (sibling->GetWidth() != targetWidth || sibling->GetHeight() != targetHeight) continue;
+            if (sibling->GetDepth() > 1 || model->GetDepth() > 1) {
+                if (sibling->GetDepth() != model->GetDepth()) continue;
+            }
 
             const std::string siblingName = sibling->GetCoreModel();
             if (FuzzyBaseTokens(siblingName) != targetBase) continue;
@@ -1428,6 +1435,7 @@ void RunCustomExactDimensionMatch(const std::vector<ImportMappingNode*>& roots,
         const int targetNodes = model->GetNodeCount();
         const int targetWidth = model->GetWidth();
         const int targetHeight = model->GetHeight();
+        const int targetDepth = model->GetDepth();
         if (targetNodes <= 0) continue;
 
         for (const auto& src : available) {
@@ -1437,6 +1445,9 @@ void RunCustomExactDimensionMatch(const std::vector<ImportMappingNode*>& roots,
             if (src.modelType == "ModelGroup") continue;
             if (Lower(Trim(src.displayType)) != "custom") continue;
             if (src.nodeCount != targetNodes || src.width != targetWidth || src.height != targetHeight) continue;
+            if (targetDepth > 1 || src.depth > 1) {
+                if (src.depth != targetDepth) continue;
+            }
 
             model->Map(src.displayName, src.modelType);
             model->SetMappingRule(ruleLabel);
@@ -1780,6 +1791,7 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
         if (targetNodes <= 0) continue;
         const int targetWidth = model->GetWidth();
         const int targetHeight = model->GetHeight();
+        const int targetDepth = model->GetDepth();
         const double targetAspect = (targetWidth > 0 && targetHeight > 0)
             ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
             : 0.0;
@@ -1795,6 +1807,10 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
             if (srcIsGroup != model->IsGroup()) continue;
             if (Lower(Trim(src.displayType)) != "custom") continue;
             if (src.nodeCount <= 0) continue;
+            // 3D models (depth > 1) must not match flat models — require depths to agree.
+            if (targetDepth > 1 || src.depth > 1) {
+                if (src.depth != targetDepth) continue;
+            }
             // Family guardrail: e.g. don't let a "Snowflake"-family vendor
             // model (recognized via FuzzyModelFamilies, including compound
             // names like "EFlake46"/"ChromaFlake...") match a destination
@@ -2273,6 +2289,12 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
             // blindly here.
             if (srcIsGroup && IsSpecialKeywordGroupName(src.displayName)) continue;
 
+            // 3D models (depth > 1) must not match flat models and vice versa.
+            // Applies to Custom 3D models (Depth="N" in XML), CubeModel types, etc.
+            if (model->GetDepth() > 1 || src.depth > 1) {
+                if (model->GetDepth() != src.depth) continue;
+            }
+
             model->Map(src.displayName, src.modelType);
             model->SetMappingRule(ruleLabel);
             used.insert(Lower(Trim(src.displayName)));
@@ -2348,6 +2370,9 @@ void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
             if (sibling == nullptr || sibling == model || sibling->IsGroup()) continue;
             if (sibling->GetMapping().empty()) continue;
             if (Lower(Trim(sibling->GetModelType())) != targetType) continue;
+            if (sibling->GetDepth() > 1 || model->GetDepth() > 1) {
+                if (sibling->GetDepth() != model->GetDepth()) continue;
+            }
 
             const std::string siblingName = sibling->GetCoreModel();
             if (FuzzyBaseTokens(siblingName) != targetBase) continue;
@@ -2392,6 +2417,23 @@ void RunSkipDMX(const std::vector<ImportMappingNode*>& roots,
 
         std::set<std::string> visited;
         if (ContainsDMXProp(layoutModel, renderContext, visited)) {
+            model->SetSkipped(true);
+            model->SetMappingRule(ruleLabel);
+        }
+    }
+}
+
+void RunSkipShadow(const std::vector<ImportMappingNode*>& roots,
+                   RenderContext& renderContext,
+                   const std::string& ruleLabel) {
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty() || model->IsSkipped()) continue;
+
+        Model* layoutModel = renderContext.GetModel(model->GetCoreModel());
+        if (layoutModel == nullptr) continue;
+
+        if (layoutModel->IsShadowModel()) {
             model->SetSkipped(true);
             model->SetMappingRule(ruleLabel);
         }

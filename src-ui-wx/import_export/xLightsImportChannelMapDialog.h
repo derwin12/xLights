@@ -204,6 +204,7 @@ public:
     int GetNodeCount() const override { return _nodeCount; }
     int GetWidth() const override { return _width; }
     int GetHeight() const override { return _height; }
+    int GetDepth() const override { return _depth; }
     int GetStrandCount() const override { return _strandCount; }
 
     void Map(const std::string& mapTo, const std::string& mappingModelType) override
@@ -314,6 +315,7 @@ public:     // public to avoid getters/setters
     int _strandCount = 0;
     int _width = 0;
     int _height = 0;
+    int _depth = 0;
     int _effectCount = 0;
     std::string _mappingModelType;
     std::string _mappingRule;
@@ -480,6 +482,7 @@ struct ImportChannel
     int strandCount = 0;
     int width = 0;
     int height = 0;
+    int depth = 0;   // third dimension for 3D models (Cube/Cylinder etc.); 0 for flat models
     std::vector<std::string> subModelNames;
     std::vector<std::string> aliases;
     std::vector<std::pair<int,int>> effectIntervals; // merged [startMS, endMS] active ranges

@@ -25,7 +25,7 @@ namespace AutoMapper {
 // Version tag for the QuikMap report summary (DoQuikMap's `summary` /
 // QuikMapReport.log). Bump this (v1.00 -> v1.01 -> ...) whenever the report
 // format/content changes, so old logs can be told apart from new ones.
-constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
+constexpr auto QUIKMAP_REPORT_VERSION = "v1.11";
 
 // QuikMap phases, in the order xLightsImportChannelMapDialog::DoQuikMap runs
 // them. Numbers are spaced by 5 so new phases can be inserted between
@@ -36,6 +36,13 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.10";
 //             groups that (recursively) contain at least one DMX model, as
 //             skipped so no later phase maps them. See RunSkipDMX().
 //             e.g. dest "DMX-Spot-1" (DMX model) → skipped; never mapped.
+//
+//   Phase  1: Shadow-model skip pass - marks destination roots that have a
+//             non-empty ShadowModelFor attribute as skipped. Shadow models are
+//             overlay/virtual models (e.g. MH-DIMMERS shadowing MH-Pan) that
+//             carry no independent effect data and should never be auto-mapped.
+//             See RunSkipShadow().
+//             e.g. dest "MH-DIMMERS" (ShadowModelFor="MH-Pan") → skipped.
 //
 //   Phase  5: Exact name matches (case-insensitive) between vendor models/
 //             groups and the user's models/groups. See MatchNorm, Run().
@@ -722,6 +729,14 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
 void RunSkipDMX(const std::vector<ImportMappingNode*>& roots,
                 RenderContext& renderContext,
                 const std::string& ruleLabel = "");
+
+// Shadow-model skip pass (QuikMap Phase 1), run immediately after RunSkipDMX.
+// Marks each destination root whose layout Model has a non-empty ShadowModelFor
+// attribute (i.e. IsShadowModel() == true) as skipped. Shadow models are
+// overlay/virtual models that carry no independent effect data.
+void RunSkipShadow(const std::vector<ImportMappingNode*>& roots,
+                   RenderContext& renderContext,
+                   const std::string& ruleLabel = "");
 
 // Parses [T:Xxx] / [T:Xxx_Yyy] type-hint tags out of a model's Description
 // field and returns the corresponding alias-like strings - a "[T:Matrix]"

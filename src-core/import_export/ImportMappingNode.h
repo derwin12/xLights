@@ -76,6 +76,7 @@ public:
     virtual int GetNodeCount() const { return 0; }
     virtual int GetWidth() const { return 0; }
     virtual int GetHeight() const { return 0; }
+    virtual int GetDepth() const { return 0; }
     virtual int GetStrandCount() const { return 0; }
 
     // True if QuikMap has determined this destination root (and its
@@ -151,6 +152,10 @@ struct AvailableSource {
     int nodeCount{ 0 };
     int width{ 0 };
     int height{ 0 };
+    // Third dimension for 3D models (e.g. Cube, Cylinder). depth > 1 means
+    // the model is volumetric and must not be matched against flat/2D models
+    // in any dimension-based or catch-all phase.
+    int depth{ 0 };
     int strandCount{ 0 };
     // For ModelGroup entries, the names of the group's member models (as
     // recorded on the source's ImportChannel::groupModels). Empty for

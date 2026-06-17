@@ -38,6 +38,7 @@
 #include "models/Model.h"
 #include "models/ModelGroup.h"
 #include "models/CandyCaneModel.h"
+#include "models/CubeModel.h"
 #include "models/CustomModel.h"
 #include "models/PolyLineModel.h"
 #include "models/TreeModel.h"
@@ -1745,6 +1746,8 @@ void xLightsImportChannelMapDialog::AddModel(Model *m, int &ms) {
     m->GetBufferSize("Default", "2D", "None", bufW, bufH, 0);
     lastmodel->_width = bufW;
     lastmodel->_height = bufH;
+    if (auto* cm = dynamic_cast<CustomModel*>(m)) lastmodel->_depth = cm->GetCustomDepth();
+    else if (auto* cube = dynamic_cast<CubeModel*>(m)) lastmodel->_depth = cube->GetCubeDepth();
     _dataModel->BulkInsert(lastmodel, ms++);
 
      for (int s = 0; s < m->GetNumSubModels(); ++s) {
@@ -3534,6 +3537,27 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         summary << wxString::Format("Phase 0: DMX models/groups skipped: %d\n", phase00);
     }
 
+    // Phase 1: skip shadow models (ShadowModelFor is set) - overlay/virtual
+    // models that carry no independent effect data.
+    if (dlg) dlg->Update(3, "Phase 1: Looking for shadow models to skip...");
+    {
+        std::vector<ImportMappingNode*> roots;
+        roots.reserve(_dataModel->GetChildCount());
+        for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+            roots.push_back(_dataModel->GetNthChild(i));
+        }
+        int skipBefore = 0;
+        for (auto* root : roots) {
+            if (root != nullptr && root->IsSkipped()) ++skipBefore;
+        }
+        AutoMapper::RunSkipShadow(roots, *xlights, "Phase 1: Skip (Shadow)");
+        int skipAfter = 0;
+        for (auto* root : roots) {
+            if (root != nullptr && root->IsSkipped()) ++skipAfter;
+        }
+        summary << wxString::Format("Phase 1: Shadow models skipped: %d\n", skipAfter - skipBefore);
+    }
+
     // Phase 5: exact (case-insensitive) name matches.
     int before = CountUnmappedRoots();
     if (dlg) dlg->Update(5, "Phase 5: Looking for exact name matches...");
@@ -4076,6 +4100,7 @@ src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
                 src.height = ic->height;
+                src.depth = ic->depth;
                 src.strandCount = ic->strandCount;
             }
         }
@@ -4286,6 +4311,7 @@ src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
                 src.height = ic->height;
+                src.depth = ic->depth;
                 src.strandCount = ic->strandCount;
             }
         }
@@ -4328,6 +4354,7 @@ src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
                 src.height = ic->height;
+                src.depth = ic->depth;
                 src.strandCount = ic->strandCount;
                 if (!ic->groupModels.empty()) {
                     for (const auto& memberName : wxSplit(ic->groupModels, ',')) {
@@ -4375,6 +4402,7 @@ src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
                 src.height = ic->height;
+                src.depth = ic->depth;
                 src.strandCount = ic->strandCount;
                 if (!ic->groupModels.empty()) {
                     for (const auto& memberName : wxSplit(ic->groupModels, ',')) {
@@ -4912,6 +4940,7 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                         mm->nodeCount = w * h * d;
                         mm->width = w;
                         mm->height = h;
+                        mm->depth = d;
                     } else if (mm->type == XmlNodeKeys::CustomType) {
                         auto data = XmlSerialize::ParseCustomModel(node.attribute(XmlNodeKeys::CustomModelAttribute).as_string());
                         int count = 0;
@@ -4931,6 +4960,7 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                         mm->nodeCount = count;
                         mm->width = node.attribute(XmlNodeKeys::CustomWidthAttribute).as_int(maxCol);
                         mm->height = node.attribute(XmlNodeKeys::CustomHeightAttribute).as_int(maxRow);
+                        mm->depth = node.attribute(XmlNodeKeys::CMDepthAttribute).as_int(1);
                         mm->strandCount = getAttr(XmlNodeKeys::NumStringsAttribute, XmlNodeKeys::Parm1Attribute);
                     } else if (mm->type.find(XmlNodeKeys::MatrixType) != std::string::npos || mm->type.find(XmlNodeKeys::TreeType) != std::string::npos) {
                         int strings = getAttr(XmlNodeKeys::NumStringsAttribute, XmlNodeKeys::Parm1Attribute);
