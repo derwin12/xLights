@@ -25,7 +25,7 @@ namespace AutoMapper {
 // Version tag for the QuikMap report summary (DoQuikMap's `summary` /
 // QuikMapReport.log). Bump this (v1.00 -> v1.01 -> ...) whenever the report
 // format/content changes, so old logs can be told apart from new ones.
-constexpr auto QUIKMAP_REPORT_VERSION = "v1.11";
+constexpr auto QUIKMAP_REPORT_VERSION = "v1.12";
 
 // QuikMap phases, in the order xLightsImportChannelMapDialog::DoQuikMap runs
 // them. Numbers are spaced by 5 so new phases can be inserted between
@@ -106,6 +106,17 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.11";
 //             with no faces (put on bottom for FADES)" — dest has "last",
 //             vendor has "bottom", and that vendor group has effects while
 //             other keyword-group candidates do not.
+//
+//   Phase 18: Horizontal/vertical group matches - for an unmapped destination
+//             ModelGroup root whose name or aliases contain a token starting
+//             with "horiz" or "vert" (whole-word prefix so "converts" is not
+//             a false match), matches it against an unmapped vendor ModelGroup
+//             with the same orientation. Among same-orientation candidates,
+//             the one with the highest Jaccard token overlap against the
+//             destination's name wins. See RunHVGroupMatch().
+//             e.g. dest "Horizontal Matrix" matches vendor "Horiz Strip" (both
+//             horiz) over "Vertical Arch" (vert) — orientation lock-in first,
+//             then name-token score breaks ties.
 //
 //   Phase 20: Submodel/strand fallback matches by name or alias, matching
 //             submodels of unmapped models only against non-group available
@@ -441,6 +452,21 @@ void RunSpecialKeywordGroupMatch(const std::vector<ImportMappingNode*>& roots,
                                   bool selectOnly,
                                   const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                                   const std::string& ruleLabel = "");
+
+// Horizontal/vertical group match pass (QuikMap Phase 18), run after the
+// special-keyword group pass (Phase 17) and before the submodel fallback pass
+// (Phase 20). For each destination root that IsGroup(), is not skipped, is
+// still unmapped, and whose GetModelName() or any GetAliases() entry contains
+// a whole-word token that starts with "horiz" or "vert" (prefix match so
+// "converts" is not a false positive), detects the orientation and matches it
+// against still-unmapped vendor ModelGroup sources with the same orientation.
+// Among same-orientation candidates the one with the highest Jaccard token
+// overlap against the destination name is preferred.
+void RunHVGroupMatch(const std::vector<ImportMappingNode*>& roots,
+                     const std::vector<AvailableSource>& available,
+                     bool selectOnly,
+                     const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                     const std::string& ruleLabel = "");
 
 // "Everything"/"all" group match pass (QuikMap Phase 16), run after the
 // community alias pack pass (Phase 15) and before the special-keyword group

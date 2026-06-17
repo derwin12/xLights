@@ -3647,6 +3647,19 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
+    // Phase 18: horizontal/vertical group matches - groups whose name contains
+    // a "horiz" or "vert" token are matched like-for-like against vendor groups
+    // with the same orientation, scored by name-token Jaccard overlap.
+    before = after;
+    if (dlg) dlg->Update(52, "Phase 18: Looking for horizontal/vertical group matches...");
+    DoHVGroupMatch(select, "Phase 18: HVGroup");
+    after = CountUnmappedRoots();
+    int phase18 = before - after;
+    summary << wxString::Format("Phase 18: Horizontal/vertical group matches found: %d\n", phase18);
+    if (dlg) dlg->Update(52, wxString::Format("Phase 18 complete - horizontal/vertical group matches found: %d", phase18));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
     // Phase 20: submodel/strand fallback matches by name or alias.
     int beforeDesc = CountUnmappedDescendants();
     if (dlg) dlg->Update(52, "Phase 20: Looking for submodel matches...");
@@ -4235,6 +4248,39 @@ void xLightsImportChannelMapDialog::DoSpecialKeywordGroupMatch(bool select, cons
     }
 
     AutoMapper::RunSpecialKeywordGroupMatch(roots, available, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoHVGroupMatch(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunHVGroupMatch(roots, available, select, selectedTargets, ruleLabel);
 }
 
 void xLightsImportChannelMapDialog::DoCatchAllFallback(bool select, const std::string& ruleLabel)

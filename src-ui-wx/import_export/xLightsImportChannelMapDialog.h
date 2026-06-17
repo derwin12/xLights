@@ -732,6 +732,7 @@ protected:
         void DoCustomSubmodelOverlapMatch(bool select, const std::string& ruleLabel = "");
         void DoEverythingGroupMatch(bool select, const std::string& ruleLabel = "");
         void DoSpecialKeywordGroupMatch(bool select, const std::string& ruleLabel = "");
+        void DoHVGroupMatch(bool select, const std::string& ruleLabel = "");
         void DoCatchAllFallback(bool select, const std::string& ruleLabel = "");
         void DoSiblingReuseBackfill(bool select, const std::string& ruleLabel = "");
         void DoCustomDimensionMatch(bool select, const std::string& ruleLabel = "");

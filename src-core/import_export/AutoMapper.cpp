@@ -1636,6 +1636,110 @@ void RunSpecialKeywordGroupMatch(const std::vector<ImportMappingNode*>& roots,
     FillMappedModelChildren(roots, available, selectMapAvail, used, ruleLabel);
 }
 
+// Detects whether a model name implies a horizontal or vertical orientation.
+// Returns 1 for "horiz…", -1 for "vert…", 0 for neither.
+// Matching is on whole-word token prefixes after FuzzyNormalize so that
+// "converts" (contains "vert" as a substring, not a token) does not fire.
+static int DetectHVOrientation(const std::string& name) {
+    const std::string norm = FuzzyNormalize(name);
+    std::string tok;
+    for (char c : norm + " ") {
+        if (c == ' ') {
+            if (!tok.empty()) {
+                if (tok.starts_with("horiz")) return 1;
+                if (tok.starts_with("vert"))  return -1;
+                tok.clear();
+            }
+        } else {
+            tok += c;
+        }
+    }
+    return 0;
+}
+
+void RunHVGroupMatch(const std::vector<ImportMappingNode*>& roots,
+                     const std::vector<AvailableSource>& available,
+                     bool selectOnly,
+                     const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                     const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    std::unordered_set<std::string> used;
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty()) used.insert(Lower(Trim(model->GetMapping())));
+        for (unsigned int k = 0; k < model->GetChildCount(); ++k) {
+            auto* sm = model->GetNthChild(k);
+            if (sm == nullptr) continue;
+            if (!sm->GetMapping().empty()) used.insert(Lower(Trim(sm->GetMapping())));
+            for (unsigned int m = 0; m < sm->GetChildCount(); ++m) {
+                auto* node = sm->GetNthChild(m);
+                if (node == nullptr) continue;
+                if (!node->GetMapping().empty()) used.insert(Lower(Trim(node->GetMapping())));
+            }
+        }
+    }
+
+    for (auto* model : roots) {
+        if (model == nullptr || !model->IsGroup() || model->IsSkipped()) continue;
+        if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+        if (!model->GetMapping().empty()) continue;
+
+        // Detect orientation from name, then aliases.
+        int destOri = DetectHVOrientation(model->GetModelName());
+        if (destOri == 0) {
+            for (const auto& alias : model->GetAliases()) {
+                destOri = DetectHVOrientation(alias);
+                if (destOri != 0) break;
+            }
+        }
+        if (destOri == 0) continue;
+
+        // Build destination token set for Jaccard scoring.
+        auto destTokens = FuzzyTokens(model->GetModelName());
+
+        const AvailableSource* best = nullptr;
+        double bestScore = -1.0;
+
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (src.modelType != "ModelGroup") continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+            if (DetectHVOrientation(src.displayName) != destOri) continue;
+
+            // Score by Jaccard similarity of name tokens.
+            auto srcTokens = FuzzyTokens(src.displayName);
+            int inter = 0;
+            for (const auto& t : destTokens) {
+                if (srcTokens.count(t)) ++inter;
+            }
+            int uni = static_cast<int>(destTokens.size() + srcTokens.size()) - inter;
+            double score = (uni > 0) ? static_cast<double>(inter) / static_cast<double>(uni) : 0.0;
+
+            if (best == nullptr || score > bestScore) {
+                best = &src;
+                bestScore = score;
+            }
+        }
+
+        if (best != nullptr) {
+            model->Map(best->displayName, best->modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(best->displayName)));
+        }
+    }
+
+    FillMappedModelChildren(roots, available, selectMapAvail, used, ruleLabel);
+}
+
 // Returns true if `name`, once normalized into whitespace-separated tokens,
 // contains a whole-word "everything" or "all" token (so "Waterfall"/"Hallway"
 // don't match, but "Group - All Props" and "Everything" do).
