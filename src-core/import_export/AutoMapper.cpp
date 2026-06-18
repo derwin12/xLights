@@ -609,7 +609,9 @@ void Run(const std::vector<ImportMappingNode*>& roots,
          const std::string& mg,
          bool selectOnly,
          const std::unordered_set<const ImportMappingNode*>& selectedTargets,
-         const std::string& ruleLabel) {
+         const std::string& ruleLabel,
+         AvailableKindFilter kindFilter,
+         bool allowSharedSource) {
     bool selectMapAvail = false;
     bool selectMapTarget = false;
     if (selectOnly) {
@@ -617,6 +619,23 @@ void Run(const std::vector<ImportMappingNode*>& roots,
             if (a.selected) { selectMapAvail = true; break; }
         }
         selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Vendor model/group names already claimed by a destination root, so
+    // this pass (and later destinations within this same pass) doesn't hand
+    // out the same bare-model source twice - e.g. once "Mega Tree" is mapped
+    // to "AA Mega Tree", it shouldn't also get claimed by "Group - Mega
+    // Trees" later in this phase or in a later phase. Seeded from whatever
+    // is already mapped (by an earlier phase), then updated as this pass
+    // maps things. Not consulted at all when allowSharedSource is set (see
+    // Run()'s doc comment - Phase 10/Alias deliberately allows fan-out).
+    std::unordered_set<std::string> usedModelSources;
+    if (!allowSharedSource) {
+        for (auto* r : roots) {
+            if (r != nullptr && !r->GetMapping().empty()) {
+                usedModelSources.insert(Lower(Trim(r->GetMapping())));
+            }
+        }
     }
 
     for (auto* model : roots) {
@@ -688,10 +707,18 @@ void Run(const std::vector<ImportMappingNode*>& roots,
                 }
             } else {
                 // match model to model
+                if (kindFilter != AvailableKindFilter::Any) {
+                    bool srcIsGroup = (src.modelType == "ModelGroup");
+                    bool sameKind = (model->IsGroup() == srcIsGroup);
+                    if (kindFilter == AvailableKindFilter::SameKindOnly && !sameKind) continue;
+                    if (kindFilter == AvailableKindFilter::CrossKindOnly && sameKind) continue;
+                }
+                if (!allowSharedSource && usedModelSources.count(availName) != 0) continue;
                 if (model->GetMapping().empty() &&
                     lambda_model(model->GetCoreModel(), availName, extra1, extra2, aliases)) {
                     model->Map(src.displayName, src.modelType);
                     model->SetMappingRule(ruleLabel);
+                    if (!allowSharedSource) usedModelSources.insert(availName);
                 }
             }
         }

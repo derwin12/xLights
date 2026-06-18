@@ -738,7 +738,9 @@ protected:
             std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>& aliases)> lambda_model,
             std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>& aliases)> lambda_strand,
             std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>& aliases)> lambda_node,
-            const std::string& extra1, const std::string& extra2, const std::string& mg, const bool& select, const std::string& ruleLabel = "");
+            const std::string& extra1, const std::string& extra2, const std::string& mg, const bool& select, const std::string& ruleLabel = "",
+            AutoMapper::AvailableKindFilter kindFilter = AutoMapper::AvailableKindFilter::Any,
+            bool allowSharedSource = false);
         void DoSubModelFallback(bool select, const std::string& ruleLabel = "");
         void DoGroupContentFuzzy(bool select, const std::string& ruleLabel = "");
         void DoCustomExactDimensionMatch(bool select, const std::string& ruleLabel = "");

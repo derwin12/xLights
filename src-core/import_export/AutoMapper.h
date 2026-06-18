@@ -25,7 +25,7 @@ namespace AutoMapper {
 // Version tag for the QuikMap report summary (DoQuikMap's `summary` /
 // QuikMapReport.log). Bump this (v1.00 -> v1.01 -> ...) whenever the report
 // format/content changes, so old logs can be told apart from new ones.
-constexpr auto QUIKMAP_REPORT_VERSION = "v1.12";
+constexpr auto QUIKMAP_REPORT_VERSION = "v1.13";
 
 // QuikMap phases, in the order xLightsImportChannelMapDialog::DoQuikMap runs
 // them. Numbers are spaced by 5 so new phases can be inserted between
@@ -141,7 +141,11 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.12";
 //
 //   Phase 25: Last-resort fuzzy matches (token overlap, with numeric/side
 //             signature and model-family guardrails) for anything still
-//             unmapped. See MatchFuzzy, Run().
+//             unmapped. Restricted to same-kind pairings (model<->model,
+//             group<->group) via AvailableKindFilter::SameKindOnly - a
+//             cross-kind pairing (e.g. dest "Group - Mega Trees" fuzzy-
+//             matching vendor model "Mega Tree") is left for Phase 27. See
+//             MatchFuzzy, Run().
 //             e.g. dest "Candy-Cane-Left-1" fuzzy-matches vendor "Cane 1
 //             Left" — shared tokens {cane, 1, left} give Jaccard ≥ 0.6 and
 //             numeric/side signatures agree.
@@ -163,6 +167,16 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.12";
 //             "Cane N" members → also augmented with "cane"), even though
 //             "Group - Candy Canes" vs "Canes" alone is below the 0.6
 //             Jaccard threshold.
+//
+//   Phase 27: Cross-kind fuzzy matches - same MatchFuzzy rules as Phase 25,
+//             but via AvailableKindFilter::CrossKindOnly, for anything still
+//             unmapped after Phases 25/26: a destination model may now match
+//             a vendor group, or a destination group may match a vendor
+//             model. Run last among the fuzzy passes so a same-kind match is
+//             always preferred when one exists. See MatchFuzzy, Run().
+//             e.g. dest "Group - Mega Trees" (a group) fuzzy-matches vendor
+//             "Mega Tree" (a plain model) only if no group<->group or
+//             model<->model candidate was found in Phase 25/26.
 //
 //   Phase 30: Singing-prop matches - pairs unmapped destination roots that
 //             are real singing props with unmapped singing-prop vendor
@@ -385,6 +399,17 @@ void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
                           const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                           const std::string& ruleLabel = "");
 
+// Constrains the bare-model match in Run() by whether the destination root
+// and the candidate source are the same "kind" (model vs. ModelGroup).
+// `Any` is the historical behavior (no constraint - used by Phase 5/10/15,
+// where the matchers are precise enough that an accidental model<->group
+// pairing is effectively impossible). `SameKindOnly` is used by Phase 25 so
+// the broad fuzzy matcher prefers model<->model and group<->group pairings.
+// `CrossKindOnly` is used by Phase 27 as the fallback over whatever Phase 25
+// left unmapped, allowing a destination model to match a vendor group (or
+// vice versa).
+enum class AvailableKindFilter { Any, SameKindOnly, CrossKindOnly };
+
 // Run one auto-map pass over the destination tree.
 //
 // `roots` lists the top-level destination nodes (the desktop's
@@ -400,6 +425,16 @@ void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
 // `selectedTargets` is the set of pointers to selected destination nodes.
 // `ruleLabel` is a short human-readable tag (e.g. "Exact", "Alias") recorded
 // via ImportMappingNode::SetMappingRule on every node mapped by this pass.
+// `kindFilter` further constrains the bare-model match - see
+// AvailableKindFilter.
+// `allowSharedSource` lets a bare-model vendor source be claimed by more
+// than one destination root in this (and later) passes. Off by default - a
+// vendor source is normally claimed by at most one destination, so e.g.
+// Phase 25/27's fuzzy fallback won't steal a source an earlier phase already
+// used. Phase 10 (Alias) passes true: a user can deliberately put the same
+// alias on multiple props (e.g. two different "Mega Tree" stand-ins that
+// should both receive the same vendor effects), so alias matches must be
+// allowed to fan out to more than one destination.
 void Run(const std::vector<ImportMappingNode*>& roots,
          const std::vector<AvailableSource>& available,
          RenderContext& renderContext,
@@ -408,7 +443,9 @@ void Run(const std::vector<ImportMappingNode*>& roots,
          const std::string& mg,
          bool selectOnly,
          const std::unordered_set<const ImportMappingNode*>& selectedTargets,
-         const std::string& ruleLabel = "");
+         const std::string& ruleLabel = "",
+         AvailableKindFilter kindFilter = AvailableKindFilter::Any,
+         bool allowSharedSource = false);
 
 // Custom-model exact-dimension match pass (QuikMap Phase 12), run after the
 // Phase 5 exact-name pass and before Phase 10's alias pass. For each

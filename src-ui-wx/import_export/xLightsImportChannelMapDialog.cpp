@@ -54,6 +54,7 @@
 #include "utils/string_utils.h"
 #include "ai/aiBase.h"
 #include "ai/aiType.h"
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <fstream>
@@ -3579,7 +3580,10 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     wxString summary;
     summary << wxString::Format("QuikMap Report %s\n", AutoMapper::QUIKMAP_REPORT_VERSION);
 
+    spdlog::info("QuikMap: starting - {} root nodes, {} unmapped descendants", _dataModel->GetChildCount(), CountUnmappedDescendants());
+
     // Phase 0: skip DMX models/groups - they shouldn't be auto-mapped.
+    spdlog::info("QuikMap: Phase 0 - Looking for DMX models/groups to skip...");
     if (dlg) dlg->Update(2, "Phase 0: Looking for DMX models/groups to skip...");
     {
         std::vector<ImportMappingNode*> roots;
@@ -3593,10 +3597,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
             if (root != nullptr && root->IsSkipped()) ++phase00;
         }
         summary << wxString::Format("Phase 0: DMX models/groups skipped: %d\n", phase00);
+        spdlog::info("QuikMap: Phase 0 complete - {} DMX models/groups skipped", phase00);
     }
 
     // Phase 1: skip shadow models (ShadowModelFor is set) - overlay/virtual
     // models that carry no independent effect data.
+    spdlog::info("QuikMap: Phase 1 - Looking for shadow models to skip...");
     if (dlg) dlg->Update(3, "Phase 1: Looking for shadow models to skip...");
     {
         std::vector<ImportMappingNode*> roots;
@@ -3614,13 +3620,16 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
             if (root != nullptr && root->IsSkipped()) ++skipAfter;
         }
         summary << wxString::Format("Phase 1: Shadow models skipped: %d\n", skipAfter - skipBefore);
+        spdlog::info("QuikMap: Phase 1 complete - {} shadow models skipped", skipAfter - skipBefore);
     }
 
     // Phase 5: exact (case-insensitive) name matches.
     int before = CountUnmappedRoots();
+    spdlog::info("QuikMap: Phase 5 - Looking for exact name matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(5, "Phase 5: Looking for exact name matches...");
     DoAutoMap(norm, norm, norm, "", "", "B", select, "Phase 5: Exact");
     int after = CountUnmappedRoots();
+    spdlog::info("QuikMap: Phase 5 complete - {} unmapped roots remain", after);
     int phase05 = before - after;
     summary << wxString::Format("Phase 5: Exact matches found: %d\n", phase05);
     if (dlg) dlg->Update(20, wxString::Format("Phase 5 complete - exact matches found: %d", phase05));
@@ -3629,10 +3638,14 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
 
     // Phase 10: alias matches.
     before = after;
+    spdlog::info("QuikMap: Phase 10 - Looking for alias matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(25, "Phase 10: Looking for alias matches...");
-    DoAutoMap(aggressive, aggressive, aggressive, "", "", "B", select, "Phase 10: Alias");
+    // allowSharedSource=true: a user can deliberately put the same alias on
+    // multiple destination props, and all of them should get the match.
+    DoAutoMap(aggressive, aggressive, aggressive, "", "", "B", select, "Phase 10: Alias", AutoMapper::AvailableKindFilter::Any, true);
     after = CountUnmappedRoots();
     int phase10 = before - after;
+    spdlog::info("QuikMap: Phase 10 complete - {} matches found", phase10);
     summary << wxString::Format("Phase 10: Alias matches found: %d\n", phase10);
     if (dlg) dlg->Update(40, wxString::Format("Phase 10 complete - alias matches found: %d", phase10));
     NotifyMappingItemsChanged();
@@ -3643,10 +3656,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // node count and CustomWidth/CustomHeight are exactly equal, regardless
     // of name.
     before = after;
+    spdlog::info("QuikMap: Phase 12 - Looking for custom exact-dimension matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(42, "Phase 12: Looking for custom exact-dimension matches...");
     DoCustomExactDimensionMatch(select, "Phase 12: CustomExactDimension");
     after = CountUnmappedRoots();
     int phase12 = before - after;
+    spdlog::info("QuikMap: Phase 12 complete - {} matches found", phase12);
     summary << wxString::Format("Phase 12: Custom exact-dimension matches found: %d\n", phase12);
     if (dlg) dlg->Update(43, wxString::Format("Phase 12 complete - custom exact-dimension matches found: %d", phase12));
     NotifyMappingItemsChanged();
@@ -3657,10 +3672,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // shares at least 3 submodel names, regardless of the parent model's
     // name.
     before = after;
+    spdlog::info("QuikMap: Phase 13 - Looking for custom submodel-overlap matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(43, "Phase 13: Looking for custom submodel-overlap matches...");
     DoCustomSubmodelOverlapMatch(select, "Phase 13: CustomSubmodelOverlap");
     after = CountUnmappedRoots();
     int phase13 = before - after;
+    spdlog::info("QuikMap: Phase 13 complete - {} matches found", phase13);
     summary << wxString::Format("Phase 13: Custom submodel-overlap matches found: %d\n", phase13);
     if (dlg) dlg->Update(44, wxString::Format("Phase 13 complete - custom submodel-overlap matches found: %d", phase13));
     NotifyMappingItemsChanged();
@@ -3669,10 +3686,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // Phase 15: community alias pack matches (skipped if no cache loaded).
     if (!_communityAliasPack.Empty()) {
         before = after;
+        spdlog::info("QuikMap: Phase 15 - Looking for community alias matches... ({} unmapped roots)", before);
         if (dlg) dlg->Update(45, "Phase 15: Looking for community alias matches...");
         DoAutoMap(communityAlias, communityAlias, communityAlias, "", "", "B", select, "Phase 15: Community");
         after = CountUnmappedRoots();
         int phase15 = before - after;
+        spdlog::info("QuikMap: Phase 15 complete - {} matches found", phase15);
         summary << wxString::Format("Phase 15: Community alias matches found: %d\n", phase15);
         if (dlg) dlg->Update(50, wxString::Format("Phase 15 complete - community alias matches found: %d", phase15));
         NotifyMappingItemsChanged();
@@ -3683,10 +3702,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // ModelGroup with that name (or alias, on the destination side) and the
     // highest member count, on each side, are paired together.
     before = after;
+    spdlog::info("QuikMap: Phase 16 - Looking for an 'everything' group match... ({} unmapped roots)", before);
     if (dlg) dlg->Update(50, "Phase 16: Looking for an 'everything' group match...");
     DoEverythingGroupMatch(select, "Phase 16: EverythingGroup");
     after = CountUnmappedRoots();
     int phase16 = before - after;
+    spdlog::info("QuikMap: Phase 16 complete - {} matches found", phase16);
     summary << wxString::Format("Phase 16: Everything group matches found: %d\n", phase16);
     if (dlg) dlg->Update(50, wxString::Format("Phase 16 complete - everything group matches found: %d", phase16));
     NotifyMappingItemsChanged();
@@ -3696,10 +3717,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // "Bottom" groups), matched against vendor groups with the same kind of
     // keyword in their name.
     before = after;
+    spdlog::info("QuikMap: Phase 17 - Looking for special-keyword group matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(51, "Phase 17: Looking for special-keyword group matches...");
     DoSpecialKeywordGroupMatch(select, "Phase 17: SpecialKeywordGroup");
     after = CountUnmappedRoots();
     int phase17 = before - after;
+    spdlog::info("QuikMap: Phase 17 complete - {} matches found", phase17);
     summary << wxString::Format("Phase 17: Special-keyword group matches found: %d\n", phase17);
     if (dlg) dlg->Update(51, wxString::Format("Phase 17 complete - special-keyword group matches found: %d", phase17));
     NotifyMappingItemsChanged();
@@ -3709,10 +3732,13 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // a "horiz" or "vert" token are matched like-for-like against vendor groups
     // with the same orientation, scored by name-token Jaccard overlap.
     before = after;
+    spdlog::info("QuikMap: Phase 18 - Looking for horizontal/vertical group matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(52, "Phase 18: Looking for horizontal/vertical group matches...");
     DoHVGroupMatch(select, "Phase 18: HVGroup");
+    spdlog::info("QuikMap: Phase 18 - DoHVGroupMatch returned");
     after = CountUnmappedRoots();
     int phase18 = before - after;
+    spdlog::info("QuikMap: Phase 18 complete - {} matches found", phase18);
     summary << wxString::Format("Phase 18: Horizontal/vertical group matches found: %d\n", phase18);
     if (dlg) dlg->Update(52, wxString::Format("Phase 18 complete - horizontal/vertical group matches found: %d", phase18));
     NotifyMappingItemsChanged();
@@ -3720,21 +3746,28 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
 
     // Phase 20: submodel/strand fallback matches by name or alias.
     int beforeDesc = CountUnmappedDescendants();
+    spdlog::info("QuikMap: Phase 20 - Looking for submodel matches... ({} unmapped descendants)", beforeDesc);
     if (dlg) dlg->Update(52, "Phase 20: Looking for submodel matches...");
     DoSubModelFallback(select, "Phase 20: Submodel");
     int afterDesc = CountUnmappedDescendants();
     int phase20 = beforeDesc - afterDesc;
+    spdlog::info("QuikMap: Phase 20 complete - {} matches found", phase20);
     summary << wxString::Format("Phase 20: Submodel matches found: %d\n", phase20);
     if (dlg) dlg->Update(65, wxString::Format("Phase 20 complete - submodel matches found: %d", phase20));
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
     // Phase 25: last-resort fuzzy matches for anything still unmapped.
+    // Restricted to same-kind pairings (model<->model, group<->group) -
+    // a cross-kind pairing is left for Phase 27 so it's only used when no
+    // same-kind candidate exists.
     before = after;
+    spdlog::info("QuikMap: Phase 25 - Looking for fuzzy matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(70, "Phase 25: Looking for fuzzy matches...");
-    DoAutoMap(fuzzy, fuzzy, fuzzy, "", "", "B", select, "Phase 25: Fuzzy");
+    DoAutoMap(fuzzy, fuzzy, fuzzy, "", "", "B", select, "Phase 25: Fuzzy", AutoMapper::AvailableKindFilter::SameKindOnly);
     after = CountUnmappedRoots();
     int phase25 = before - after;
+    spdlog::info("QuikMap: Phase 25 complete - {} matches found", phase25);
     summary << wxString::Format("Phase 25: Fuzzy matches found: %d\n", phase25);
     if (dlg) dlg->Update(85, wxString::Format("Phase 25 complete - fuzzy matches found: %d", phase25));
     NotifyMappingItemsChanged();
@@ -3744,12 +3777,29 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // entirely of one kind of prop, fold that prop's family token into the
     // group's own tokens before retrying the Phase 25 fuzzy match.
     before = after;
+    spdlog::info("QuikMap: Phase 26 - Looking for group-content fuzzy matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(86, "Phase 26: Looking for group-content fuzzy matches...");
     DoGroupContentFuzzy(select, "Phase 26: GroupContent");
     after = CountUnmappedRoots();
     int phase26 = before - after;
+    spdlog::info("QuikMap: Phase 26 complete - {} matches found", phase26);
     summary << wxString::Format("Phase 26: Group-content fuzzy matches found: %d\n", phase26);
     if (dlg) dlg->Update(86, wxString::Format("Phase 26 complete - group-content fuzzy matches found: %d", phase26));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
+    // Phase 27: cross-kind fuzzy matches - same MatchFuzzy rules as Phase 25,
+    // but allows a destination model to match a vendor group (or vice versa)
+    // for anything still unmapped after Phases 25/26's same-kind-only pass.
+    before = after;
+    spdlog::info("QuikMap: Phase 27 - Looking for cross-kind fuzzy matches... ({} unmapped roots)", before);
+    if (dlg) dlg->Update(86, "Phase 27: Looking for cross-kind fuzzy matches...");
+    DoAutoMap(fuzzy, fuzzy, fuzzy, "", "", "B", select, "Phase 27: CrossKindFuzzy", AutoMapper::AvailableKindFilter::CrossKindOnly);
+    after = CountUnmappedRoots();
+    int phase27 = before - after;
+    spdlog::info("QuikMap: Phase 27 complete - {} matches found", phase27);
+    summary << wxString::Format("Phase 27: Cross-kind fuzzy matches found: %d\n", phase27);
+    if (dlg) dlg->Update(86, wxString::Format("Phase 27 complete - cross-kind fuzzy matches found: %d", phase27));
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
@@ -3757,10 +3807,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // models with real faceInfo NodeRange data) with each other, ahead of
     // the coarser best-guess pass.
     before = after;
+    spdlog::info("QuikMap: Phase 30 - Looking for singing prop matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(86, "Phase 30: Looking for singing prop matches...");
     DoSingingProp(select, "Phase 30: SingingProp");
     after = CountUnmappedRoots();
     int phase30 = before - after;
+    spdlog::info("QuikMap: Phase 30 complete - {} matches found", phase30);
     summary << wxString::Format("Phase 30: Singing prop matches found: %d\n", phase30);
     if (dlg) dlg->Update(86, wxString::Format("Phase 30 complete - singing prop matches found: %d", phase30));
     NotifyMappingItemsChanged();
@@ -3770,10 +3822,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // unmapped (more destination singing props than vendor singing models)
     // get a vendor singing model reused round-robin.
     before = after;
+    spdlog::info("QuikMap: Phase 32 - Backfilling remaining singing props... ({} unmapped roots)", before);
     if (dlg) dlg->Update(86, "Phase 32: Backfilling remaining singing props...");
     DoSingingPropBackfill(select, "Phase 32: SingingPropBackfill");
     after = CountUnmappedRoots();
     int phase32 = before - after;
+    spdlog::info("QuikMap: Phase 32 complete - {} matches found", phase32);
     summary << wxString::Format("Phase 32: Singing prop backfill matches found: %d\n", phase32);
     if (dlg) dlg->Update(86, wxString::Format("Phase 32 complete - singing prop backfill matches found: %d", phase32));
     NotifyMappingItemsChanged();
@@ -3783,10 +3837,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // vendor flood groups, then maps any remaining unmapped individual
     // floodlights 1:1 against unmapped individual vendor floodlights.
     before = after;
+    spdlog::info("QuikMap: Phase 40 - Looking for floodlight matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(87, "Phase 40: Looking for floodlight matches...");
     DoFloodlight(select, "Phase 40: Floodlight");
     after = CountUnmappedRoots();
     int phase40 = before - after;
+    spdlog::info("QuikMap: Phase 40 complete - {} matches found", phase40);
     summary << wxString::Format("Phase 40: Floodlight matches found: %d\n", phase40);
     if (dlg) dlg->Update(87, wxString::Format("Phase 40 complete - floodlight matches found: %d", phase40));
     NotifyMappingItemsChanged();
@@ -3796,10 +3852,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // floodlights still unmapped (more destination flood props than vendor
     // ones) get a vendor flood group/floodlight reused round-robin.
     before = after;
+    spdlog::info("QuikMap: Phase 41 - Backfilling remaining floodlights... ({} unmapped roots)", before);
     if (dlg) dlg->Update(87, "Phase 41: Backfilling remaining floodlights...");
     DoFloodlightBackfill(select, "Phase 41: FloodlightBackfill");
     after = CountUnmappedRoots();
     int phase41 = before - after;
+    spdlog::info("QuikMap: Phase 41 complete - {} matches found", phase41);
     summary << wxString::Format("Phase 41: Floodlight backfill matches found: %d\n", phase41);
     if (dlg) dlg->Update(87, wxString::Format("Phase 41 complete - floodlight backfill matches found: %d", phase41));
     NotifyMappingItemsChanged();
@@ -3809,10 +3867,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // singing pumpkin onto your singing tombstone) for anything still
     // unmapped.
     before = after;
+    spdlog::info("QuikMap: Phase 65 - Looking for best-guess matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(87, "Phase 65: Looking for best-guess matches...");
     DoBestGuess(select, "Phase 65: BestGuess");
     after = CountUnmappedRoots();
     int phase65 = before - after;
+    spdlog::info("QuikMap: Phase 65 complete - {} matches found", phase65);
     summary << wxString::Format("Phase 65: Best-guess matches found: %d\n", phase65);
     if (dlg) dlg->Update(88, wxString::Format("Phase 65 complete - best-guess matches found: %d", phase65));
     NotifyMappingItemsChanged();
@@ -3822,10 +3882,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // sibling of an already-mapped model (e.g. "Cane-4" alongside mapped
     // "Cane-1"), derive and try the analogous vendor name.
     before = after;
+    spdlog::info("QuikMap: Phase 90 - Looking for like-model matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(88, "Phase 90: Looking for like-model matches...");
     DoLikeModelBackfill(select, "Phase 90: LikeModel");
     after = CountUnmappedRoots();
     int phase90 = before - after;
+    spdlog::info("QuikMap: Phase 90 complete - {} matches found", phase90);
     summary << wxString::Format("Phase 90: Like-model matches found: %d\n", phase90);
     if (dlg) dlg->Update(89, wxString::Format("Phase 90 complete - like-model matches found: %d", phase90));
     NotifyMappingItemsChanged();
@@ -3835,8 +3897,10 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // is made up entirely of one model type (e.g. a group of Arches), mark
     // its individual member models as skipped so Phase 120 doesn't
     // separately/redundantly map them.
+    spdlog::info("QuikMap: Phase 95 - Checking group coverage...");
     if (dlg) dlg->Update(89, "Phase 95: Checking group coverage...");
     DoGroupCoverageSkip("Phase 95: GroupCoverage");
+    spdlog::info("QuikMap: Phase 95 complete");
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
@@ -3845,10 +3909,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // whose node count and grid shape closely match, over the blind
     // first-available pairing Phase 105 would otherwise make.
     before = after;
+    spdlog::info("QuikMap: Phase 100 - Looking for custom-dimension matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(89, "Phase 100: Looking for custom-dimension matches...");
     DoCustomDimensionMatch(select, "Phase 100: CustomDimension");
     after = CountUnmappedRoots();
     int phase100 = before - after;
+    spdlog::info("QuikMap: Phase 100 complete - {} matches found", phase100);
     summary << wxString::Format("Phase 100: Custom-dimension matches found: %d\n", phase100);
     if (dlg) dlg->Update(89, wxString::Format("Phase 100 complete - custom-dimension matches found: %d", phase100));
     NotifyMappingItemsChanged();
@@ -3860,10 +3926,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // ahead of the unconditional Phase 120 catch-all so like-for-like model
     // types are preferred.
     before = after;
+    spdlog::info("QuikMap: Phase 105 - Looking for like-model-type matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(89, "Phase 105: Looking for like-model-type matches...");
     DoModelTypeCatchAll(select, "Phase 105: ModelTypeCatchall");
     after = CountUnmappedRoots();
     int phase105 = before - after;
+    spdlog::info("QuikMap: Phase 105 complete - {} matches found", phase105);
     summary << wxString::Format("Phase 105: Model-type catch-all matches found: %d\n", phase105);
     if (dlg) dlg->Update(90, wxString::Format("Phase 105 complete - model-type catch-all matches found: %d", phase105));
     NotifyMappingItemsChanged();
@@ -3876,10 +3944,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // member of the vendor group (e.g. "Snowflake 1".."Snowflake 6"), so they
     // aren't left for the unconstrained Phase 120 catch-all.
     before = after;
+    spdlog::info("QuikMap: Phase 110 - Looking for group-member dimension matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(90, "Phase 110: Looking for group-member dimension matches...");
     DoGroupMemberDimensionMatch(select, "Phase 110: GroupMemberDimension");
     after = CountUnmappedRoots();
     int phase110 = before - after;
+    spdlog::info("QuikMap: Phase 110 complete - {} matches found", phase110);
     summary << wxString::Format("Phase 110: Group-member dimension matches found: %d\n", phase110);
     if (dlg) dlg->Update(90, wxString::Format("Phase 110 complete - group-member dimension matches found: %d", phase110));
     NotifyMappingItemsChanged();
@@ -3890,10 +3960,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // vendor group members), reuse the closest-by-node-count vendor group
     // member even if Phase 110 already claimed it.
     before = after;
+    spdlog::info("QuikMap: Phase 115 - Backfilling group-member dimension matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(90, "Phase 115: Backfilling group-member dimension matches...");
     DoGroupMemberDimensionBackfill(select, "Phase 115: GroupMemberDimensionBackfill");
     after = CountUnmappedRoots();
     int phase115 = before - after;
+    spdlog::info("QuikMap: Phase 115 complete - {} matches found", phase115);
     summary << wxString::Format("Phase 115: Group-member dimension backfill matches found: %d\n", phase115);
     if (dlg) dlg->Update(90, wxString::Format("Phase 115 complete - group-member dimension backfill matches found: %d", phase115));
     NotifyMappingItemsChanged();
@@ -3904,10 +3976,12 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // as model maps to model, group maps to group, and type matches type
     // (e.g. SubModel/Strand/Node only match the same kind).
     before = after;
+    spdlog::info("QuikMap: Phase 120 - Mapping remaining unmapped items... ({} unmapped roots)", before);
     if (dlg) dlg->Update(90, "Phase 120: Mapping remaining unmapped items...");
     DoCatchAllFallback(select, "Phase 120: Catchall");
     after = CountUnmappedRoots();
     int phase120 = before - after;
+    spdlog::info("QuikMap: Phase 120 complete - {} matches found", phase120);
     summary << wxString::Format("Phase 120: Catch-all matches found: %d\n", phase120);
     if (dlg) dlg->Update(100, wxString::Format("Phase 120 complete - catch-all matches found: %d", phase120));
     NotifyMappingItemsChanged();
@@ -3918,17 +3992,20 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // props than like-typed vendor props), reuse an already-mapped sibling's
     // vendor mapping (same fuzzy base/side, same model type).
     before = after;
+    spdlog::info("QuikMap: Phase 125 - Looking for sibling-reuse matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(100, "Phase 125: Looking for sibling-reuse matches...");
     DoSiblingReuseBackfill(select, "Phase 125: SiblingReuse");
     after = CountUnmappedRoots();
     int phase125 = before - after;
+    spdlog::info("QuikMap: Phase 125 complete - {} matches found", phase125);
     summary << wxString::Format("Phase 125: Sibling-reuse matches found: %d\n", phase125);
     if (dlg) dlg->Update(100, wxString::Format("Phase 125 complete - sibling-reuse matches found: %d", phase125));
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
-    // catchall summary listing - only show if it found any matches, since it's just a repeat of the final state of the tree but without the mapping rules in the report.
-    if (phase105 > 0) {
+    // catchall summary listing - only included in the detailed report (too long for
+    // the on-screen popup, which only has room for the phase result counts).
+    if (detailedReport && phase105 > 0) {
         summary << "\nModel-type catch-all matches (Phase 105):\n";
         std::function<void(xLightsImportModelNode*)> walkModelTypeCatchAll = [&](xLightsImportModelNode* node) {
             if (node->IsMapped() && node->GetMappingRule() == "Phase 105: ModelTypeCatchall") {
@@ -3943,7 +4020,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         }
     }
 
-    if (phase120 > 0) {
+    if (detailedReport && phase120 > 0) {
         summary << "\nCatch-all matches (Phase 120):\n";
         std::function<void(xLightsImportModelNode*)> walkCatchAll = [&](xLightsImportModelNode* node) {
             if (node->IsMapped() && node->GetMappingRule() == "Phase 120: Catchall") {
@@ -3958,7 +4035,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         }
     }
 
-    if (phase125 > 0) {
+    if (detailedReport && phase125 > 0) {
         summary << "\nSibling-reuse matches (Phase 125):\n";
         std::function<void(xLightsImportModelNode*)> walkSiblingReuse = [&](xLightsImportModelNode* node) {
             if (node->IsMapped() && node->GetMappingRule() == "Phase 125: SiblingReuse") {
@@ -3972,6 +4049,8 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
             walkSiblingReuse(_dataModel->GetNthChild(i));
         }
     }
+
+    spdlog::info("QuikMap: all phases complete, finalizing...");
 
     delete dlg;
 
@@ -3993,6 +4072,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     if (!headless) {
         wxMessageBox(summary, "QuikMap Results", wxOK | wxICON_INFORMATION, this);
     }
+    spdlog::info("QuikMap: DoQuikMap returning");
 }
 
 wxString xLightsImportChannelMapDialog::GenerateQuikMapDetailReport() const
@@ -4031,7 +4111,8 @@ void xLightsImportChannelMapDialog::DoAutoMap(
     std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>&)> lambda_model,
     std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>&)> lambda_strand,
     std::function<bool(const std::string&, const std::string&, const std::string&, const std::string&, const std::list<std::string>&)> lambda_node,
-    const std::string& extra1, const std::string& extra2, const std::string& mg, const bool& select, const std::string& ruleLabel)
+    const std::string& extra1, const std::string& extra2, const std::string& mg, const bool& select, const std::string& ruleLabel,
+    AutoMapper::AvailableKindFilter kindFilter, bool allowSharedSource)
 {
     // Build the source-candidate list once: canonical (lowered/trimmed) name
     // for matching, original casing for the eventual Map() call, and the
@@ -4077,7 +4158,7 @@ src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
 
     AutoMapper::Run(roots, available, *xlights,
                     lambda_model, lambda_strand, lambda_node,
-                    extra1, extra2, mg, select, selectedTargets, ruleLabel);
+                    extra1, extra2, mg, select, selectedTargets, ruleLabel, kindFilter, allowSharedSource);
 }
 
 void xLightsImportChannelMapDialog::DoSubModelFallback(bool select, const std::string& ruleLabel)
