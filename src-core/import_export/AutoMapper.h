@@ -25,7 +25,7 @@ namespace AutoMapper {
 // Version tag for the QuikMap report summary (DoQuikMap's `summary` /
 // QuikMapReport.log). Bump this (v1.00 -> v1.01 -> ...) whenever the report
 // format/content changes, so old logs can be told apart from new ones.
-constexpr auto QUIKMAP_REPORT_VERSION = "v1.13";
+constexpr auto QUIKMAP_REPORT_VERSION = "v1.14";
 
 // QuikMap phases, in the order xLightsImportChannelMapDialog::DoQuikMap runs
 // them. Numbers are spaced by 5 so new phases can be inserted between
@@ -406,11 +406,17 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.13";
 //   Phase 125: Sibling-reuse backfill - for each destination root that is
 //             still unmapped, not skipped, and not a group, looks for an
 //             already-mapped sibling root (same FuzzyBaseTokens + side
-//             signature) and reuses that sibling's vendor mapping verbatim.
-//             See RunSiblingReuseBackfill().
+//             signature, and matching singing-prop status - see below) and
+//             reuses that sibling's vendor mapping verbatim. See
+//             RunSiblingReuseBackfill().
 //             e.g. dest "Md Star - 02" is unmapped; sibling "Md Star - 01"
 //             maps to vendor "Star 1" → "Md Star - 02" reuses "Star 1"
 //             (duplicate assignment).
+//             e.g. dest "FlatTree-3" (not a singing prop) must not reuse
+//             sibling "FlatTree-1"'s mapping to vendor "Singing Tree Female"
+//             (a singing prop) even though they share the same fuzzy base
+//             tokens - the singing-prop status mismatch blocks it, and the
+//             search continues to the next same-base-token sibling instead.
 
 // Source-vs-destination matcher. Called per (destination_name, candidate)
 // pair. Extra slots are reused by the regex matcher for the regex pattern
@@ -797,7 +803,14 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
 // like-typed models than the destination (e.g. two "Md Star" props but only
 // one vendor "Star" model) - rather than leaving the extra ones unmapped,
 // they reuse their sibling's mapping. Does not touch Strand/Node children.
+// A sibling's mapping is only reused if the vendor source's isSingingProp
+// matches the destination's own IsSingingProp() - a singing prop's vendor
+// mapping carries face/mouth-movement data that's meaningless on a non-
+// singing destination (and vice versa), so a same-fuzzy-base-token sibling
+// pairing isn't enough on its own when one side is a singing prop and the
+// other isn't.
 void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
+                              const std::vector<AvailableSource>& available,
                               bool selectOnly,
                               const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                               const std::string& ruleLabel = "");

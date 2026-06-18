@@ -55,6 +55,8 @@
 #include "ai/aiBase.h"
 #include "ai/aiType.h"
 #include <spdlog/spdlog.h>
+#include <wx/file.h>
+#include <wx/datetime.h>
 
 #include <algorithm>
 #include <fstream>
@@ -967,6 +969,85 @@ public:
         Layout();
 
         updateBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { _onUpdate(); });
+    }
+};
+
+// One row in the post-QuikMap review window - a single root-level match
+// from one of the "guessy" later phases (32/41/90/100/105/110/115/120/125),
+// plus the verdict the user assigns it ("", "Good", or "Bad").
+struct QuikMapReviewRow {
+    xLightsImportModelNode* node;
+    wxString verdict;
+};
+
+// Lets the user mark individual QuikMap matches from the later, less
+// name-driven phases as Good/Bad after a run completes, so that feedback
+// can be saved to a file for later review (see
+// xLightsImportChannelMapDialog::ShowQuikMapReviewWindow).
+class QuikMapReviewDialog : public wxDialog {
+    std::vector<QuikMapReviewRow>& _rows;
+    wxListCtrl* _list;
+
+    void MarkSelected(const wxString& verdict) {
+        long item = -1;
+        while ((item = _list->GetNextItem(item, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED)) != -1) {
+            auto idx = static_cast<size_t>(_list->GetItemData(item));
+            _rows[idx].verdict = verdict;
+            _list->SetItem(item, 3, verdict);
+        }
+    }
+
+public:
+    QuikMapReviewDialog(wxWindow* parent, std::vector<QuikMapReviewRow>& rows)
+        : wxDialog(parent, wxID_ANY, "QuikMap Review - Mark Good/Bad Matches",
+                   wxDefaultPosition, wxSize(760, 520),
+                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
+        , _rows(rows)
+    {
+        auto* mainSizer = new wxBoxSizer(wxVERTICAL);
+        mainSizer->Add(new wxStaticText(this, wxID_ANY,
+            "These matches came from QuikMap's later, less name-driven phases "
+            "(32/41/90/100/105/110/115/120/125). Select rows and mark them Good "
+            "or Bad, then save - the feedback file helps tune these phases later."),
+            0, wxALL, 5);
+
+        _list = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                                wxLC_REPORT);
+        _list->AppendColumn("Destination", wxLIST_FORMAT_LEFT, 240);
+        _list->AppendColumn("Vendor Mapping", wxLIST_FORMAT_LEFT, 240);
+        _list->AppendColumn("Phase", wxLIST_FORMAT_LEFT, 180);
+        _list->AppendColumn("Verdict", wxLIST_FORMAT_LEFT, 70);
+
+        for (size_t i = 0; i < _rows.size(); ++i) {
+            long idx = _list->InsertItem(static_cast<long>(i), _rows[i].node->GetModelName());
+            _list->SetItem(idx, 1, wxString(_rows[i].node->GetMapping()));
+            _list->SetItem(idx, 2, _rows[i].node->GetMappingRule());
+            _list->SetItem(idx, 3, _rows[i].verdict);
+            _list->SetItemData(idx, static_cast<long>(i));
+        }
+
+        mainSizer->Add(_list, 1, wxEXPAND | wxALL, 5);
+
+        auto* btnSizer = new wxBoxSizer(wxHORIZONTAL);
+        auto* goodBtn = new wxButton(this, wxID_ANY, "Mark Good");
+        auto* badBtn = new wxButton(this, wxID_ANY, "Mark Bad");
+        auto* clearBtn = new wxButton(this, wxID_ANY, "Clear Mark");
+        btnSizer->Add(goodBtn, 0, wxRIGHT, 5);
+        btnSizer->Add(badBtn, 0, wxRIGHT, 5);
+        btnSizer->Add(clearBtn, 0);
+        btnSizer->AddStretchSpacer();
+        auto* saveBtn = new wxButton(this, wxID_OK, "Save Feedback && Close");
+        auto* closeBtn = new wxButton(this, wxID_CANCEL, "Close Without Saving");
+        btnSizer->Add(saveBtn, 0, wxRIGHT, 5);
+        btnSizer->Add(closeBtn, 0);
+        mainSizer->Add(btnSizer, 0, wxEXPAND | wxALL, 5);
+
+        SetSizer(mainSizer);
+        Layout();
+
+        goodBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { MarkSelected("Good"); });
+        badBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { MarkSelected("Bad"); });
+        clearBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { MarkSelected(""); });
     }
 };
 
@@ -3803,6 +3884,22 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
+    // Phase 28: family-anchored fuzzy matches - requires only a genuinely
+    // shared recognized family token (e.g. "matrix") plus numeric/side
+    // guardrails, skipping Phase 25/26/27's 0.6 token-Jaccard requirement;
+    // picks the dimensionally-closest family-anchored candidate.
+    before = after;
+    spdlog::info("QuikMap: Phase 28 - Looking for family-anchored fuzzy matches... ({} unmapped roots)", before);
+    if (dlg) dlg->Update(86, "Phase 28: Looking for family-anchored fuzzy matches...");
+    DoFamilyAnchoredFuzzy(select, "Phase 28: FamilyAnchoredFuzzy");
+    after = CountUnmappedRoots();
+    int phase28 = before - after;
+    spdlog::info("QuikMap: Phase 28 complete - {} matches found", phase28);
+    summary << wxString::Format("Phase 28: Family-anchored fuzzy matches found: %d\n", phase28);
+    if (dlg) dlg->Update(86, wxString::Format("Phase 28 complete - family-anchored fuzzy matches found: %d", phase28));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
     // Phase 30: singing-prop matches. Pairs unmapped singing props (Custom
     // models with real faceInfo NodeRange data) with each other, ahead of
     // the coarser best-guess pass.
@@ -4072,8 +4169,67 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     }
     if (!headless) {
         wxMessageBox(summary, "QuikMap Results", wxOK | wxICON_INFORMATION, this);
+        ShowQuikMapReviewWindow();
     }
     spdlog::info("QuikMap: DoQuikMap returning");
+}
+
+// QuikMap's later, less name-driven phases - the ones most worth a second
+// look. Matched against ImportMappingNode::GetMappingRule() exactly as set
+// by the corresponding DoXxx(..., ruleLabel) call in DoQuikMap.
+static const std::unordered_set<std::string> QUIKMAP_REVIEW_PHASES = {
+    "Phase 32: SingingPropBackfill",
+    "Phase 41: FloodlightBackfill",
+    "Phase 90: LikeModel",
+    "Phase 100: CustomDimension",
+    "Phase 105: ModelTypeCatchall",
+    "Phase 110: GroupMemberDimension",
+    "Phase 115: GroupMemberDimensionBackfill",
+    "Phase 120: Catchall",
+    "Phase 125: SiblingReuse",
+};
+
+void xLightsImportChannelMapDialog::ShowQuikMapReviewWindow()
+{
+    std::vector<QuikMapReviewRow> rows;
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        auto* node = _dataModel->GetNthChild(i);
+        if (node == nullptr || !node->IsMapped()) continue;
+        if (QUIKMAP_REVIEW_PHASES.count(node->GetMappingRule()) == 0) continue;
+        rows.push_back({ node, wxString("") });
+    }
+    if (rows.empty()) return;
+
+    QuikMapReviewDialog dlg(this, rows);
+    if (dlg.ShowModal() != wxID_OK) return;
+
+    int goodCount = 0, badCount = 0;
+    for (const auto& row : rows) {
+        if (row.verdict == "Good") ++goodCount;
+        else if (row.verdict == "Bad") ++badCount;
+    }
+    if (goodCount == 0 && badCount == 0) return;
+
+    wxString feedbackPath = wxFileName(xlights->CurrentDir, "QuikMapFeedback.txt").GetFullPath();
+    bool exists = FileExists(feedbackPath.ToStdString());
+    wxFile file;
+    if (!file.Open(feedbackPath, exists ? wxFile::write_append : wxFile::write)) {
+        spdlog::warn("QuikMap: failed to open feedback file {}", feedbackPath.ToStdString());
+        return;
+    }
+
+    wxString block;
+    block << "=== QuikMap Review " << wxDateTime::Now().FormatISOCombined(' ') << " (Report "
+          << AutoMapper::QUIKMAP_REPORT_VERSION << ") ===\n";
+    for (const auto& row : rows) {
+        if (row.verdict.empty()) continue;
+        block << row.verdict.Upper() << ": " << row.node->GetModelName() << " -> "
+              << wxString(row.node->GetMapping()) << " [" << row.node->GetMappingRule() << "]\n";
+    }
+    file.Write(block);
+    file.Close();
+
+    spdlog::info("QuikMap: review feedback saved - {} good, {} bad -> {}", goodCount, badCount, feedbackPath.ToStdString());
 }
 
 wxString xLightsImportChannelMapDialog::GenerateQuikMapMappedRootsReport() const
@@ -4261,6 +4417,50 @@ void xLightsImportChannelMapDialog::DoGroupContentFuzzy(bool select, const std::
     }
 
     AutoMapper::RunGroupContentFuzzy(roots, available, *xlights, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoFamilyAnchoredFuzzy(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.modelClass = ic->modelClass;
+                src.isSingingProp = ic->isSingingProp;
+                src.aliases = ic->aliases;
+                src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
+                src.width = ic->width;
+                src.height = ic->height;
+                src.depth = ic->depth;
+                src.strandCount = ic->strandCount;
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunFamilyAnchoredFuzzy(roots, available, select, selectedTargets, ruleLabel);
 }
 
 void xLightsImportChannelMapDialog::DoCustomExactDimensionMatch(bool select, const std::string& ruleLabel)
@@ -4499,6 +4699,22 @@ void xLightsImportChannelMapDialog::DoCatchAllFallback(bool select, const std::s
 
 void xLightsImportChannelMapDialog::DoSiblingReuseBackfill(bool select, const std::string& ruleLabel)
 {
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.isSingingProp = ic->isSingingProp;
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
     std::vector<ImportMappingNode*> roots;
     roots.reserve(_dataModel->GetChildCount());
     for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
@@ -4514,7 +4730,7 @@ void xLightsImportChannelMapDialog::DoSiblingReuseBackfill(bool select, const st
         }
     }
 
-    AutoMapper::RunSiblingReuseBackfill(roots, select, selectedTargets, ruleLabel);
+    AutoMapper::RunSiblingReuseBackfill(roots, available, select, selectedTargets, ruleLabel);
 }
 
 void xLightsImportChannelMapDialog::DoCustomDimensionMatch(bool select, const std::string& ruleLabel)

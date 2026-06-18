@@ -2672,6 +2672,7 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
 }
 
 void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
+                              const std::vector<AvailableSource>& available,
                               bool selectOnly,
                               const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                               const std::string& ruleLabel) {
@@ -2689,6 +2690,7 @@ void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
         auto targetBase = FuzzyBaseTokens(targetName);
         auto targetSide = FuzzySideSignature(targetName);
         if (targetBase.empty()) continue;
+        const bool targetIsSinging = model->IsSingingProp();
 
         for (auto* sibling : roots) {
             if (sibling == nullptr || sibling == model || sibling->IsGroup()) continue;
@@ -2701,6 +2703,23 @@ void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
             const std::string siblingName = sibling->GetCoreModel();
             if (FuzzyBaseTokens(siblingName) != targetBase) continue;
             if (FuzzySideSignature(siblingName) != targetSide) continue;
+
+            // A singing prop's vendor mapping carries face/mouth-movement
+            // effect data that's meaningless on a non-singing destination
+            // (and vice versa) - e.g. "FlatTree-3" (not a singing prop)
+            // must not reuse sibling "FlatTree-1"'s mapping to "Singing
+            // Tree Female" just because they share the same fuzzy base
+            // tokens/side. Keep looking for a sibling whose vendor mapping
+            // matches this destination's own singing-prop status.
+            const std::string siblingVendorName = Lower(Trim(sibling->GetMapping()));
+            bool vendorIsSinging = false;
+            for (const auto& src : available) {
+                if (Lower(Trim(src.displayName)) == siblingVendorName) {
+                    vendorIsSinging = src.isSingingProp;
+                    break;
+                }
+            }
+            if (vendorIsSinging != targetIsSinging) continue;
 
             model->Map(sibling->GetMapping(), "Model");
             model->SetMappingRule(ruleLabel);

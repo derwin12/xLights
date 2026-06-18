@@ -588,6 +588,7 @@ class xLightsImportChannelMapDialog: public wxDialog
         void LoadMappingFile(wxString const& filepath, bool hideWarnings = false);
         void AutoMap();
         void DoQuikMap(bool select, bool headless = false, wxString* outSummary = nullptr, bool detailedReport = false);
+        void ShowQuikMapReviewWindow();
         wxString GenerateQuikMapMappedRootsReport() const;
         wxString GenerateQuikMapDetailReport() const;
         void SaveXMapMapping(wxString const& filename);
