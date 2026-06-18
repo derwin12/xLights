@@ -1702,11 +1702,21 @@ void RunHVGroupMatch(const std::vector<ImportMappingNode*>& roots,
         }
         if (destOri == 0) continue;
 
+        // Corroborate the name-token guess against the destination group's
+        // own members' geometry (see ImportMappingNode::GetGroupGeometricOrientation).
+        // When the members' actual layout confidently disagrees with the
+        // name (e.g. a stale/mislabeled "...Vertical..." group whose members
+        // are really laid out horizontally), don't trust the name at all -
+        // skip this destination rather than risk a wrong-orientation match.
+        int destGeomOri = model->GetGroupGeometricOrientation();
+        if (destGeomOri != 0 && destGeomOri != destOri) continue;
+
         // Build destination token set for Jaccard scoring.
         auto destTokens = FuzzyTokens(model->GetModelName());
 
         const AvailableSource* best = nullptr;
         double bestScore = -1.0;
+        bool bestGeomConfirmed = false;
 
         for (const auto& src : available) {
             if (selectMapAvail && !src.selected) continue;
@@ -1714,6 +1724,10 @@ void RunHVGroupMatch(const std::vector<ImportMappingNode*>& roots,
             if (src.modelType != "ModelGroup") continue;
             if (used.count(Lower(Trim(src.displayName))) != 0) continue;
             if (DetectHVOrientation(src.displayName) != destOri) continue;
+            // Same constraint on the vendor side: if its members' geometry
+            // confidently disagrees with its own name-token orientation,
+            // it's not a trustworthy same-orientation candidate.
+            if (src.groupGeomOrientation != 0 && src.groupGeomOrientation != destOri) continue;
 
             // Score by Jaccard similarity of name tokens.
             auto srcTokens = FuzzyTokens(src.displayName);
@@ -1724,9 +1738,14 @@ void RunHVGroupMatch(const std::vector<ImportMappingNode*>& roots,
             int uni = static_cast<int>(destTokens.size() + srcTokens.size()) - inter;
             double score = (uni > 0) ? static_cast<double>(inter) / static_cast<double>(uni) : 0.0;
 
-            if (best == nullptr || score > bestScore) {
+            // Geometry-confirmed candidates (both sides' members agree with
+            // destOri) win ties over ones where geometry is merely unknown.
+            bool geomConfirmed = (destGeomOri == destOri) && (src.groupGeomOrientation == destOri);
+            if (best == nullptr || score > bestScore ||
+                (score == bestScore && geomConfirmed && !bestGeomConfirmed)) {
                 best = &src;
                 bestScore = score;
+                bestGeomConfirmed = geomConfirmed;
             }
         }
 

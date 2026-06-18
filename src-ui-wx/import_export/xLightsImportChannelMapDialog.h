@@ -193,6 +193,9 @@ public:
     bool IsFloodGroup() const override { return _isFloodGroup; }
     void SetFloodGroup(bool b) { _isFloodGroup = b; }
 
+    int GetGroupGeometricOrientation() const override { return _groupGeomOrientation; }
+    void SetGroupGeometricOrientation(int o) { _groupGeomOrientation = o; }
+
     std::list<std::string> GetAliases() const override {
         return _aliases;
     }
@@ -322,6 +325,7 @@ public:     // public to avoid getters/setters
     bool _isSingingProp = false;
     bool _isFloodlight = false;
     bool _isFloodGroup = false;
+    int _groupGeomOrientation = 0;
     bool _isStackDuplicate = false;
 
     // TODO/FIXME:
@@ -478,6 +482,15 @@ struct ImportChannel
     // True if this is a ModelGroup whose members are all floodlights. See
     // ImportMappingNode::IsFloodGroup.
     bool isFloodGroup = false;
+    // For a non-group model, the geometric orientation of its world-space
+    // bounding box: +1 if wider than tall (horizontal), -1 if taller than
+    // wide (vertical), 0 if roughly square/unknown. Derived from X2/Y2 for
+    // Single Line models, width/height for grid-shaped types. For a
+    // ModelGroup, the majority vote of its members' geomOrientation (0 if
+    // mixed/no majority). See AvailableSource::groupGeomOrientation and
+    // AutoMapper::RunHVGroupMatch (QuikMap Phase 18).
+    int geomOrientation = 0;
+    int groupGeomOrientation = 0;
     int nodeCount = 0;
     int strandCount = 0;
     int width = 0;

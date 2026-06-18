@@ -26,6 +26,7 @@
 #include <wx/regex.h>
 #include <wx/stdpaths.h>
 
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -896,6 +897,44 @@ bool HasFaceNodeRanges(const FaceStateData& faceInfo)
     return false;
 }
 
+// Geometric orientation from a world-space bounding box: +1 if wider than
+// tall (horizontal), -1 if taller than wide (vertical), 0 if too close to
+// square to call confidently. The 1.3x margin avoids flip-flopping on
+// near-square props (e.g. a small Custom model) that shouldn't contribute a
+// confident vote either way. Used to corroborate the name-token orientation
+// guess in AutoMapper::RunHVGroupMatch (QuikMap Phase 18) - see
+// GeometricOrientationFromMembers below for the group-level majority vote.
+int GeometricOrientationFromBox(double w, double h)
+{
+    constexpr double kMargin = 1.3;
+    w = std::abs(w);
+    h = std::abs(h);
+    if (w <= 0.0 && h <= 0.0) return 0;
+    if (w > h * kMargin) return 1;
+    if (h > w * kMargin) return -1;
+    return 0;
+}
+
+// Majority vote of a ModelGroup's member orientations (see
+// GeometricOrientationFromBox). `memberOrientation` returns a member's own
+// geomOrientation (0 if unknown - those members don't get a vote). Returns
+// +1/-1 if one orientation strictly outnumbers the other among members that
+// have an opinion, else 0 (no members had an opinion, or it's a tie).
+int GeometricOrientationFromMembers(const std::vector<std::string>& memberNames,
+                                     const std::function<int(const std::string&)>& memberOrientation)
+{
+    int horiz = 0, vert = 0;
+    for (const auto& name : memberNames) {
+        int o = memberOrientation(name);
+        if (o > 0) ++horiz;
+        else if (o < 0) ++vert;
+    }
+    if (horiz == 0 && vert == 0) return 0;
+    if (horiz > vert) return 1;
+    if (vert > horiz) return -1;
+    return 0;
+}
+
 class ShowDisplayElementsDialog : public wxDialog {
     ViewsModelsPanel* _panel;
     std::function<void()> _onUpdate;
@@ -1720,6 +1759,24 @@ void xLightsImportChannelMapDialog::AddModel(Model *m, int &ms) {
         }
     }
 
+    // For a ModelGroup, the majority geometric orientation of its members'
+    // world-space bounding boxes - see GetGroupGeometricOrientation/
+    // AutoMapper::RunHVGroupMatch (QuikMap Phase 18). Corroborates a
+    // horiz/vert name-token guess against what the members' layout actually
+    // looks like, rather than trusting the group name alone.
+    int groupGeomOrientation = 0;
+    if (m->GetDisplayAs() == DisplayAsType::ModelGroup) {
+        ModelGroup* grp = dynamic_cast<ModelGroup*>(m);
+        if (grp != nullptr) {
+            groupGeomOrientation = GeometricOrientationFromMembers(grp->ModelNames(), [&](const std::string& mn) {
+                Model* mem = xlights->GetModel(mn);
+                if (mem == nullptr) return 0;
+                auto& sl = mem->GetModelScreenLocation();
+                return GeometricOrientationFromBox(sl.GetRight() - sl.GetLeft(), sl.GetTop() - sl.GetBottom());
+            });
+        }
+    }
+
     int effectCount = 0;
     Element* em = xlights->GetSequenceElements().GetElement(m->GetName());
     if (em != nullptr) {
@@ -1741,6 +1798,7 @@ void xLightsImportChannelMapDialog::AddModel(Model *m, int &ms) {
     lastmodel->SetSingingProp(isSingingProp);
     lastmodel->SetFloodlight(isFloodlight);
     lastmodel->SetFloodGroup(isFloodGroup);
+    lastmodel->SetGroupGeometricOrientation(groupGeomOrientation);
     lastmodel->_strandCount = m->GetNumStrands();
     int bufW = 0, bufH = 0;
     m->GetBufferSize("Default", "2D", "None", bufW, bufH, 0);
@@ -4260,6 +4318,9 @@ void xLightsImportChannelMapDialog::DoHVGroupMatch(bool select, const std::strin
         src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
         if (src.canonicalName.find('/') == std::string::npos) {
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.groupGeomOrientation = ic->groupGeomOrientation;
+            }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
         available.push_back(std::move(src));
@@ -5044,6 +5105,22 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                         mm->isFloodlight = (nodesPerString == 1);
                     }
 
+                    // Geometric orientation of this vendor model's world-space
+                    // bounding box - see GeometricOrientationFromBox. Single
+                    // Line models (most members of horiz/vert groups, see
+                    // QuikMap Phase 18) store their second endpoint as a
+                    // relative X2/Y2 offset rather than a width/height; for
+                    // grid-shaped types (Custom/Cube/Matrix/Tree) mm->width/
+                    // mm->height (just computed above) already approximate
+                    // the bounding box. Other types are left at 0 (no vote).
+                    if (mm->type == XmlNodeKeys::SingleLineType) {
+                        double x2 = node.attribute(XmlNodeKeys::X2Attribute).as_double(0.0);
+                        double y2 = node.attribute(XmlNodeKeys::Y2Attribute).as_double(0.0);
+                        mm->geomOrientation = GeometricOrientationFromBox(x2, y2);
+                    } else if (mm->width > 0 || mm->height > 0) {
+                        mm->geomOrientation = GeometricOrientationFromBox(mm->width, mm->height);
+                    }
+
                     // [T:Xxx] type-hint tags in the vendor model's Description
                     // are treated as additional aliases for matching purposes.
                     std::string description = node.attribute(XmlNodeKeys::DescriptionAttribute).as_string();
@@ -5116,6 +5193,18 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                         }
                     }
                     mm->isFloodGroup = isFloodGroup;
+
+                    // Majority vote of this vendor group's members' geometric
+                    // orientation - see GeometricOrientationFromMembers and
+                    // AutoMapper::RunHVGroupMatch (QuikMap Phase 18).
+                    std::vector<std::string> memberNames;
+                    for (const auto& memberName : wxSplit(mm->groupModels, ',')) {
+                        memberNames.push_back(memberName.ToStdString());
+                    }
+                    mm->groupGeomOrientation = GeometricOrientationFromMembers(memberNames, [&](const std::string& mn) {
+                        auto member = GetImportChannel(mn);
+                        return member != nullptr ? member->geomOrientation : 0;
+                    });
                 }
             }
         }

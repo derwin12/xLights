@@ -67,6 +67,16 @@ public:
     // forced to implement it.
     virtual bool IsFloodGroup() const { return false; }
 
+    // For a ModelGroup root, the majority geometric orientation of its
+    // member models' world-space bounding boxes: +1 if most members are
+    // wider than tall (horizontal), -1 if most are taller than wide
+    // (vertical), 0 if mixed/unknown/not a group. This corroborates the
+    // name-token orientation guess in AutoMapper::RunHVGroupMatch (QuikMap
+    // Phase 18) - members are typically Single Line models, where "wider
+    // than tall" means the line's X2 displacement dominates Y2. Default 0
+    // so hosts that don't compute this aren't forced to implement it.
+    virtual int GetGroupGeometricOrientation() const { return 0; }
+
     // Structural size info for Custom models - lit node count and the
     // CustomWidth/CustomHeight grid dimensions. Default 0 (unknown) so hosts
     // that don't compute this aren't forced to implement it. Used by
@@ -137,6 +147,10 @@ struct AvailableSource {
     // True if this is a ModelGroup whose members are all floodlights (see
     // ImportMappingNode::IsFloodGroup).
     bool isFloodGroup{ false };
+    // For a ModelGroup entry, the majority geometric orientation of its
+    // member models (see ImportMappingNode::GetGroupGeometricOrientation):
+    // +1 horizontal, -1 vertical, 0 mixed/unknown/not a group.
+    int groupGeomOrientation{ 0 };
     bool selected{ false };
     // Lightweight per-source timeline summary surfaced in the import mapping UI
     // (the iPad analogue of the desktop per-row timeline column). `effectCount`

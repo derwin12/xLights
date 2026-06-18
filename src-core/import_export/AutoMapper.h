@@ -111,12 +111,26 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.12";
 //             ModelGroup root whose name or aliases contain a token starting
 //             with "horiz" or "vert" (whole-word prefix so "converts" is not
 //             a false match), matches it against an unmapped vendor ModelGroup
-//             with the same orientation. Among same-orientation candidates,
-//             the one with the highest Jaccard token overlap against the
-//             destination's name wins. See RunHVGroupMatch().
-//             e.g. dest "Horizontal Matrix" matches vendor "Horiz Strip" (both
-//             horiz) over "Vertical Arch" (vert) — orientation lock-in first,
-//             then name-token score breaks ties.
+//             with the same orientation. Both sides' name-token orientation is
+//             cross-checked against ImportMappingNode::GetGroupGeometricOrientation
+//             / AvailableSource::groupGeomOrientation - the majority vote of
+//             the group's own members' world-space bounding-box orientation
+//             (members are typically Single Line models, where the X2/Y2
+//             endpoint offset's dominant axis gives the orientation; see
+//             GeometricOrientationFromBox in the dialog). A destination or
+//             candidate whose geometry confidently *disagrees* with its own
+//             name-token orientation is rejected outright (the name is
+//             assumed stale/mislabeled); among remaining same-orientation
+//             candidates, the one with the highest Jaccard token overlap
+//             against the destination's name wins, with geometry-confirmed
+//             candidates (both sides' members agree with the chosen
+//             orientation) breaking ties over geometry-unknown ones. See
+//             RunHVGroupMatch().
+//             e.g. dest "Horizontal Matrix" (members' bounding boxes
+//             confirm wider-than-tall) matches vendor "Horiz Strip" (both
+//             horiz, geometry-confirmed) over "Vertical Arch" (vert) —
+//             orientation lock-in first, then geometry-confirmed/name-token
+//             score breaks ties.
 //
 //   Phase 20: Submodel/strand fallback matches by name or alias, matching
 //             submodels of unmapped models only against non-group available
