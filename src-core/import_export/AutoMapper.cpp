@@ -601,6 +601,97 @@ void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
     }
 }
 
+void RunFamilyAnchoredFuzzy(const std::vector<ImportMappingNode*>& roots,
+                            const std::vector<AvailableSource>& available,
+                            bool selectOnly,
+                            const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                            const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Seed "used" with anything already mapped so this pass doesn't hand out
+    // a source another phase already used.
+    std::unordered_set<std::string> used;
+    for (auto* r : roots) {
+        if (r != nullptr && !r->GetMapping().empty()) used.insert(Lower(Trim(r->GetMapping())));
+    }
+
+    for (auto* model : roots) {
+        if (model == nullptr || model->IsSkipped()) continue;
+        if (!model->GetMapping().empty()) continue;
+        if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+
+        const std::string targetName = model->GetCoreModel();
+        auto targetFamilies = EffectiveModelFamilies(targetName, model->GetAliases());
+        // No recognized family token on the destination - nothing to anchor
+        // a relaxed-Jaccard match on, so leave it for the catch-all phases.
+        if (targetFamilies.empty()) continue;
+
+        auto targetNum = FuzzyNumericSignature(targetName);
+        auto targetSide = FuzzySideSignature(targetName);
+        const int targetNodes = model->GetNodeCount();
+        const int targetWidth = model->GetWidth();
+        const int targetHeight = model->GetHeight();
+        const double targetAspect = (targetWidth > 0 && targetHeight > 0)
+            ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
+            : 0.0;
+        const std::string targetType = Lower(Trim(model->GetModelType()));
+
+        const AvailableSource* best = nullptr;
+        double bestScore = 0.0;
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (used.count(Lower(Trim(src.displayName))) != 0) continue;
+            bool srcIsGroup = (src.modelType == "ModelGroup");
+            if (srcIsGroup != model->IsGroup()) continue;
+
+            // The anchor: a genuinely shared recognized family token (e.g.
+            // "matrix"), not just FamiliesCompatible's permissive-when-empty
+            // rule - this is what lets this phase skip the strict overall
+            // token-Jaccard requirement that Phase 25/26/27 still enforce.
+            auto srcFamilies = EffectiveModelFamilies(src.displayName, src.aliases);
+            bool sharedFamily = false;
+            for (const auto& f : targetFamilies) {
+                if (srcFamilies.count(f)) { sharedFamily = true; break; }
+            }
+            if (!sharedFamily) continue;
+
+            // Same numeric/side guardrails as MatchFuzzy - a shared family
+            // token doesn't override an explicit conflicting number/side
+            // (e.g. "Arch 1" must still not match a vendor "Arch 5").
+            auto srcNum = FuzzyNumericSignature(src.displayName);
+            if (!targetNum.empty() && !srcNum.empty() && targetNum != srcNum) continue;
+            auto srcSide = FuzzySideSignature(src.displayName);
+            if (!targetSide.empty() && !srcSide.empty() && targetSide != srcSide) continue;
+
+            // Among family-anchored candidates, prefer the one that's
+            // dimensionally closest rather than the one whose number happens
+            // to textually coincide - a vendor's own enumeration (e.g.
+            // "Matrix 2") has no real relationship to the destination's
+            // numbering scheme, but node-count/aspect similarity does
+            // reflect whether they're actually the same physical prop.
+            double score = GroupMemberDimensionScore(targetNodes, targetWidth, targetHeight, targetAspect, targetType, src);
+            if (best == nullptr || score < bestScore) {
+                best = &src;
+                bestScore = score;
+            }
+        }
+
+        if (best != nullptr) {
+            model->Map(best->displayName, best->modelType);
+            model->SetMappingRule(ruleLabel);
+            used.insert(Lower(Trim(best->displayName)));
+        }
+    }
+}
+
 void Run(const std::vector<ImportMappingNode*>& roots,
          const std::vector<AvailableSource>& available,
          RenderContext& renderContext,
@@ -2480,21 +2571,37 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
                 if (model->GetDepth() != src.depth) continue;
             }
 
-            // A "Line"-class model (Single Line, Poly Line, Arches, Candy
-            // Canes, Circle, Window Frame - see Model::DetermineClass) is a
-            // 1D string/path of nodes; it must never be paired with a
-            // genuine 2D grid (a Custom/Matrix model with both a width and a
-            // height > 1) and vice versa - e.g. "Driveway - 01L" (a Poly
-            // Line, class "Line") must not steal "Matrix 2" (a grid) just
-            // because this catch-all otherwise ignores type/name. Checked
-            // via modelClass rather than a literal type-string match so it
-            // covers every "Line"-classified display type, not just
-            // "Single Line".
-            bool modelIsLine = model->GetModelClass() == "Line";
-            bool srcIsLine = src.modelClass == "Line";
+            // A line-like prop (a 1D string/path of nodes) must never be
+            // paired with a genuine 2D grid (both width and height > 1) and
+            // vice versa - e.g. "Driveway - 01L" must not steal "Matrix 2"
+            // (a grid) just because this catch-all otherwise ignores
+            // type/name. "Line-like" is modelClass == "Line" (Single Line,
+            // Poly Line, Arches, Candy Canes, Circle, Window Frame - see
+            // Model::DetermineClass) OR - since many outline/edge props
+            // (e.g. a driveway strip) are actually built as a "Custom" model
+            // with no recognized class - any model with known dimensions
+            // that isn't itself a 2D grid (e.g. a 1-pixel-tall, N-pixel-wide
+            // Custom strip). Permissive (neither line-like nor grid) when
+            // dimensions are unknown on a side with no recognized class, same
+            // as the family guard above.
             bool modelIsGrid = targetWidth > 1 && targetHeight > 1;
             bool srcIsGrid = src.width > 1 && src.height > 1;
+            bool modelHasDims = targetWidth > 0 && targetHeight > 0;
+            bool srcHasDims = src.width > 0 && src.height > 0;
+            bool modelIsLine = model->GetModelClass() == "Line" || (modelHasDims && !modelIsGrid);
+            bool srcIsLine = src.modelClass == "Line" || (srcHasDims && !srcIsGrid);
             if ((modelIsLine && srcIsGrid) || (srcIsLine && modelIsGrid)) continue;
+
+            // Different recognized model classes (e.g. "Line" vs "Matrix")
+            // are never compatible, regardless of reported width/height -
+            // the dimension-based check above can be fooled by a vendor
+            // "Horiz Matrix"/"Vert Matrix" configured with NumStrings=1
+            // (e.g. "Matrix 2": parm1=1, parm2=300 -> width=1, height=300),
+            // which is numerically a 1xN strip indistinguishable from a
+            // Single Line model even though it's a different *kind* of prop.
+            // Permissive when either side has no recognized class (most
+            // Custom models), same spirit as the family guard below.
+            if (!model->GetModelClass().empty() && !src.modelClass.empty() && model->GetModelClass() != src.modelClass) continue;
 
             // Family guardrail - same as Phase 100/110/115: e.g. a "star"-
             // family vendor model (recognized via FuzzyModelFamilies) must

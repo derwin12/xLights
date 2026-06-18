@@ -744,6 +744,7 @@ protected:
             bool allowSharedSource = false);
         void DoSubModelFallback(bool select, const std::string& ruleLabel = "");
         void DoGroupContentFuzzy(bool select, const std::string& ruleLabel = "");
+        void DoFamilyAnchoredFuzzy(bool select, const std::string& ruleLabel = "");
         void DoCustomExactDimensionMatch(bool select, const std::string& ruleLabel = "");
         void DoCustomSubmodelOverlapMatch(bool select, const std::string& ruleLabel = "");
         void DoEverythingGroupMatch(bool select, const std::string& ruleLabel = "");

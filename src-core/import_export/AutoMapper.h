@@ -178,6 +178,32 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.13";
 //             "Mega Tree" (a plain model) only if no group<->group or
 //             model<->model candidate was found in Phase 25/26.
 //
+//   Phase 28: Family-anchored fuzzy match - for anything still unmapped
+//             after Phase 27, requires only a genuinely shared recognized
+//             family token (FuzzyModelFamilies, e.g. "matrix", "cane",
+//             "star" - not FamiliesCompatible's permissive-when-empty rule)
+//             plus the same numeric/side-signature guardrails as MatchFuzzy,
+//             but does *not* require the 0.6 overall token-Jaccard score
+//             Phase 25/26/27 do. Strictly same-kind (model<->model or
+//             group<->group). Exists because a strong, distinctive family
+//             word is sometimes a better signal than raw name similarity: a
+//             fused number+side suffix (e.g. "2R") or an extra descriptive
+//             word (e.g. "Garage", "Seeds") can tank the Jaccard score even
+//             though the family match is solid. Among the family-anchored
+//             candidates, picks the dimensionally-closest one
+//             (GroupMemberDimensionScore) - the vendor's own numbering
+//             doesn't necessarily correspond to the destination's, but
+//             node-count/aspect similarity reflects whether they're actually
+//             the same physical prop. See RunFamilyAnchoredFuzzy().
+//             e.g. dest "Matrix-mini-left" (family "matrix", 2 strings x 300
+//             nodes/string) fuzzy-matches vendor "Matrix 2" (family
+//             "matrix", 1 string x 300 nodes/string) - below the 0.6 Jaccard
+//             threshold against "matrix 2"'s bare two tokens, but the
+//             shared "matrix" family plus near-identical node-per-string
+//             count make it the best candidate, ahead of "Matrix - 2R" (2 x
+//             768 nodes/string - matching family but a far worse dimension
+//             fit) or "Matrix Seeds" (a Custom grid, ~726 nodes total).
+//
 //   Phase 30: Singing-prop matches - pairs unmapped destination roots that
 //             are real singing props with unmapped singing-prop vendor
 //             models. See RunSingingProp().
@@ -341,16 +367,20 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.13";
 //             an unrelated still-unmapped Custom model could steal a vendor
 //             source that was a much better fit for a different still-
 //             unmapped destination, purely because of root iteration order.
-//             A "Line"-class model (modelClass == "Line" - Single Line, Poly
-//             Line, Arches, Candy Canes, Circle, Window Frame; see
-//             Model::DetermineClass) and a genuine 2D grid (a Custom/Matrix
-//             model with both width and height > 1) are never paired,
-//             regardless of family - checked via modelClass rather than a
-//             literal type-string match so it covers every "Line"-classified
-//             display type, not just "Single Line". Among the remaining
-//             candidates, picks the dimensionally-closest one
-//             (GroupMemberDimensionScore) rather than just the first one
-//             found. See RunCatchAll().
+//             A line-like prop (a 1D string/path of nodes) and a genuine 2D
+//             grid (both width and height > 1) are never paired, regardless
+//             of family. "Line-like" is modelClass == "Line" (Single Line,
+//             Poly Line, Arches, Candy Canes, Circle, Window Frame; see
+//             Model::DetermineClass) OR - since many outline/edge props are
+//             actually built as a "Custom" model with no recognized class,
+//             e.g. a driveway strip - any model with known dimensions that
+//             isn't itself a 2D grid (a 1-pixel-tall, N-pixel-wide Custom
+//             strip counts as line-like even though its modelClass is
+//             empty). Permissive when dimensions are unknown and there's no
+//             recognized class, same spirit as the family guard above.
+//             Among the remaining candidates, picks the dimensionally-
+//             closest one (GroupMemberDimensionScore) rather than just the
+//             first one found. See RunCatchAll().
 //             e.g. dest "PropX" (type "Tree 360") is still unmapped after
 //             all earlier phases; vendor "LeftoverA" (also "Tree 360") is
 //             also still unmapped → paired by kind, with no name check, but
@@ -360,10 +390,17 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.13";
 //             "Matrix 2" (family "matrix") is still unmapped → only "Matrix
 //             Seeds" is family-compatible with it, so "3D Star" can no
 //             longer steal it regardless of iteration order.
-//             e.g. dest "Driveway - 01L" (a Poly Line, modelClass "Line")
-//             must not match vendor "Matrix 2" (a 2D grid) even though
-//             neither has a recognized family token - the line/grid shape
-//             guard (by modelClass, not the literal "Poly Line" string)
+//             Also gated by a plain modelClass-mismatch check (different
+//             non-empty classes, e.g. "Line" vs. "Matrix", are never
+//             compatible) since the dimension-based check can be fooled: a
+//             vendor "Horiz Matrix"/"Vert Matrix" configured with
+//             NumStrings=1 reports width=1/height=N, numerically identical
+//             to a Single Line model.
+//             e.g. dest "Driveway - 01L" (DisplayAs "Single Line", modelClass
+//             "Line") must not match vendor "Matrix 2" (DisplayAs "Horiz
+//             Matrix" with NumStrings=1, modelClass "Matrix") - the
+//             dimension check alone can't tell them apart (both report as a
+//             1xN strip), but the modelClass mismatch ("Line" vs "Matrix")
 //             blocks it outright.
 //
 //   Phase 125: Sibling-reuse backfill - for each destination root that is
@@ -433,6 +470,22 @@ void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
                           bool selectOnly,
                           const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                           const std::string& ruleLabel = "");
+
+// Family-anchored fuzzy match pass (QuikMap Phase 28), run after Phase 27.
+// For each destination root that is still unmapped, not skipped, and has at
+// least one recognized FuzzyModelFamilies token, finds the still-unmapped,
+// same-kind (model<->model or group<->group) vendor source with a
+// genuinely shared family token (not just FamiliesCompatible's permissive-
+// when-empty rule) whose numeric/side signature doesn't conflict (same
+// guardrails as MatchFuzzy) - skipping MatchFuzzy's >= 0.6 overall token-
+// Jaccard requirement entirely. Among the candidates that pass, picks the
+// dimensionally-closest one via GroupMemberDimensionScore. See the QuikMap
+// Phase 28 doc comment above for the full rationale and a worked example.
+void RunFamilyAnchoredFuzzy(const std::vector<ImportMappingNode*>& roots,
+                            const std::vector<AvailableSource>& available,
+                            bool selectOnly,
+                            const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                            const std::string& ruleLabel = "");
 
 // Constrains the bare-model match in Run() by whether the destination root
 // and the candidate source are the same "kind" (model vs. ModelGroup).
