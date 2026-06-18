@@ -10,8 +10,11 @@
 --   3. Saves the QuikMap channel mapping as "<name>.xmap" in QuikMapResults\
 --      so it can be reloaded directly for future imports of the same vendor.
 --   4. Saves the result sequence as "<name>_QuikMap.xsq" in QuikMapResults\.
---   5. Appends the QuikMap phase summary + detailed per-node mapping report
---      (target -> mapped source [rule]) to a single log file.
+--   5. Writes the QuikMap phase summary + detailed per-node mapping report
+--      (target -> mapped source [rule]) to its own "<name>_QuikMapReport.log"
+--      file in QuikMapResults\, so each source sequence gets a dedicated,
+--      uniquely-named report instead of all runs being appended into one
+--      shared log.
 --
 -- NOTE: this closes whatever sequence you currently have open (without
 -- saving any unsaved changes - force-closed) and leaves the last generated
@@ -20,7 +23,6 @@
 
 local sourceFolder = [[F:\ShowFolderQA\TestImports]]
 local outputFolder = sourceFolder .. [[\QuikMapResults]]
-local logFile = outputFolder .. [[\QuikMapReport.log]]
 
 local listResult = RunCommand('listSequences', { folder = sourceFolder })
 if listResult == nil or listResult['sequences'] == nil then
@@ -30,19 +32,24 @@ end
 
 os.execute('mkdir "' .. outputFolder .. '"')
 
-local log = io.open(logFile, 'w')
-if log == nil then
-    ShowMessage('Could not open log file for writing: ' .. logFile)
-    return
-end
-
 local count = 0
+local lastLogFile = nil
 for _, seq in pairs(listResult['sequences']) do
     local path = seq['path']
     local ext = (path:match('%.([^.]+)$') or ''):lower()
     if ext == 'zip' or ext == 'xsqz' or ext == 'piz' or ext == 'xsq' then
         count = count + 1
         Log('QuikMap import pass: ' .. path)
+
+        local outName = path:match('([^\\/]+)%.[^.]+$') or ('sequence_' .. tostring(count))
+        local logFile = outputFolder .. '\\' .. outName .. '_QuikMapReport.log'
+        lastLogFile = logFile
+
+        local log = io.open(logFile, 'w')
+        if log == nil then
+            Log('Could not open log file for writing: ' .. logFile)
+            goto continue
+        end
 
         log:write('==================================================\n')
         log:write('Source: ' .. path .. '\n')
@@ -68,10 +75,10 @@ for _, seq in pairs(listResult['sequences']) do
         })
         if newResult == nil or newResult['res'] ~= 200 then
             log:write('FAILED to create new sequence: ' .. (newResult and newResult['msg'] or 'unknown error') .. '\n\n')
+            log:close()
             goto continue
         end
 
-        local outName = path:match('([^\\/]+)%.[^.]+$') or ('sequence_' .. tostring(count))
         local mapPath = outputFolder .. '\\' .. outName .. '.xmap'
 
         local result = RunCommand('importXLightsSequence', {
@@ -84,6 +91,7 @@ for _, seq in pairs(listResult['sequences']) do
 
         if result == nil or result['worked'] ~= 'true' then
             log:write('FAILED to import: ' .. (result and result['msg'] or 'unknown error') .. '\n\n')
+            log:close()
             goto continue
         end
 
@@ -98,11 +106,12 @@ for _, seq in pairs(listResult['sequences']) do
             log:write('Saved: ' .. outPath .. '\n\n')
         end
 
+        log:close()
+
         ::continue::
     end
 end
 
-log:close()
-
 ShowMessage('QuikMap batch import complete for ' .. count .. ' file(s).\n\nResults saved to:\n' .. outputFolder ..
-    '\n\nReport written to:\n' .. logFile)
+    '\n\nEach sequence has its own "<name>_QuikMapReport.log" in that folder.' ..
+    (lastLogFile and ('\n\nMost recent report:\n' .. lastLogFile) or ''))

@@ -128,7 +128,7 @@ const std::unordered_set<std::string> FUZZY_STOPWORDS = {
 // Token -> canonical family name. A name can belong to multiple families.
 const std::vector<std::pair<std::string, std::unordered_set<std::string>>> FUZZY_FAMILY_KEYWORDS = {
     { "cane", { "cane", "candycane" } },
-    { "tree", { "tree", "mega", "flaketree" } },
+    { "tree", { "tree", "mega", "flaketree", "megatree" } },
     { "star", { "star", "stickstar", "stick" } },
     { "snowflake", { "flake", "snowflake" } },
     { "arch", { "arch", "arches" } },
@@ -189,12 +189,28 @@ const std::set<std::pair<std::string, std::string>> FUZZY_INCOMPATIBLE_FAMILIES 
 };
 
 // Lowercase, replace separators with spaces, strip anything that isn't
-// alphanumeric/space, then collapse whitespace.
+// alphanumeric/space, then collapse whitespace. Also splits a camelCase word
+// boundary (an uppercase letter immediately following a lowercase letter or
+// digit) into a space, so a compound name with no real separator - e.g.
+// "MegaTree", "MiniTree1Star", "GarageSnowFlakeLeft" - still tokenizes into
+// its component words ("mega tree", "mini tree1 star", "garage snow flake
+// left"). Without this, family keywords too short for the substring-fallback
+// below (e.g. "star"/"tree"/"mega", all under 5 chars) can never match inside
+// such a compound, and side tags like "left"/"l" never get recognized either.
 std::string FuzzyNormalize(const std::string& in) {
     std::string out;
-    out.reserve(in.size());
+    out.reserve(in.size() + 8);
     bool lastWasSpace = false;
+    char prevOrig = '\0';
     for (char c : in) {
+        bool isUpper = (c >= 'A' && c <= 'Z');
+        bool prevLowerOrDigit = (prevOrig >= 'a' && prevOrig <= 'z') || (prevOrig >= '0' && prevOrig <= '9');
+        if (isUpper && prevLowerOrDigit && !out.empty() && !lastWasSpace) {
+            out.push_back(' ');
+            lastWasSpace = true;
+        }
+        prevOrig = c;
+
         char lc = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (lc == ' ' || lc == '_' || lc == '-' || lc == '/') {
             lc = ' ';
@@ -358,21 +374,31 @@ bool FamiliesCompatible(const std::unordered_set<std::string>& fa, const std::un
 // ParseTypeHintAliases) and real aliases broaden a model's recognized
 // families for family-compatibility checks, exactly as if the model had
 // been named after the hint/alias.
-std::unordered_set<std::string> EffectiveModelFamilies(const std::string& name, const std::vector<std::string>& aliases) {
+std::unordered_set<std::string> EffectiveModelFamilies(const std::string& name, const std::vector<std::string>& aliases,
+                                                         const std::string& displayType = "") {
     auto families = FuzzyModelFamilies(name);
     for (const auto& alias : aliases) {
         auto aliasFamilies = FuzzyModelFamilies(alias);
         families.insert(aliasFamilies.begin(), aliasFamilies.end());
     }
+    // Structural fallback: a name-token miss (e.g. "MegaTree" with no space,
+    // which doesn't exactly match the "tree"/"mega" keywords) shouldn't leave
+    // a real spinning tree with no recognized family at all - that makes
+    // FamiliesCompatible's permissive-when-empty rule treat it as compatible
+    // with literally anything. AutoMapper::IsTreeLikeModel checks the actual
+    // DisplayAs value, independent of name tokenization.
+    if (AutoMapper::IsTreeLikeModel(displayType)) families.insert("tree");
     return families;
 }
 
-std::unordered_set<std::string> EffectiveModelFamilies(const std::string& name, const std::list<std::string>& aliases) {
+std::unordered_set<std::string> EffectiveModelFamilies(const std::string& name, const std::list<std::string>& aliases,
+                                                         const std::string& displayType = "") {
     auto families = FuzzyModelFamilies(name);
     for (const auto& alias : aliases) {
         auto aliasFamilies = FuzzyModelFamilies(alias);
         families.insert(aliasFamilies.begin(), aliasFamilies.end());
     }
+    if (AutoMapper::IsTreeLikeModel(displayType)) families.insert("tree");
     return families;
 }
 
@@ -477,6 +503,20 @@ bool IsTreeLikeModel(const std::string& displayType) {
     // format (grouping it under the same "Matrix" modelClass as a real
     // Horiz/Vert Matrix panel) and leaves the new bare "Tree" unclassified.
     return displayType == "Tree" || StartsWith(displayType, "Tree ");
+}
+
+bool IsMegaTreeModel(const std::string& displayType, int nodeCount) {
+    // A spinning "mega tree" (e.g. 16+ strands x hundreds of nodes each) is a
+    // fundamentally different physical prop from a small decorative tree
+    // (e.g. a single-strand "flat"/ribbon tree with the same or even longer
+    // per-strand pixel run) - matching one to the other produces a nonsense
+    // effect mapping even though both pass IsTreeLikeModel. Total node count
+    // (NumStrings x NodesPerString) is the reliable discriminator here, not
+    // strand length alone: a "FlatTree" can have NodesPerString=80 (over a
+    // naive per-strand-length threshold) but only 1 strand, 80 nodes total,
+    // while a real mega tree's per-strand length is similar but multiplied
+    // across many strands into the thousands.
+    return IsTreeLikeModel(displayType) && nodeCount >= 1000;
 }
 
 bool IsMatrixLikeModel(const std::string& modelClass, const std::string& displayType, int width, int height, int nodeCount, int depth, bool isGroup) {
@@ -718,6 +758,16 @@ void RunFamilyAnchoredFuzzy(const std::vector<ImportMappingNode*>& roots,
         selectMapTarget = !selectedTargets.empty();
     }
 
+    // Debug dump: every tree-like vendor source and destination root this
+    // phase can see (by name/type, regardless of mapped/skipped/selected
+    // state), with its node count and IsMegaTreeModel verdict, so a QuikMap
+    // run's spdlog log shows exactly which trees were/weren't classified as
+    // a mega tree when reviewing a family-anchored fuzzy match.
+    std::vector<std::string> megaTreeSourceLines, megaTreeDestinationLines;
+    DescribeMegaTreeCandidates(roots, available, megaTreeSourceLines, megaTreeDestinationLines);
+    for (const auto& line : megaTreeSourceLines) spdlog::info("QuikMap {}: source mega-tree candidate {}", ruleLabel, line);
+    for (const auto& line : megaTreeDestinationLines) spdlog::info("QuikMap {}: destination mega-tree candidate {}", ruleLabel, line);
+
     // Seed "used" with anything already mapped so this pass doesn't hand out
     // a source another phase already used.
     std::unordered_set<std::string> used;
@@ -731,7 +781,7 @@ void RunFamilyAnchoredFuzzy(const std::vector<ImportMappingNode*>& roots,
         if (selectMapTarget && selectedTargets.count(model) == 0) continue;
 
         const std::string targetName = model->GetCoreModel();
-        auto targetFamilies = EffectiveModelFamilies(targetName, model->GetAliases());
+        auto targetFamilies = EffectiveModelFamilies(targetName, model->GetAliases(), model->GetModelType());
         // No recognized family token on the destination - nothing to anchor
         // a relaxed-Jaccard match on, so leave it for the catch-all phases.
         if (targetFamilies.empty()) continue;
@@ -763,11 +813,30 @@ void RunFamilyAnchoredFuzzy(const std::vector<ImportMappingNode*>& roots,
             // pass below (RunLikeModelBackfill).
             if (src.isSingingProp != targetIsSinging) continue;
 
+            // A "mega tree" (IsMegaTreeModel, total node count >= 1000) must
+            // not match a small decorative tree and vice versa, even though
+            // both anchor on the shared "tree" family token below - e.g.
+            // "FlatTree-1" (1 strand x 80 nodes) must not match vendor
+            // "MegaTree" (32 strands x 400 nodes) just because both are
+            // IsTreeLikeModel.
+            if (IsTreeLikeModel(model->GetModelType()) && IsTreeLikeModel(src.displayType) &&
+                IsMegaTreeModel(model->GetModelType(), model->GetNodeCount()) != IsMegaTreeModel(src.displayType, src.nodeCount)) continue;
+
+            // A native Star model (DisplayAs="Star", e.g. a tree's star-
+            // topper "FlatTreeStar-N") must never match a Tree-classified
+            // vendor source, or vice versa - the destination name often
+            // contains "Tree" (it's named after its parent tree), which
+            // gives it the "tree" family token too and lets it anchor
+            // against a vendor tree below, but DisplayAs is unambiguous and
+            // always wins over an incidental name token.
+            if ((model->GetModelType() == "Star" && IsTreeLikeModel(src.displayType)) ||
+                (IsTreeLikeModel(model->GetModelType()) && src.displayType == "Star")) continue;
+
             // The anchor: a genuinely shared recognized family token (e.g.
             // "matrix"), not just FamiliesCompatible's permissive-when-empty
             // rule - this is what lets this phase skip the strict overall
             // token-Jaccard requirement that Phase 25/26/27 still enforce.
-            auto srcFamilies = EffectiveModelFamilies(src.displayName, src.aliases);
+            auto srcFamilies = EffectiveModelFamilies(src.displayName, src.aliases, src.displayType);
             bool sharedFamily = false;
             for (const auto& f : targetFamilies) {
                 if (srcFamilies.count(f)) { sharedFamily = true; break; }
@@ -1707,6 +1776,30 @@ void DescribeSnowflakeCandidates(const std::vector<ImportMappingNode*>& roots,
     }
 }
 
+void DescribeMegaTreeCandidates(const std::vector<ImportMappingNode*>& roots,
+                                const std::vector<AvailableSource>& available,
+                                std::vector<std::string>& outSourceLines,
+                                std::vector<std::string>& outDestinationLines) {
+    for (const auto& src : available) {
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (src.modelType == "ModelGroup") continue;
+        if (!IsTreeLikeModel(src.displayType)) continue;
+        bool mega = IsMegaTreeModel(src.displayType, src.nodeCount);
+        outSourceLines.push_back(fmt::format("{}'{}' (type={}, nodeCount={}, mega={})",
+                                              mega ? "**MEGA TREE** " : "", src.displayName, src.displayType,
+                                              src.nodeCount, mega));
+    }
+    for (auto* model : roots) {
+        if (model == nullptr || model->IsSkipped() || model->IsGroup()) continue;
+        if (!IsTreeLikeModel(model->GetModelType())) continue;
+        bool mega = IsMegaTreeModel(model->GetModelType(), model->GetNodeCount());
+        outDestinationLines.push_back(fmt::format("{}'{}' (type={}, nodeCount={}, mega={}, mapped={}, skipped={})",
+                                                    mega ? "**MEGA TREE** " : "", model->GetCoreModel(), model->GetModelType(),
+                                                    model->GetNodeCount(), mega,
+                                                    !model->GetMapping().empty(), model->IsSkipped()));
+    }
+}
+
 void RunMatrixBackfill(const std::vector<ImportMappingNode*>& roots,
                        const std::vector<AvailableSource>& available,
                        bool selectOnly,
@@ -1804,6 +1897,158 @@ void RunMatrixBackfill(const std::vector<ImportMappingNode*>& roots,
             model->Map(chosen->displayName, chosen->modelType);
             model->SetMappingRule(ruleLabel);
             ++useCount[chosen];
+        }
+    }
+}
+
+namespace {
+
+// Classifies a destination root into one of the three structural/name
+// families recognized elsewhere in QuikMap, or "" if it's none of them.
+std::string ClassifyDestinationFamily(ImportMappingNode* node) {
+    if (node == nullptr) return std::string();
+    if (IsMatrixLikeModel(node->GetModelClass(), node->GetModelType(), node->GetWidth(), node->GetHeight(), node->GetNodeCount(), node->GetDepth(), node->IsGroup())) return "matrix";
+    if (IsAStarModel(node->GetCoreModel(), node->IsGroup())) return "star";
+    if (IsASnowflakeModel(node->GetCoreModel(), node->IsGroup())) return "snowflake";
+    return std::string();
+}
+
+// Same classification for a vendor AvailableSource.
+std::string ClassifySourceFamily(const AvailableSource& src) {
+    bool isGroup = (src.modelType == "ModelGroup");
+    if (IsMatrixLikeModel(src.modelClass, src.displayType, src.width, src.height, src.nodeCount, src.depth, isGroup)) return "matrix";
+    if (IsAStarModel(src.displayName, isGroup)) return "star";
+    if (IsASnowflakeModel(src.displayName, isGroup)) return "snowflake";
+    return std::string();
+}
+
+// Classifies one member of a live ModelGroup by name. Prefers the member's
+// own ImportMappingNode root (if it's tracked as one in `roots`) so matrix
+// classification - which needs structural data, not just a name - is
+// possible; falls back to a name-only star/snowflake check (the only
+// families with a name-only signal) when the member isn't a tracked root.
+std::string ClassifyGroupMemberFamily(const std::string& memberName,
+                                       const std::unordered_map<std::string, ImportMappingNode*>& rootByName) {
+    auto it = rootByName.find(Lower(Trim(memberName)));
+    if (it != rootByName.end()) {
+        std::string f = ClassifyDestinationFamily(it->second);
+        if (!f.empty()) return f;
+    }
+    if (IsAStarModel(memberName, false)) return "star";
+    if (IsASnowflakeModel(memberName, false)) return "snowflake";
+    return std::string();
+}
+
+} // namespace
+
+void RunFamilyGroupBackfill(const std::vector<ImportMappingNode*>& roots,
+                            const std::vector<AvailableSource>& available,
+                            RenderContext& renderContext,
+                            bool selectOnly,
+                            const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                            const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    std::unordered_map<std::string, ImportMappingNode*> rootByName;
+    for (auto* r : roots) {
+        if (r != nullptr) rootByName[Lower(Trim(r->GetCoreModel()))] = r;
+    }
+
+    // Confirm a family is actually present in this layout by finding at
+    // least one still-unmapped destination group whose live members are all
+    // the same family - a stronger signal than any single name/structure
+    // guess, used to gate the broader backfill below.
+    std::unordered_set<std::string> confirmedFamilies;
+    for (auto* model : roots) {
+        if (model == nullptr || !model->IsGroup() || model->IsSkipped()) continue;
+        if (!model->GetMapping().empty()) continue;
+
+        Model* layoutModel = renderContext.GetModel(model->GetCoreModel());
+        auto* grp = dynamic_cast<ModelGroup*>(layoutModel);
+        if (grp == nullptr) continue;
+        auto memberNames = grp->ModelNames();
+        if (memberNames.size() < 2) continue;
+
+        std::string family;
+        bool homogeneous = true;
+        for (const auto& memberName : memberNames) {
+            std::string f = ClassifyGroupMemberFamily(memberName, rootByName);
+            if (f.empty()) { homogeneous = false; break; }
+            if (family.empty()) family = f;
+            else if (family != f) { homogeneous = false; break; }
+        }
+        if (homogeneous && !family.empty()) confirmedFamilies.insert(family);
+    }
+    if (confirmedFamilies.empty()) return;
+
+    for (const auto& family : confirmedFamilies) {
+        std::vector<const AvailableSource*> pool;
+        for (const auto& src : available) {
+            if (selectMapAvail && !src.selected) continue;
+            if (src.canonicalName.find('/') != std::string::npos) continue;
+            if (ClassifySourceFamily(src) != family) continue;
+            pool.push_back(&src);
+        }
+        if (pool.empty()) continue;
+
+        // Names already claimed by an earlier phase start "used" so an
+        // actually-unclaimed source is preferred first, same pattern as
+        // Phase 93's matrix pool.
+        std::unordered_map<const AvailableSource*, int> useCount;
+        for (auto* src : pool) {
+            bool alreadyUsed = false;
+            for (auto* m : roots) {
+                if (m == nullptr || m->GetMapping().empty()) continue;
+                if (Lower(Trim(m->GetMapping())) == Lower(Trim(src->displayName))) { alreadyUsed = true; break; }
+            }
+            useCount[src] = alreadyUsed ? 1 : 0;
+        }
+
+        for (auto* model : roots) {
+            if (model == nullptr || model->IsSkipped()) continue;
+            if (!model->GetMapping().empty()) continue;
+            if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+            if (ClassifyDestinationFamily(model) != family) continue;
+
+            const int targetNodes = model->GetNodeCount();
+            const int targetWidth = model->GetWidth();
+            const int targetHeight = model->GetHeight();
+            const double targetAspect = (targetWidth > 0 && targetHeight > 0)
+                ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
+                : 0.0;
+            const std::string targetType = Lower(Trim(model->GetModelType()));
+
+            const AvailableSource* best = nullptr;
+            double bestScore = 0.0;
+            const AvailableSource* bestUnused = nullptr;
+            double bestUnusedScore = 0.0;
+            for (const auto* src : pool) {
+                bool srcIsGroup = (src->modelType == "ModelGroup");
+                if (srcIsGroup != model->IsGroup()) continue;
+                double score = GroupMemberDimensionScore(targetNodes, targetWidth, targetHeight, targetAspect, targetType, *src);
+                if (best == nullptr || score < bestScore) {
+                    best = src;
+                    bestScore = score;
+                }
+                if (useCount[src] == 0 && (bestUnused == nullptr || score < bestUnusedScore)) {
+                    bestUnused = src;
+                    bestUnusedScore = score;
+                }
+            }
+
+            const AvailableSource* chosen = bestUnused != nullptr ? bestUnused : best;
+            if (chosen != nullptr) {
+                model->Map(chosen->displayName, chosen->modelType);
+                model->SetMappingRule(ruleLabel);
+                ++useCount[chosen];
+            }
         }
     }
 }
@@ -2517,7 +2762,7 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                 ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
                 : 0.0;
             const std::string targetType = Lower(Trim(model->GetModelType()));
-            const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases());
+            const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases(), model->GetModelType());
 
             const AvailableSource* best = nullptr;
             double bestScore = 0.0;
@@ -2528,13 +2773,77 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                 if (used.count(Lower(Trim(src.displayName))) != 0) continue;
                 if (vendorMembers.count(Lower(Trim(src.displayName))) == 0) continue;
 
+                // 3D models (depth > 1) must not match flat models and vice
+                // versa - same guard as Phase 120's RunCatchAllFallback.
+                // Without this, a volumetric Custom model (e.g. a Cube-shaped
+                // "MediumPresent-N", CubeDepth > 1) has no recognized
+                // modelClass (Cube falls through to "" - see IsMatrixLikeModel)
+                // and isn't a "Line", so neither the family guard nor the
+                // line-vs-grid/modelClass guards below reject it against a
+                // flat grid-shaped vendor source like "MegaTree" just because
+                // both happen to be width/height > 1.
+                if (model->GetDepth() > 1 || src.depth > 1) {
+                    if (model->GetDepth() != src.depth) continue;
+                }
+
+                // A "mega tree" (IsMegaTreeModel, total node count >= 1000)
+                // must not match a small decorative tree and vice versa, even
+                // though both are IsTreeLikeModel and the small tree's own
+                // NodesPerString can coincidentally be just as long (see
+                // IsMegaTreeModel) - this is what previously let e.g.
+                // "FlatTree-1" (1 strand x 80 nodes) be scored against
+                // "MegaTree" (32 strands x 400 nodes) purely on dimension
+                // closeness.
+                if (IsTreeLikeModel(model->GetModelType()) && IsTreeLikeModel(src.displayType) &&
+                    IsMegaTreeModel(model->GetModelType(), model->GetNodeCount()) != IsMegaTreeModel(src.displayType, src.nodeCount)) continue;
+
+                // A native Star model (DisplayAs="Star", e.g. a tree's star-
+                // topper "FlatTreeStar-N") must never match a Tree-classified
+                // vendor source, or vice versa - same guard as Phase 28.
+                if ((model->GetModelType() == "Star" && IsTreeLikeModel(src.displayType)) ||
+                    (IsTreeLikeModel(model->GetModelType()) && src.displayType == "Star")) continue;
+
                 // A vendor source whose recognized family (including
                 // [T:Xxx]-hint/alias families) is incompatible with the
                 // destination model's is never a real correspondence within
                 // this group, regardless of how close its dimensions are -
                 // this is what previously let e.g. "3D Cube-1" be scored
                 // against "Matrix 2"/"Snowflake 1" purely on node count.
-                if (!FamiliesCompatible(targetFamilies, EffectiveModelFamilies(src.displayName, src.aliases))) continue;
+                if (!FamiliesCompatible(targetFamilies, EffectiveModelFamilies(src.displayName, src.aliases, src.displayType))) continue;
+
+                // Neither side has a recognized family for most outline/line
+                // props (e.g. "Driveway - 01L", "FrontYard - Left"), so the
+                // family guard above is permissive (empty-vs-anything) and
+                // gives them no protection at all - this is what previously
+                // let e.g. "FrontYard - Left" or "Driveway - 01L" be scored
+                // against "MegaTree" (modelClass "Matrix") purely because
+                // both had unknown/zero node counts. Same line-vs-grid and
+                // modelClass guards as Phase 120's RunCatchAllFallback.
+                bool modelIsGrid = targetWidth > 1 && targetHeight > 1;
+                bool srcIsGrid = src.width > 1 && src.height > 1;
+                bool modelHasDims = targetWidth > 0 && targetHeight > 0;
+                bool srcHasDims = src.width > 0 && src.height > 0;
+                bool modelIsLine = model->GetModelClass() == "Line" || (modelHasDims && !modelIsGrid);
+                bool srcIsLine = src.modelClass == "Line" || (srcHasDims && !srcIsGrid);
+                if ((modelIsLine && srcIsGrid) || (srcIsLine && modelIsGrid)) continue;
+                if (!model->GetModelClass().empty() && !src.modelClass.empty() && model->GetModelClass() != src.modelClass) continue;
+
+                // General sanity backstop: when both node counts are known,
+                // a >10x size mismatch is never a real per-member
+                // correspondence, regardless of what dimension score it
+                // happens to produce - this is what previously let e.g. a
+                // 50-node "Spiral mini-N" (a plain Custom model with no
+                // recognized class - DetermineClass has no branch for a
+                // non-spiral, non-singing Custom model) be picked as the
+                // "least-bad" remaining candidate against a 12,800-node
+                // "MegaTree" once nothing else was left in a small group's
+                // vendor pool. Catches this whole class of mismatch without
+                // needing a dedicated structural guard per case.
+                if (targetNodes > 0 && src.nodeCount > 0) {
+                    int lo = std::min(targetNodes, src.nodeCount);
+                    int hi = std::max(targetNodes, src.nodeCount);
+                    if (hi > lo * 10) continue;
+                }
 
                 double score = GroupMemberDimensionScore(targetNodes, targetWidth, targetHeight, targetAspect, targetType, src);
 
@@ -2643,15 +2952,56 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
                 ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
                 : 0.0;
             const std::string targetType = Lower(Trim(model->GetModelType()));
-            const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases());
+            const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases(), model->GetModelType());
 
             const AvailableSource* best = nullptr;
             double bestScore = 0.0;
             const AvailableSource* bestUnused = nullptr;
             double bestUnusedScore = 0.0;
             for (const auto* src : pool) {
+                // 3D models (depth > 1) must not match flat models and vice
+                // versa - same guard as RunGroupMemberDimensionMatch/Phase 120.
+                if (model->GetDepth() > 1 || src->depth > 1) {
+                    if (model->GetDepth() != src->depth) continue;
+                }
+
+                // Same mega-tree-vs-small-tree guard as RunGroupMemberDimensionMatch.
+                if (IsTreeLikeModel(model->GetModelType()) && IsTreeLikeModel(src->displayType) &&
+                    IsMegaTreeModel(model->GetModelType(), model->GetNodeCount()) != IsMegaTreeModel(src->displayType, src->nodeCount)) continue;
+
+                // A native Star model (DisplayAs="Star", e.g. a tree's star-
+                // topper "FlatTreeStar-N") must never match a Tree-classified
+                // vendor source, or vice versa - same guard as Phase 28/110.
+                if ((model->GetModelType() == "Star" && IsTreeLikeModel(src->displayType)) ||
+                    (IsTreeLikeModel(model->GetModelType()) && src->displayType == "Star")) continue;
+
                 // Same family-compatibility gate as RunGroupMemberDimensionMatch.
-                if (!FamiliesCompatible(targetFamilies, EffectiveModelFamilies(src->displayName, src->aliases))) continue;
+                if (!FamiliesCompatible(targetFamilies, EffectiveModelFamilies(src->displayName, src->aliases, src->displayType))) continue;
+
+                // Same line-vs-grid/modelClass guards as RunGroupMemberDimensionMatch
+                // and Phase 120's RunCatchAllFallback - the family guard above gives
+                // no protection to outline/line props with no recognized family
+                // (e.g. "Driveway - 01L", "FrontYard - Left"), which previously let
+                // them be scored against "MegaTree" (modelClass "Matrix") purely on
+                // unknown/zero node counts.
+                bool modelIsGrid = targetWidth > 1 && targetHeight > 1;
+                bool srcIsGrid = src->width > 1 && src->height > 1;
+                bool modelHasDims = targetWidth > 0 && targetHeight > 0;
+                bool srcHasDims = src->width > 0 && src->height > 0;
+                bool modelIsLine = model->GetModelClass() == "Line" || (modelHasDims && !modelIsGrid);
+                bool srcIsLine = src->modelClass == "Line" || (srcHasDims && !srcIsGrid);
+                if ((modelIsLine && srcIsGrid) || (srcIsLine && modelIsGrid)) continue;
+                if (!model->GetModelClass().empty() && !src->modelClass.empty() && model->GetModelClass() != src->modelClass) continue;
+
+                // General sanity backstop, same as RunGroupMemberDimensionMatch -
+                // a >10x node-count mismatch is never a real correspondence,
+                // no matter how "least-bad" it scores against everything else
+                // left in the pool.
+                if (targetNodes > 0 && src->nodeCount > 0) {
+                    int lo = std::min(targetNodes, src->nodeCount);
+                    int hi = std::max(targetNodes, src->nodeCount);
+                    if (hi > lo * 10) continue;
+                }
 
                 double score = GroupMemberDimensionScore(targetNodes, targetWidth, targetHeight, targetAspect, targetType, *src);
                 if (best == nullptr || score < bestScore) {
@@ -2840,7 +3190,7 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
             ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
             : 0.0;
         const std::string targetType = Lower(Trim(model->GetModelType()));
-        const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases());
+        const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases(), model->GetModelType());
 
         const AvailableSource* best = nullptr;
         double bestScore = 0.0;
@@ -2904,7 +3254,19 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
             // otherwise ignores names. Permissive when either side has no
             // recognized family (most props), so it only blocks genuine
             // cross-family mismatches.
-            if (!FamiliesCompatible(targetFamilies, EffectiveModelFamilies(src.displayName, src.aliases))) continue;
+            if (!FamiliesCompatible(targetFamilies, EffectiveModelFamilies(src.displayName, src.aliases, src.displayType))) continue;
+
+            // A "mega tree" (IsMegaTreeModel, total node count >= 1000) must
+            // not match a small decorative tree and vice versa - same guard
+            // as Phase 28/110/115.
+            if (IsTreeLikeModel(model->GetModelType()) && IsTreeLikeModel(src.displayType) &&
+                IsMegaTreeModel(model->GetModelType(), model->GetNodeCount()) != IsMegaTreeModel(src.displayType, src.nodeCount)) continue;
+
+            // A native Star model (DisplayAs="Star", e.g. a tree's star-
+            // topper "FlatTreeStar-N") must never match a Tree-classified
+            // vendor source, or vice versa - same guard as Phase 28/110/115.
+            if ((model->GetModelType() == "Star" && IsTreeLikeModel(src.displayType)) ||
+                (IsTreeLikeModel(model->GetModelType()) && src.displayType == "Star")) continue;
 
             double score = GroupMemberDimensionScore(targetNodes, targetWidth, targetHeight, targetAspect, targetType, src);
             if (best == nullptr || score < bestScore) {

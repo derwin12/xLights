@@ -4051,6 +4051,25 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
+    // Phase 107: homogeneous-family group backfill. If a still-unmapped
+    // destination group's members are all matrix-like, all star, or all
+    // snowflake, confirms that family is present, then maps any other
+    // still-unmapped destination root of that same family to the closest
+    // still-unmapped vendor source - catching family-pure groups/models
+    // whose names carry no useful token overlap for Phase 25/26/28. Runs
+    // ahead of Phase 110 so a group mapped here feeds its member-pool logic.
+    before = after;
+    spdlog::info("QuikMap: Phase 107 - Looking for homogeneous-family group backfill matches... ({} unmapped roots)", before);
+    if (dlg) dlg->Update(90, "Phase 107: Looking for homogeneous-family group backfill matches...");
+    DoFamilyGroupBackfill(select, "Phase 107: FamilyGroupBackfill");
+    after = CountUnmappedRoots();
+    int phase107 = before - after;
+    spdlog::info("QuikMap: Phase 107 complete - {} matches found", phase107);
+    summary << wxString::Format("Phase 107: Homogeneous-family group backfill matches found: %d\n", phase107);
+    if (dlg) dlg->Update(90, wxString::Format("Phase 107 complete - homogeneous-family group backfill matches found: %d", phase107));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
     // Phase 110: group-member dimension match. For a destination group already
     // mapped to a vendor ModelGroup (e.g. "Group - Snowflakes" -> "Snowflakes"),
     // maps the destination group's still-unmapped individual members (e.g.
@@ -4182,6 +4201,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         summary << "\n" << GenerateQuikMapTreeCandidateReport();
         summary << "\n" << GenerateQuikMapStarCandidateReport();
         summary << "\n" << GenerateQuikMapSnowflakeCandidateReport();
+        summary << "\n" << GenerateQuikMapMegaTreeCandidateReport();
         summary << "\n" << GenerateQuikMapDetailReport();
     }
 
@@ -4205,6 +4225,7 @@ static const std::unordered_set<std::string> QUIKMAP_REVIEW_PHASES = {
     "Phase 93: MatrixBackfill",
     "Phase 100: CustomDimension",
     "Phase 105: ModelTypeCatchall",
+    "Phase 107: FamilyGroupBackfill",
     "Phase 110: GroupMemberDimension",
     "Phase 115: GroupMemberDimensionBackfill",
     "Phase 120: Catchall",
@@ -4266,7 +4287,7 @@ wxString xLightsImportChannelMapDialog::GenerateQuikMapMappedRootsReport() const
         auto* node = _dataModel->GetNthChild(i);
         if (node == nullptr || !node->IsMapped()) continue;
         wxString rule = node->GetMappingRule();
-        wxString line = wxString::Format("  %s -> %s [%s]\n", node->GetModelName(), wxString(node->GetMapping()), rule.empty() ? "Manual" : rule);
+        wxString line = wxString::Format("  %s -> %s [%s]\n", wxString(node->GetMapping()), node->GetModelName(), rule.empty() ? "Manual" : rule);
         if (node->IsGroup()) {
             groups << line;
             ++groupCount;
@@ -4427,6 +4448,45 @@ wxString xLightsImportChannelMapDialog::GenerateQuikMapSnowflakeCandidateReport(
 
     wxString report;
     report << wxString::Format("Snowflake candidates identified (Phase 26, %d source / %d destination):\n",
+                                static_cast<int>(sourceLines.size()), static_cast<int>(destinationLines.size()));
+    report << "  Source:\n";
+    for (const auto& line : sourceLines) report << "    " << line << "\n";
+    report << "  Destination:\n";
+    for (const auto& line : destinationLines) report << "    " << line << "\n";
+    return report;
+}
+
+wxString xLightsImportChannelMapDialog::GenerateQuikMapMegaTreeCandidateReport()
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
+                src.width = ic->width;
+                src.height = ic->height;
+            }
+        }
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::vector<std::string> sourceLines, destinationLines;
+    AutoMapper::DescribeMegaTreeCandidates(roots, available, sourceLines, destinationLines);
+
+    wxString report;
+    report << wxString::Format("Mega tree candidates identified (Phase 28, %d source / %d destination):\n",
                                 static_cast<int>(sourceLines.size()), static_cast<int>(destinationLines.size()));
     report << "  Source:\n";
     for (const auto& line : sourceLines) report << "    " << line << "\n";
@@ -5087,6 +5147,50 @@ src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
     }
 
     AutoMapper::RunModelTypeCatchAll(roots, available, select, selectedTargets, ruleLabel);
+}
+
+void xLightsImportChannelMapDialog::DoFamilyGroupBackfill(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.modelClass = ic->modelClass;
+                src.isSingingProp = ic->isSingingProp;
+                src.aliases = ic->aliases;
+                src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
+                src.width = ic->width;
+                src.height = ic->height;
+                src.depth = ic->depth;
+                src.strandCount = ic->strandCount;
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunFamilyGroupBackfill(roots, available, *xlights, select, selectedTargets, ruleLabel);
 }
 
 void xLightsImportChannelMapDialog::DoSingingProp(bool select, const std::string& ruleLabel)

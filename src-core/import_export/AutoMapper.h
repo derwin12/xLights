@@ -25,7 +25,7 @@ namespace AutoMapper {
 // Version tag for the QuikMap report summary (DoQuikMap's `summary` /
 // QuikMapReport.log). Bump this (v1.00 -> v1.01 -> ...) whenever the report
 // format/content changes, so old logs can be told apart from new ones.
-constexpr auto QUIKMAP_REPORT_VERSION = "v1.21";
+constexpr auto QUIKMAP_REPORT_VERSION = "v1.22";
 
 // QuikMap phases, in the order xLightsImportChannelMapDialog::DoQuikMap runs
 // them. Numbers are spaced by 5 so new phases can be inserted between
@@ -336,6 +336,20 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.21";
 //             blind pairing. See RunModelTypeCatchAll().
 //             e.g. dest "MyArch-3" (type "Arches") matches vendor "Arch C"
 //             (type "Arches") purely by model type — no name overlap needed.
+//
+//   Phase 107: Homogeneous-family group backfill - for each still-unmapped
+//             destination ModelGroup whose members (looked up live via
+//             renderContext) are *all* the same one of matrix/star/snowflake
+//             (IsMatrixLikeModel/IsAStarModel/IsASnowflakeModel), confirms
+//             that family is present in this layout, then maps every other
+//             still-unmapped destination root of that same family to the
+//             closest-by-node-count still-unmapped vendor source of that
+//             family (same scoring/reuse pattern as Phase 93). Runs after
+//             Phase 105 and before Phase 110 so a group mapped here feeds
+//             Phase 110/115's member-pool logic. See RunFamilyGroupBackfill().
+//             e.g. dest "Group 12" (members "Star A".."Star D", all
+//             IsAStarModel) confirms "star" is present → dest "Star E"
+//             (outside the group) maps to the closest-matching vendor star.
 //
 //   Phase 110: Group-member dimension match - for each destination root that
 //             IsGroup(), is already mapped to a vendor ModelGroup, and whose
@@ -795,6 +809,16 @@ void RunLikeModelBackfill(const std::vector<ImportMappingNode*>& roots,
 // classification regardless of which format a given model uses.
 bool IsTreeLikeModel(const std::string& displayType);
 
+// Returns true if displayType is tree-like (see IsTreeLikeModel) AND
+// nodeCount (NumStrings x NodesPerString) is >= 1000 - a "mega tree" (e.g.
+// 16+ strands of hundreds of nodes each) is a fundamentally different
+// physical prop from a small decorative tree, even when the decorative
+// tree's own NodesPerString happens to be just as long (e.g. a single-strand
+// "flat"/ribbon tree). Total node count, not strand length alone, is the
+// reliable discriminator. Used to keep mega trees and small trees from
+// matching each other in QuikMap's tree-matching phases.
+bool IsMegaTreeModel(const std::string& displayType, int nodeCount);
+
 // Returns true if name's tokens belong to the "star" family (keywords star,
 // stickstar, stick - see FUZZY_FAMILY_KEYWORDS; "flake"/"snowflake" are a
 // separate "snowflake" family, see IsASnowflakeModel). Unlike
@@ -902,6 +926,20 @@ void DescribeSnowflakeCandidates(const std::vector<ImportMappingNode*>& roots,
                                  std::vector<std::string>& outSourceLines,
                                  std::vector<std::string>& outDestinationLines);
 
+// Returns one descriptive line (name, type, nodeCount, mega/mapped/skipped
+// flags as relevant) for every tree-like (IsTreeLikeModel), non-group vendor
+// source in `available` and every tree-like, non-group, not-skipped
+// destination root in `roots`, regardless of mapped/selected state - so a
+// QuikMap run's spdlog log shows exactly which trees were/weren't classified
+// as a "mega tree" (IsMegaTreeModel, total node count >= 1000) on each side.
+// Shared by RunFamilyAnchoredFuzzy's debug log and the QuikMap dialog's
+// detail-report "Mega tree candidates identified" section, so both always
+// agree with whatever IsMegaTreeModel currently considers mega.
+void DescribeMegaTreeCandidates(const std::vector<ImportMappingNode*>& roots,
+                                const std::vector<AvailableSource>& available,
+                                std::vector<std::string>& outSourceLines,
+                                std::vector<std::string>& outDestinationLines);
+
 // Matrix backfill pass (QuikMap Phase 93), run after RunLikeModelBackfill
 // and before RunGroupCoverageSkip/RunCatchAll. For each destination root
 // that is still unmapped, not a group, and not skipped, and is matrix-like
@@ -921,6 +959,41 @@ void RunMatrixBackfill(const std::vector<ImportMappingNode*>& roots,
                        bool selectOnly,
                        const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                        const std::string& ruleLabel = "");
+
+// Homogeneous-family group backfill pass (QuikMap Phase 107), run after
+// Phase 105 and before Phase 110 (so a group mapping established here is
+// immediately available to Phase 110/115's member-pool logic). For each
+// still-unmapped, not-skipped destination ModelGroup root with at least 2
+// members, looks up the corresponding ModelGroup in the layout and checks
+// whether every member classifies as the *same* one of the three
+// structural/name families recognized elsewhere in QuikMap - matrix (see
+// IsMatrixLikeModel, using the member's own ImportMappingNode root if one
+// exists in `roots`), star (see IsAStarModel), or snowflake (see
+// IsASnowflakeModel) - falling back to a name-only star/snowflake check when
+// a member isn't itself tracked as a destination root. A mixed-family or
+// unrecognized-family group confirms nothing and is skipped. Each family
+// confirmed present by at least one such homogeneous group is then used to
+// backfill: every still-unmapped, not-skipped destination root (model or
+// group) that itself classifies as that family is mapped to a still-unmapped
+// vendor source of the same family and kind (model<->model, group<->group),
+// preferring the dimensionally-closest one (GroupMemberDimensionScore, same
+// scoring as Phase 93) and the same never-used-before-reuse round-robin
+// pattern as Phase 93/41/32 once every vendor source in that family's pool
+// has been claimed at least once. This catches family-pure destination
+// groups/models whose names carry no useful token overlap for Phase 25/26/28
+// (e.g. a generically-named "Group 12" made up entirely of star models)
+// without needing the matrix-only structural classification Phase 93 already
+// covers on its own.
+// e.g. dest "Group 12" (unmapped, members "Star A".."Star D" all classify as
+// "star") confirms the star family is present; dest "Star E" (unmapped,
+// outside "Group 12") is then mapped to the closest-by-node-count
+// still-unused vendor star model.
+void RunFamilyGroupBackfill(const std::vector<ImportMappingNode*>& roots,
+                            const std::vector<AvailableSource>& available,
+                            RenderContext& renderContext,
+                            bool selectOnly,
+                            const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                            const std::string& ruleLabel = "");
 
 // Group-coverage skip pass (QuikMap Phase 95), run after
 // RunLikeModelBackfill and before RunCatchAll. For each destination root that
