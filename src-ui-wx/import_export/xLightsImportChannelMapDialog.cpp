@@ -4063,6 +4063,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     MarkUsed();
 
     if (detailedReport) {
+        summary << "\n" << GenerateQuikMapMappedRootsReport();
         summary << "\n" << GenerateQuikMapDetailReport();
     }
 
@@ -4073,6 +4074,33 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         wxMessageBox(summary, "QuikMap Results", wxOK | wxICON_INFORMATION, this);
     }
     spdlog::info("QuikMap: DoQuikMap returning");
+}
+
+wxString xLightsImportChannelMapDialog::GenerateQuikMapMappedRootsReport() const
+{
+    wxString report;
+    wxString models;
+    wxString groups;
+    int modelCount = 0;
+    int groupCount = 0;
+
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        auto* node = _dataModel->GetNthChild(i);
+        if (node == nullptr || !node->IsMapped()) continue;
+        wxString rule = node->GetMappingRule();
+        wxString line = wxString::Format("  %s -> %s [%s]\n", node->GetModelName(), wxString(node->GetMapping()), rule.empty() ? "Manual" : rule);
+        if (node->IsGroup()) {
+            groups << line;
+            ++groupCount;
+        } else {
+            models << line;
+            ++modelCount;
+        }
+    }
+
+    report << wxString::Format("Mapped Models (%d):\n", modelCount) << models;
+    report << wxString::Format("\nMapped Groups (%d):\n", groupCount) << groups;
+    return report;
 }
 
 wxString xLightsImportChannelMapDialog::GenerateQuikMapDetailReport() const
@@ -4922,12 +4950,15 @@ void xLightsImportChannelMapDialog::OnButton_AutoMapClick(wxCommandEvent& event)
 
     _dirty = true;
     TreeListCtrl_Mapping->Freeze();
-    DoAutoMap(norm, norm, norm, "", "", "B", false);
-    DoAutoMap(aggressive, aggressive, aggressive, "", "", "B", false);
+    // allowSharedSource=true preserves this pre-QuikMap auto-map's original
+    // behavior (no cross-destination dedup) - that restriction only applies
+    // to QuikMap's own phases.
+    DoAutoMap(norm, norm, norm, "", "", "B", false, "", AutoMapper::AvailableKindFilter::Any, true);
+    DoAutoMap(aggressive, aggressive, aggressive, "", "", "B", false, "", AutoMapper::AvailableKindFilter::Any, true);
     DoSubModelFallback(false);
 
     for (auto const& e : LoadMapHintsFromShowDir(xlights->CurrentDir.ToStdString())) {
-        DoAutoMap(regex, regex, norm, e.toRegex, e.fromModel, e.applyTo, false);
+        DoAutoMap(regex, regex, norm, e.toRegex, e.fromModel, e.applyTo, false, "", AutoMapper::AvailableKindFilter::Any, true);
     }
     if (CheckBox_HideUnmapped != nullptr && CheckBox_HideUnmapped->IsChecked()) {
         _dataModel->Cleared();
@@ -4943,11 +4974,14 @@ void xLightsImportChannelMapDialog::AutoMap()
     if (_dataModel == nullptr) return;
     _dirty = true;
     TreeListCtrl_Mapping->Freeze();
-    DoAutoMap(norm, norm, norm, "", "", "B", false);
-    DoAutoMap(aggressive, aggressive, aggressive, "", "", "B", false);
+    // allowSharedSource=true preserves this pre-QuikMap auto-map's original
+    // behavior (no cross-destination dedup) - that restriction only applies
+    // to QuikMap's own phases.
+    DoAutoMap(norm, norm, norm, "", "", "B", false, "", AutoMapper::AvailableKindFilter::Any, true);
+    DoAutoMap(aggressive, aggressive, aggressive, "", "", "B", false, "", AutoMapper::AvailableKindFilter::Any, true);
     DoSubModelFallback(false);
     for (auto const& e : LoadMapHintsFromShowDir(xlights->CurrentDir.ToStdString())) {
-        DoAutoMap(regex, regex, norm, e.toRegex, e.fromModel, e.applyTo, false);
+        DoAutoMap(regex, regex, norm, e.toRegex, e.fromModel, e.applyTo, false, "", AutoMapper::AvailableKindFilter::Any, true);
     }
     if (CheckBox_HideUnmapped != nullptr && CheckBox_HideUnmapped->IsChecked()) {
         _dataModel->Cleared();
@@ -4964,12 +4998,15 @@ void xLightsImportChannelMapDialog::OnButton_AutoMapSelClick(wxCommandEvent& eve
 
     _dirty = true;
     TreeListCtrl_Mapping->Freeze();
-    DoAutoMap(norm, norm, norm, "", "", "B", true);
-    DoAutoMap(aggressive, aggressive, aggressive, "", "", "B", true);
+    // allowSharedSource=true preserves this pre-QuikMap auto-map's original
+    // behavior (no cross-destination dedup) - that restriction only applies
+    // to QuikMap's own phases.
+    DoAutoMap(norm, norm, norm, "", "", "B", true, "", AutoMapper::AvailableKindFilter::Any, true);
+    DoAutoMap(aggressive, aggressive, aggressive, "", "", "B", true, "", AutoMapper::AvailableKindFilter::Any, true);
     DoSubModelFallback(true);
 
     for (auto const& e : LoadMapHintsFromShowDir(xlights->CurrentDir.ToStdString())) {
-        DoAutoMap(regex, regex, norm, e.toRegex, e.fromModel, e.applyTo, false);
+        DoAutoMap(regex, regex, norm, e.toRegex, e.fromModel, e.applyTo, false, "", AutoMapper::AvailableKindFilter::Any, true);
     }
 
     if (CheckBox_HideUnmapped != nullptr && CheckBox_HideUnmapped->IsChecked()) {
@@ -5367,7 +5404,9 @@ void xLightsImportChannelMapDialog::RefreshTimelineColumnImages()
 void xLightsImportChannelMapDialog::loadMapHintsFile(wxString const& filename) {
     auto entries = LoadMapHintsFile(filename.ToStdString());
     for (auto const& e : entries) {
-        DoAutoMap(regex, regex, norm, e.toRegex, e.fromModel, e.applyTo, false);
+        // allowSharedSource=true preserves this pre-QuikMap regex-hint
+        // matching's original behavior (no cross-destination dedup).
+        DoAutoMap(regex, regex, norm, e.toRegex, e.fromModel, e.applyTo, false, "", AutoMapper::AvailableKindFilter::Any, true);
     }
 }
 

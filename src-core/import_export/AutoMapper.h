@@ -308,28 +308,58 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.13";
 //   Phase 115: Group-member dimension backfill - same group<->group pairings
 //             as Phase 110, but for any destination group member still
 //             unmapped after Phase 110 (e.g. there are more destination group
-//             members than vendor group members), reuses the closest-by-
-//             node-count vendor group member even if Phase 110 (or an earlier
-//             root in this phase) already claimed it - same vendor source may
-//             end up assigned to multiple destinations. Runs after Phase 110
-//             and before Phase 120. See RunGroupMemberDimensionBackfill().
+//             members than vendor group members), maps it to the closest-by-
+//             node-count vendor group member, drawn from the same reusable
+//             pool as Phase 110 (so a vendor source Phase 110 already claimed
+//             is a valid candidate here too). A vendor source already used
+//             by *this backfill pass* is only reused once every other
+//             family-compatible pool member has been used at least once -
+//             so e.g. with two unmapped destinations and three vendor pool
+//             members, both destinations get distinct vendor sources instead
+//             of piling onto the single best-scoring one. Runs after Phase
+//             110 and before Phase 120. See RunGroupMemberDimensionBackfill().
 //             e.g. dest "Group - Stars" → vendor "Stars" (3 members: "Star
-//             1".."Star 3"); dest has 4 star members → the 4th destination
-//             star reuses vendor "Star 1" (closest node count).
+//             1".."Star 3", all already used by Phase 110); dest has 5 star
+//             members → the 4th and 5th destination stars reuse "Star 1" and
+//             "Star 2" respectively (each pool member used once before any
+//             is used twice), rather than both piling onto whichever single
+//             member scores best. A 6th destination star would then be the
+//             first genuine *second* reuse, picked by best score as before.
 //
 //   Phase 120: Final catch-all - pairs any still-unmapped vendor model/group
-//             with any still-unmapped user model/group of the same kind,
-//             regardless of name. Exception: a still-unmapped vendor
+//             with any still-unmapped user model/group of the same kind and
+//             depth, regardless of name. Exception: a still-unmapped vendor
 //             ModelGroup whose name contains a special-sequencer-meaning
 //             keyword ("last", "override", "bottom" - see Phase 17/
 //             IsSpecialKeywordGroupName) is never used here - if Phase 17
 //             didn't already pair it by name/alias, it's left unmapped (along
 //             with the destination group under consideration) rather than
-//             handed out blindly. See RunCatchAll().
+//             handed out blindly. Also gated by the same FamiliesCompatible
+//             guard as Phase 100/110/115 (permissive when either side has no
+//             recognized FuzzyModelFamilies token, so it only blocks genuine
+//             cross-family mismatches like "matrix" vs. "star") - without it,
+//             an unrelated still-unmapped Custom model could steal a vendor
+//             source that was a much better fit for a different still-
+//             unmapped destination, purely because of root iteration order.
+//             A "Single Line" model (a 1D string of nodes) and a genuine 2D
+//             grid (a Custom/Matrix model with both width and height > 1)
+//             are never paired, regardless of family - a "Line"-class prop
+//             has no business matching a grid-shaped one even when neither
+//             has a recognized family token. Among the remaining candidates,
+//             picks the dimensionally-closest one (GroupMemberDimensionScore)
+//             rather than just the first one found. See RunCatchAll().
 //             e.g. dest "PropX" (type "Tree 360") is still unmapped after
 //             all earlier phases; vendor "LeftoverA" (also "Tree 360") is
-//             also still unmapped → paired blindly by kind (model<->model)
-//             with no name check.
+//             also still unmapped → paired by kind, with no name check, but
+//             still requiring family/shape compatibility.
+//             e.g. dest "Matrix Seeds" (family "matrix") and dest "3D Star"
+//             (family "star") are both still-unmapped Custom models; vendor
+//             "Matrix 2" (family "matrix") is still unmapped → only "Matrix
+//             Seeds" is family-compatible with it, so "3D Star" can no
+//             longer steal it regardless of iteration order.
+//             e.g. dest "Driveway - 01L" (Single Line) must not match vendor
+//             "Matrix 2" (a 2D grid) even though neither has a recognized
+//             family token - the line/grid shape guard blocks it outright.
 //
 //   Phase 125: Sibling-reuse backfill - for each destination root that is
 //             still unmapped, not skipped, and not a group, looks for an

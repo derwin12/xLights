@@ -2234,6 +2234,17 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
         }
         if (pool.empty()) continue;
 
+        // Tracks how many destinations this backfill pass has already handed
+        // each pool source to, so e.g. "HFlake4"/"HFlake5" don't both pile
+        // onto "Snowflake 1" while "Snowflake 2"/"Snowflake 3" sit unused -
+        // a never-yet-used, family-compatible candidate is always preferred
+        // over reusing one already claimed in this pass, no matter its
+        // dimension score. Only once every family-compatible candidate has
+        // been used at least once does reuse (picking the best score) kick
+        // in, so a destination still gets mapped rather than left unmapped.
+        std::unordered_map<const AvailableSource*, int> useCount;
+        for (auto* src : pool) useCount[src] = 0;
+
         for (auto* model : roots) {
             if (model == nullptr || model->IsGroup() || model->IsSkipped()) continue;
             if (!model->GetMapping().empty()) continue;
@@ -2251,6 +2262,8 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
 
             const AvailableSource* best = nullptr;
             double bestScore = 0.0;
+            const AvailableSource* bestUnused = nullptr;
+            double bestUnusedScore = 0.0;
             for (const auto* src : pool) {
                 // Same family-compatibility gate as RunGroupMemberDimensionMatch.
                 if (!FamiliesCompatible(targetFamilies, EffectiveModelFamilies(src->displayName, src->aliases))) continue;
@@ -2260,11 +2273,17 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
                     best = src;
                     bestScore = score;
                 }
+                if (useCount[src] == 0 && (bestUnused == nullptr || score < bestUnusedScore)) {
+                    bestUnused = src;
+                    bestUnusedScore = score;
+                }
             }
 
-            if (best != nullptr) {
-                model->Map(best->displayName, best->modelType);
+            const AvailableSource* chosen = bestUnused != nullptr ? bestUnused : best;
+            if (chosen != nullptr) {
+                model->Map(chosen->displayName, chosen->modelType);
                 model->SetMappingRule(ruleLabel);
+                ++useCount[chosen];
             }
         }
     }
@@ -2415,6 +2434,11 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
     }
 
     // Top-level pass: model<->model, group<->group, ignoring names entirely.
+    // Among candidates that pass the kind/depth/family/keyword gates, picks
+    // the dimensionally-closest one (via GroupMemberDimensionScore, same
+    // scoring Phase 110/115 use) rather than just the first one found in
+    // `available`'s order - e.g. so "Matrix Seeds" reliably gets "Matrix 2"
+    // over some other equally-arbitrary unmapped Custom model.
     for (auto* model : roots) {
         if (model == nullptr) continue;
         if (selectMapAvail || selectMapTarget) {
@@ -2424,6 +2448,17 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
         if (!model->GetMapping().empty()) continue;
         if (model->IsSkipped()) continue;
 
+        const int targetNodes = model->GetNodeCount();
+        const int targetWidth = model->GetWidth();
+        const int targetHeight = model->GetHeight();
+        const double targetAspect = (targetWidth > 0 && targetHeight > 0)
+            ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
+            : 0.0;
+        const std::string targetType = Lower(Trim(model->GetModelType()));
+        const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases());
+
+        const AvailableSource* best = nullptr;
+        double bestScore = 0.0;
         for (const auto& src : available) {
             if (selectMapAvail && !src.selected) continue;
             if (src.canonicalName.find('/') != std::string::npos) continue;
@@ -2445,10 +2480,37 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
                 if (model->GetDepth() != src.depth) continue;
             }
 
-            model->Map(src.displayName, src.modelType);
+            // A "Single Line" model is a 1D string of nodes; it must never be
+            // paired with a genuine 2D grid (a Custom/Matrix model with both
+            // a width and a height > 1) and vice versa - e.g. "Driveway -
+            // 01L" (Single Line) must not steal "Matrix 2" (a grid) just
+            // because this catch-all otherwise ignores type/name.
+            bool modelIsLine = targetType == "single line";
+            bool srcIsLine = Lower(Trim(src.displayType)) == "single line";
+            bool modelIsGrid = targetWidth > 1 && targetHeight > 1;
+            bool srcIsGrid = src.width > 1 && src.height > 1;
+            if ((modelIsLine && srcIsGrid) || (srcIsLine && modelIsGrid)) continue;
+
+            // Family guardrail - same as Phase 100/110/115: e.g. a "star"-
+            // family vendor model (recognized via FuzzyModelFamilies) must
+            // not steal a vendor source from a "matrix"-family destination
+            // it has no real business matching, even though this catch-all
+            // otherwise ignores names. Permissive when either side has no
+            // recognized family (most props), so it only blocks genuine
+            // cross-family mismatches.
+            if (!FamiliesCompatible(targetFamilies, EffectiveModelFamilies(src.displayName, src.aliases))) continue;
+
+            double score = GroupMemberDimensionScore(targetNodes, targetWidth, targetHeight, targetAspect, targetType, src);
+            if (best == nullptr || score < bestScore) {
+                best = &src;
+                bestScore = score;
+            }
+        }
+
+        if (best != nullptr) {
+            model->Map(best->displayName, best->modelType);
             model->SetMappingRule(ruleLabel);
-            used.insert(Lower(Trim(src.displayName)));
-            break;
+            used.insert(Lower(Trim(best->displayName)));
         }
     }
 
