@@ -4465,7 +4465,14 @@ void xLightsImportChannelMapDialog::DoCatchAllFallback(bool select, const std::s
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+                src.isSingingProp = ic->isSingingProp;
+                src.aliases = ic->aliases;
+                src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
+                src.width = ic->width;
+                src.height = ic->height;
+                src.depth = ic->depth;
+                src.strandCount = ic->strandCount;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;

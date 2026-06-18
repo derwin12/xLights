@@ -2480,13 +2480,18 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
                 if (model->GetDepth() != src.depth) continue;
             }
 
-            // A "Single Line" model is a 1D string of nodes; it must never be
-            // paired with a genuine 2D grid (a Custom/Matrix model with both
-            // a width and a height > 1) and vice versa - e.g. "Driveway -
-            // 01L" (Single Line) must not steal "Matrix 2" (a grid) just
-            // because this catch-all otherwise ignores type/name.
-            bool modelIsLine = targetType == "single line";
-            bool srcIsLine = Lower(Trim(src.displayType)) == "single line";
+            // A "Line"-class model (Single Line, Poly Line, Arches, Candy
+            // Canes, Circle, Window Frame - see Model::DetermineClass) is a
+            // 1D string/path of nodes; it must never be paired with a
+            // genuine 2D grid (a Custom/Matrix model with both a width and a
+            // height > 1) and vice versa - e.g. "Driveway - 01L" (a Poly
+            // Line, class "Line") must not steal "Matrix 2" (a grid) just
+            // because this catch-all otherwise ignores type/name. Checked
+            // via modelClass rather than a literal type-string match so it
+            // covers every "Line"-classified display type, not just
+            // "Single Line".
+            bool modelIsLine = model->GetModelClass() == "Line";
+            bool srcIsLine = src.modelClass == "Line";
             bool modelIsGrid = targetWidth > 1 && targetHeight > 1;
             bool srcIsGrid = src.width > 1 && src.height > 1;
             if ((modelIsLine && srcIsGrid) || (srcIsLine && modelIsGrid)) continue;

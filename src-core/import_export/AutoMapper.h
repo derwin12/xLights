@@ -341,13 +341,16 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.13";
 //             an unrelated still-unmapped Custom model could steal a vendor
 //             source that was a much better fit for a different still-
 //             unmapped destination, purely because of root iteration order.
-//             A "Single Line" model (a 1D string of nodes) and a genuine 2D
-//             grid (a Custom/Matrix model with both width and height > 1)
-//             are never paired, regardless of family - a "Line"-class prop
-//             has no business matching a grid-shaped one even when neither
-//             has a recognized family token. Among the remaining candidates,
-//             picks the dimensionally-closest one (GroupMemberDimensionScore)
-//             rather than just the first one found. See RunCatchAll().
+//             A "Line"-class model (modelClass == "Line" - Single Line, Poly
+//             Line, Arches, Candy Canes, Circle, Window Frame; see
+//             Model::DetermineClass) and a genuine 2D grid (a Custom/Matrix
+//             model with both width and height > 1) are never paired,
+//             regardless of family - checked via modelClass rather than a
+//             literal type-string match so it covers every "Line"-classified
+//             display type, not just "Single Line". Among the remaining
+//             candidates, picks the dimensionally-closest one
+//             (GroupMemberDimensionScore) rather than just the first one
+//             found. See RunCatchAll().
 //             e.g. dest "PropX" (type "Tree 360") is still unmapped after
 //             all earlier phases; vendor "LeftoverA" (also "Tree 360") is
 //             also still unmapped → paired by kind, with no name check, but
@@ -357,9 +360,11 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.13";
 //             "Matrix 2" (family "matrix") is still unmapped → only "Matrix
 //             Seeds" is family-compatible with it, so "3D Star" can no
 //             longer steal it regardless of iteration order.
-//             e.g. dest "Driveway - 01L" (Single Line) must not match vendor
-//             "Matrix 2" (a 2D grid) even though neither has a recognized
-//             family token - the line/grid shape guard blocks it outright.
+//             e.g. dest "Driveway - 01L" (a Poly Line, modelClass "Line")
+//             must not match vendor "Matrix 2" (a 2D grid) even though
+//             neither has a recognized family token - the line/grid shape
+//             guard (by modelClass, not the literal "Poly Line" string)
+//             blocks it outright.
 //
 //   Phase 125: Sibling-reuse backfill - for each destination root that is
 //             still unmapped, not skipped, and not a group, looks for an
