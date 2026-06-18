@@ -3070,7 +3070,12 @@ void RunSkipShadow(const std::vector<ImportMappingNode*>& roots,
         Model* layoutModel = renderContext.GetModel(model->GetCoreModel());
         if (layoutModel == nullptr) continue;
 
-        if (layoutModel->IsShadowModel()) {
+        // A real ShadowModelFor attribute is the normal signal, but a model
+        // whose StartChannel is itself a reference (e.g. "@MH-1:8", meaning
+        // "start wherever model MH starts") is also an overlay/virtual model
+        // with no independent effect data of its own, even on the rare model
+        // where ShadowModelFor didn't get set/parsed.
+        if (layoutModel->IsShadowModel() || StartsWith(layoutModel->GetModelStartChannel(), "@")) {
             model->SetSkipped(true);
             model->SetMappingRule(ruleLabel);
         }
