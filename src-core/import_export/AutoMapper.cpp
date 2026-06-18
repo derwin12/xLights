@@ -2575,6 +2575,7 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
         const double targetAspect = (targetWidth > 0 && targetHeight > 0)
             ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
             : 0.0;
+        const bool targetIsSinging = model->IsSingingProp();
 
         const AvailableSource* best = nullptr;
         double bestScore = 0.0;
@@ -2587,6 +2588,14 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
             if (srcIsGroup != model->IsGroup()) continue;
             if (Lower(Trim(src.displayType)) != "custom") continue;
             if (src.nodeCount <= 0) continue;
+            // A singing prop's vendor mapping carries face/mouth-movement
+            // effect data that's meaningless on a non-singing destination
+            // (and vice versa) - same guard as Phase 28's
+            // RunFamilyAnchoredFuzzy. Without this, a singing vendor model
+            // (e.g. "SingingSnowman") could be picked for a non-singing
+            // destination (e.g. "SpinnerStarFlake") purely because their
+            // Custom-model node counts happen to be close.
+            if (src.isSingingProp != targetIsSinging) continue;
             // 3D models (depth > 1) must not match flat models — require depths to agree.
             if (targetDepth > 1 || src.depth > 1) {
                 if (src.depth != targetDepth) continue;
