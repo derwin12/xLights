@@ -4181,6 +4181,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         summary << "\n" << GenerateQuikMapMatrixCandidateReport();
         summary << "\n" << GenerateQuikMapTreeCandidateReport();
         summary << "\n" << GenerateQuikMapStarCandidateReport();
+        summary << "\n" << GenerateQuikMapSnowflakeCandidateReport();
         summary << "\n" << GenerateQuikMapDetailReport();
     }
 
@@ -4372,6 +4373,9 @@ wxString xLightsImportChannelMapDialog::GenerateQuikMapStarCandidateReport()
         src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
         if (src.canonicalName.find('/') == std::string::npos) {
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.displayType = ic->type;
+            }
         }
         available.push_back(std::move(src));
     }
@@ -4387,6 +4391,42 @@ wxString xLightsImportChannelMapDialog::GenerateQuikMapStarCandidateReport()
 
     wxString report;
     report << wxString::Format("Star candidates identified (Phase 26, %d source / %d destination):\n",
+                                static_cast<int>(sourceLines.size()), static_cast<int>(destinationLines.size()));
+    report << "  Source:\n";
+    for (const auto& line : sourceLines) report << "    " << line << "\n";
+    report << "  Destination:\n";
+    for (const auto& line : destinationLines) report << "    " << line << "\n";
+    return report;
+}
+
+wxString xLightsImportChannelMapDialog::GenerateQuikMapSnowflakeCandidateReport()
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.displayType = ic->type;
+            }
+        }
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::vector<std::string> sourceLines, destinationLines;
+    AutoMapper::DescribeSnowflakeCandidates(roots, available, sourceLines, destinationLines);
+
+    wxString report;
+    report << wxString::Format("Snowflake candidates identified (Phase 26, %d source / %d destination):\n",
                                 static_cast<int>(sourceLines.size()), static_cast<int>(destinationLines.size()));
     report << "  Source:\n";
     for (const auto& line : sourceLines) report << "    " << line << "\n";
@@ -4527,6 +4567,9 @@ void xLightsImportChannelMapDialog::DoGroupContentFuzzy(bool select, const std::
         src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
         if (src.canonicalName.find('/') == std::string::npos) {
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.displayType = ic->type;
+            }
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr && !ic->groupModels.empty()) {
                 for (const auto& memberName : wxSplit(ic->groupModels, ',')) {
                     src.groupMemberNames.push_back(memberName.ToStdString());

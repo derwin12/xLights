@@ -129,7 +129,8 @@ const std::unordered_set<std::string> FUZZY_STOPWORDS = {
 const std::vector<std::pair<std::string, std::unordered_set<std::string>>> FUZZY_FAMILY_KEYWORDS = {
     { "cane", { "cane", "candycane" } },
     { "tree", { "tree", "mega", "flaketree" } },
-    { "star", { "star", "flake", "snowflake", "stickstar", "stick" } },
+    { "star", { "star", "stickstar", "stick" } },
+    { "snowflake", { "flake", "snowflake" } },
     { "arch", { "arch", "arches" } },
     { "outline", { "outline", "eaves", "garage", "roof", "vertical", "window", "frame" } },
     { "matrix", { "matrix" } },
@@ -182,9 +183,9 @@ const std::unordered_map<std::string, std::string> TYPE_HINT_ALIAS_TEXT = {
 // Families that should never be considered a match for each other, even
 // when no family overlaps (used as the "incompatible pairs" guardrail).
 const std::set<std::pair<std::string, std::string>> FUZZY_INCOMPATIBLE_FAMILIES = {
-    { "bulb", "star" }, { "bulb", "flood" }, { "bulb", "tree" }, { "bulb", "arch" },
+    { "bulb", "star" }, { "bulb", "snowflake" }, { "bulb", "flood" }, { "bulb", "tree" }, { "bulb", "arch" },
     { "cane", "outline" }, { "cane", "flood" },
-    { "flood", "tree" }, { "flood", "star" },
+    { "flood", "tree" }, { "flood", "star" }, { "flood", "snowflake" },
 };
 
 // Lowercase, replace separators with spaces, strip anything that isn't
@@ -330,8 +331,9 @@ std::unordered_set<std::string> FuzzyModelFamilies(const std::string& name) {
 
 // If either side has no recognized family, or the families overlap, they're
 // considered compatible. Otherwise check the explicit incompatible-pairs
-// table; spinner/star are special-cased as co-existing naming conventions.
-// Any other non-overlapping pair of recognized families is incompatible.
+// table; spinner/star and spinner/snowflake are special-cased as
+// co-existing naming conventions (e.g. "Spinner Star"). Any other
+// non-overlapping pair of recognized families is incompatible.
 bool FamiliesCompatible(const std::unordered_set<std::string>& fa, const std::unordered_set<std::string>& fb) {
     if (fa.empty() || fb.empty()) return true;
     for (const auto& x : fa) {
@@ -344,7 +346,8 @@ bool FamiliesCompatible(const std::unordered_set<std::string>& fa, const std::un
             }
         }
     }
-    if ((fa.count("spinner") && fb.count("star")) || (fa.count("star") && fb.count("spinner"))) {
+    if ((fa.count("spinner") && (fb.count("star") || fb.count("snowflake"))) ||
+        (fb.count("spinner") && (fa.count("star") || fa.count("snowflake")))) {
         return true;
     }
     return false;
@@ -442,15 +445,27 @@ double GroupMemberDimensionScore(int targetNodes, int targetWidth, int targetHei
 
 namespace AutoMapper {
 
-bool IsAStarModel(const std::string& name) {
-    // Unlike a spinning tree or matrix panel, a star/snowflake prop has no
-    // dedicated DisplayAs/modelClass - it's just a generic Custom/PolyLine
-    // model with an arbitrary node layout, so there's no structural signal
-    // to key off of (see IsTreeLikeModel/IsMatrixLikeModel). The only
-    // available signal is the name itself, via the same "star" family
-    // keywords (star, flake, snowflake, stickstar, stick) already used by
-    // FamiliesCompatible for fuzzy-match gating.
+bool IsAStarModel(const std::string& name, bool isGroup) {
+    // Unlike a spinning tree or matrix panel, a star prop has no dedicated
+    // DisplayAs/modelClass - it's just a generic Custom/PolyLine model with
+    // an arbitrary node layout, so there's no structural signal to key off
+    // of (see IsTreeLikeModel/IsMatrixLikeModel). The only available signal
+    // is the name itself, via the same "star" family keywords (star,
+    // stickstar, stick) already used by FamiliesCompatible for fuzzy-match
+    // gating. A ModelGroup is never itself a star model, same exclusion
+    // reasoning as IsMatrixLikeModel(isGroup).
+    if (isGroup) return false;
     return FuzzyModelFamilies(name).count("star") != 0;
+}
+
+bool IsASnowflakeModel(const std::string& name, bool isGroup) {
+    // Split out from IsAStarModel - "star" and "snowflake" are related but
+    // distinct naming families (see FUZZY_FAMILY_KEYWORDS), so a model
+    // named "Snowflake 1" should not be reported as a star candidate and
+    // vice versa. Same name-only/no-structural-signal reasoning as
+    // IsAStarModel, and same group exclusion as IsMatrixLikeModel(isGroup).
+    if (isGroup) return false;
+    return FuzzyModelFamilies(name).count("snowflake") != 0;
 }
 
 bool IsTreeLikeModel(const std::string& displayType) {
@@ -634,6 +649,14 @@ void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
     for (const auto& line : starSourceLines) spdlog::info("QuikMap {}: source star candidate {}", ruleLabel, line);
     for (const auto& line : starDestinationLines) spdlog::info("QuikMap {}: destination star candidate {}", ruleLabel, line);
 
+    // Same debug dump for the related-but-distinct snowflake family (see
+    // IsASnowflakeModel) - split out from star so a "Snowflake 1" model
+    // isn't reported as a star candidate or vice versa.
+    std::vector<std::string> snowflakeSourceLines, snowflakeDestinationLines;
+    DescribeSnowflakeCandidates(roots, available, snowflakeSourceLines, snowflakeDestinationLines);
+    for (const auto& line : snowflakeSourceLines) spdlog::info("QuikMap {}: source snowflake candidate {}", ruleLabel, line);
+    for (const auto& line : snowflakeDestinationLines) spdlog::info("QuikMap {}: destination snowflake candidate {}", ruleLabel, line);
+
     // Seed "used" with anything already mapped so this pass doesn't hand out
     // a source another phase already used.
     std::unordered_set<std::string> used;
@@ -722,6 +745,7 @@ void RunFamilyAnchoredFuzzy(const std::vector<ImportMappingNode*>& roots,
             ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
             : 0.0;
         const std::string targetType = Lower(Trim(model->GetModelType()));
+        const bool targetIsSinging = model->IsSingingProp();
 
         const AvailableSource* best = nullptr;
         double bestScore = 0.0;
@@ -731,6 +755,13 @@ void RunFamilyAnchoredFuzzy(const std::vector<ImportMappingNode*>& roots,
             if (used.count(Lower(Trim(src.displayName))) != 0) continue;
             bool srcIsGroup = (src.modelType == "ModelGroup");
             if (srcIsGroup != model->IsGroup()) continue;
+            // A singing prop's vendor mapping carries face/mouth-movement
+            // effect data that's meaningless on a non-singing destination
+            // (and vice versa) - e.g. "FlatTree-3" must not match vendor
+            // "Singing Tree Female" just because both share the "tree"
+            // family anchor token. Same guard as the sibling-mapping-reuse
+            // pass below (RunLikeModelBackfill).
+            if (src.isSingingProp != targetIsSinging) continue;
 
             // The anchor: a genuinely shared recognized family token (e.g.
             // "matrix"), not just FamiliesCompatible's permissive-when-empty
@@ -1642,13 +1673,34 @@ void DescribeStarCandidates(const std::vector<ImportMappingNode*>& roots,
                             std::vector<std::string>& outDestinationLines) {
     for (const auto& src : available) {
         if (src.canonicalName.find('/') != std::string::npos) continue;
-        if (!IsAStarModel(src.displayName)) continue;
+        if (!IsAStarModel(src.displayName, src.modelType == "ModelGroup")) continue;
         outSourceLines.push_back(fmt::format("'{}' (type={}, group={})",
-                                              src.displayName, src.modelType, src.modelType == "ModelGroup"));
+                                              src.displayName, src.displayType.empty() ? src.modelType : src.displayType,
+                                              src.modelType == "ModelGroup"));
     }
     for (auto* model : roots) {
         if (model == nullptr || model->IsSkipped()) continue;
-        if (!IsAStarModel(model->GetCoreModel())) continue;
+        if (!IsAStarModel(model->GetCoreModel(), model->IsGroup())) continue;
+        outDestinationLines.push_back(fmt::format("'{}' (type={}, group={}, mapped={}, skipped={})",
+                                                    model->GetCoreModel(), model->GetModelType(), model->IsGroup(),
+                                                    !model->GetMapping().empty(), model->IsSkipped()));
+    }
+}
+
+void DescribeSnowflakeCandidates(const std::vector<ImportMappingNode*>& roots,
+                                 const std::vector<AvailableSource>& available,
+                                 std::vector<std::string>& outSourceLines,
+                                 std::vector<std::string>& outDestinationLines) {
+    for (const auto& src : available) {
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (!IsASnowflakeModel(src.displayName, src.modelType == "ModelGroup")) continue;
+        outSourceLines.push_back(fmt::format("'{}' (type={}, group={})",
+                                              src.displayName, src.displayType.empty() ? src.modelType : src.displayType,
+                                              src.modelType == "ModelGroup"));
+    }
+    for (auto* model : roots) {
+        if (model == nullptr || model->IsSkipped()) continue;
+        if (!IsASnowflakeModel(model->GetCoreModel(), model->IsGroup())) continue;
         outDestinationLines.push_back(fmt::format("'{}' (type={}, group={}, mapped={}, skipped={})",
                                                     model->GetCoreModel(), model->GetModelType(), model->IsGroup(),
                                                     !model->GetMapping().empty(), model->IsSkipped()));

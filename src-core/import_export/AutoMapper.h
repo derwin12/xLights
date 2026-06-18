@@ -796,13 +796,22 @@ void RunLikeModelBackfill(const std::vector<ImportMappingNode*>& roots,
 bool IsTreeLikeModel(const std::string& displayType);
 
 // Returns true if name's tokens belong to the "star" family (keywords star,
-// flake, snowflake, stickstar, stick - see FUZZY_FAMILY_KEYWORDS). Unlike
+// stickstar, stick - see FUZZY_FAMILY_KEYWORDS; "flake"/"snowflake" are a
+// separate "snowflake" family, see IsASnowflakeModel). Unlike
 // IsTreeLikeModel/IsMatrixLikeModel, this has no structural DisplayAs/
-// modelClass to key off of - a star/snowflake prop is just a generic
-// Custom/PolyLine model with an arbitrary node layout - so it is name-based
-// only, reusing the same family signal FamiliesCompatible already uses for
-// fuzzy-match gating.
-bool IsAStarModel(const std::string& name);
+// modelClass to key off of - a star prop is just a generic Custom/PolyLine
+// model with an arbitrary node layout - so it is name-based only, reusing
+// the same family signal FamiliesCompatible already uses for fuzzy-match
+// gating. A ModelGroup (isGroup) is excluded outright, same reasoning as
+// IsMatrixLikeModel(isGroup).
+bool IsAStarModel(const std::string& name, bool isGroup);
+
+// Returns true if name's tokens belong to the "snowflake" family (keywords
+// flake, snowflake - see FUZZY_FAMILY_KEYWORDS). Split out from
+// IsAStarModel since "star" and "snowflake" are related but distinct
+// naming families - same name-only reasoning and group exclusion as
+// IsAStarModel.
+bool IsASnowflakeModel(const std::string& name, bool isGroup);
 
 // Returns true if the given model "class"/displayType/dimensions/isGroup
 // describe a matrix-like model. A ModelGroup (isGroup) is excluded outright
@@ -878,6 +887,20 @@ void DescribeStarCandidates(const std::vector<ImportMappingNode*>& roots,
                             const std::vector<AvailableSource>& available,
                             std::vector<std::string>& outSourceLines,
                             std::vector<std::string>& outDestinationLines);
+
+// Returns one descriptive line (name, type, group/mapped/skipped flags as
+// relevant) for every snowflake-family vendor source in `available` and
+// every snowflake-family, not-skipped destination root in `roots`, per
+// IsASnowflakeModel - regardless of mapped/selected state (a skipped
+// destination, e.g. a shadow model, is never a real candidate so it's
+// excluded outright rather than just flagged). Shared by
+// RunGroupContentFuzzy's debug log and the QuikMap dialog's detail-report
+// "Snowflake candidates identified" section, so both always agree with
+// whatever IsASnowflakeModel currently considers a match.
+void DescribeSnowflakeCandidates(const std::vector<ImportMappingNode*>& roots,
+                                 const std::vector<AvailableSource>& available,
+                                 std::vector<std::string>& outSourceLines,
+                                 std::vector<std::string>& outDestinationLines);
 
 // Matrix backfill pass (QuikMap Phase 93), run after RunLikeModelBackfill
 // and before RunGroupCoverageSkip/RunCatchAll. For each destination root
