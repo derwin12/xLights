@@ -795,6 +795,15 @@ void RunLikeModelBackfill(const std::vector<ImportMappingNode*>& roots,
 // classification regardless of which format a given model uses.
 bool IsTreeLikeModel(const std::string& displayType);
 
+// Returns true if name's tokens belong to the "star" family (keywords star,
+// flake, snowflake, stickstar, stick - see FUZZY_FAMILY_KEYWORDS). Unlike
+// IsTreeLikeModel/IsMatrixLikeModel, this has no structural DisplayAs/
+// modelClass to key off of - a star/snowflake prop is just a generic
+// Custom/PolyLine model with an arbitrary node layout - so it is name-based
+// only, reusing the same family signal FamiliesCompatible already uses for
+// fuzzy-match gating.
+bool IsAStarModel(const std::string& name);
+
 // Returns true if the given model "class"/displayType/dimensions/isGroup
 // describe a matrix-like model. A ModelGroup (isGroup) is excluded outright
 // - a group's width/height/nodeCount are aggregated/bounding-box values
@@ -830,8 +839,10 @@ bool IsMatrixLikeModel(const std::string& modelClass, const std::string& display
 
 // Returns one descriptive line (name, type, class, dims, group/mapped/
 // skipped flags as relevant) for every matrix-like vendor source in
-// `available` and every matrix-like destination root in `roots`, per
-// IsMatrixLikeModel - regardless of mapped/skipped/selected state. Shared by
+// `available` and every matrix-like, not-skipped destination root in
+// `roots`, per IsMatrixLikeModel - regardless of mapped/selected state (a
+// skipped destination, e.g. a shadow model, is never a real candidate so
+// it's excluded outright rather than just flagged). Shared by
 // RunMatrixBackfill's debug log and the QuikMap dialog's detail-report
 // "Matrix candidates identified" section, so both always agree with
 // whatever IsMatrixLikeModel currently considers a match.
@@ -842,13 +853,28 @@ void DescribeMatrixCandidates(const std::vector<ImportMappingNode*>& roots,
 
 // Returns one descriptive line (name, type, class, dims, group/mapped/
 // skipped flags as relevant) for every tree-like vendor source in
-// `available` and every tree-like destination root in `roots`, per
-// IsTreeLikeModel - regardless of mapped/skipped/selected state. Shared by
-// RunMatrixBackfill's debug log and the QuikMap dialog's detail-report
-// "Tree candidates identified" section - trees are explicitly excluded from
-// matrix classification (see IsMatrixLikeModel), so this surfaces what was
-// excluded for review/confirmation rather than what was matched.
+// `available` and every tree-like, not-skipped destination root in `roots`,
+// per IsTreeLikeModel - regardless of mapped/selected state (a skipped
+// destination, e.g. a shadow model, is never a real candidate so it's
+// excluded outright rather than just flagged). Shared by RunMatrixBackfill's
+// debug log and the QuikMap dialog's detail-report "Tree candidates
+// identified" section - trees are explicitly excluded from matrix
+// classification (see IsMatrixLikeModel), so this surfaces what was excluded
+// for review/confirmation rather than what was matched.
 void DescribeTreeCandidates(const std::vector<ImportMappingNode*>& roots,
+                            const std::vector<AvailableSource>& available,
+                            std::vector<std::string>& outSourceLines,
+                            std::vector<std::string>& outDestinationLines);
+
+// Returns one descriptive line (name, type, group/mapped/skipped flags as
+// relevant) for every star-family vendor source in `available` and every
+// star-family, not-skipped destination root in `roots`, per IsAStarModel -
+// regardless of mapped/selected state (a skipped destination, e.g. a shadow
+// model, is never a real candidate so it's excluded outright rather than
+// just flagged). Shared by RunGroupContentFuzzy's debug log and the QuikMap
+// dialog's detail-report "Star candidates identified" section, so both
+// always agree with whatever IsAStarModel currently considers a match.
+void DescribeStarCandidates(const std::vector<ImportMappingNode*>& roots,
                             const std::vector<AvailableSource>& available,
                             std::vector<std::string>& outSourceLines,
                             std::vector<std::string>& outDestinationLines);

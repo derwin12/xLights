@@ -442,6 +442,17 @@ double GroupMemberDimensionScore(int targetNodes, int targetWidth, int targetHei
 
 namespace AutoMapper {
 
+bool IsAStarModel(const std::string& name) {
+    // Unlike a spinning tree or matrix panel, a star/snowflake prop has no
+    // dedicated DisplayAs/modelClass - it's just a generic Custom/PolyLine
+    // model with an arbitrary node layout, so there's no structural signal
+    // to key off of (see IsTreeLikeModel/IsMatrixLikeModel). The only
+    // available signal is the name itself, via the same "star" family
+    // keywords (star, flake, snowflake, stickstar, stick) already used by
+    // FamiliesCompatible for fuzzy-match gating.
+    return FuzzyModelFamilies(name).count("star") != 0;
+}
+
 bool IsTreeLikeModel(const std::string& displayType) {
     // A spinning tree shows up in two DisplayAs formats: the old combined
     // form ("Tree 180"/"Tree 360", shape+rotation baked into the string -
@@ -612,6 +623,16 @@ void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
         }
         selectMapTarget = !selectedTargets.empty();
     }
+
+    // Debug dump: every star-family vendor source and destination root this
+    // phase can see (by name, since stars have no DisplayAs/modelClass
+    // signal - see IsAStarModel), regardless of mapped/skipped/selected
+    // state, so a QuikMap run's spdlog log shows what was/wasn't recognized
+    // as a star on each side when reviewing a group-content fuzzy match.
+    std::vector<std::string> starSourceLines, starDestinationLines;
+    DescribeStarCandidates(roots, available, starSourceLines, starDestinationLines);
+    for (const auto& line : starSourceLines) spdlog::info("QuikMap {}: source star candidate {}", ruleLabel, line);
+    for (const auto& line : starDestinationLines) spdlog::info("QuikMap {}: destination star candidate {}", ruleLabel, line);
 
     // Seed "used" with anything already mapped so this pass doesn't hand out
     // a source another phase already used.
@@ -1585,7 +1606,7 @@ void DescribeMatrixCandidates(const std::vector<ImportMappingNode*>& roots,
                                               src.nodeCount, src.modelType == "ModelGroup"));
     }
     for (auto* model : roots) {
-        if (model == nullptr) continue;
+        if (model == nullptr || model->IsSkipped()) continue;
         if (!IsMatrixLikeModel(model->GetModelClass(), model->GetModelType(), model->GetWidth(), model->GetHeight(), model->GetNodeCount(), model->GetDepth(), model->IsGroup())) continue;
         outDestinationLines.push_back(fmt::format("'{}' (type={}, class={}, {}x{}, {} nodes, group={}, mapped={}, skipped={})",
                                                     model->GetCoreModel(), model->GetModelType(), model->GetModelClass(),
@@ -1606,11 +1627,30 @@ void DescribeTreeCandidates(const std::vector<ImportMappingNode*>& roots,
                                               src.nodeCount, src.modelType == "ModelGroup"));
     }
     for (auto* model : roots) {
-        if (model == nullptr) continue;
+        if (model == nullptr || model->IsSkipped()) continue;
         if (!IsTreeLikeModel(model->GetModelType())) continue;
         outDestinationLines.push_back(fmt::format("'{}' (type={}, class={}, {}x{}, {} nodes, group={}, mapped={}, skipped={})",
                                                     model->GetCoreModel(), model->GetModelType(), model->GetModelClass(),
                                                     model->GetWidth(), model->GetHeight(), model->GetNodeCount(), model->IsGroup(),
+                                                    !model->GetMapping().empty(), model->IsSkipped()));
+    }
+}
+
+void DescribeStarCandidates(const std::vector<ImportMappingNode*>& roots,
+                            const std::vector<AvailableSource>& available,
+                            std::vector<std::string>& outSourceLines,
+                            std::vector<std::string>& outDestinationLines) {
+    for (const auto& src : available) {
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (!IsAStarModel(src.displayName)) continue;
+        outSourceLines.push_back(fmt::format("'{}' (type={}, group={})",
+                                              src.displayName, src.modelType, src.modelType == "ModelGroup"));
+    }
+    for (auto* model : roots) {
+        if (model == nullptr || model->IsSkipped()) continue;
+        if (!IsAStarModel(model->GetCoreModel())) continue;
+        outDestinationLines.push_back(fmt::format("'{}' (type={}, group={}, mapped={}, skipped={})",
+                                                    model->GetCoreModel(), model->GetModelType(), model->IsGroup(),
                                                     !model->GetMapping().empty(), model->IsSkipped()));
     }
 }

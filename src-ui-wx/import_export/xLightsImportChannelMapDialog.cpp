@@ -4180,6 +4180,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         summary << "\n" << GenerateQuikMapMappedRootsReport();
         summary << "\n" << GenerateQuikMapMatrixCandidateReport();
         summary << "\n" << GenerateQuikMapTreeCandidateReport();
+        summary << "\n" << GenerateQuikMapStarCandidateReport();
         summary << "\n" << GenerateQuikMapDetailReport();
     }
 
@@ -4353,6 +4354,39 @@ wxString xLightsImportChannelMapDialog::GenerateQuikMapTreeCandidateReport()
 
     wxString report;
     report << wxString::Format("Tree candidates identified (excluded from Phase 93 matrix matching, %d source / %d destination):\n",
+                                static_cast<int>(sourceLines.size()), static_cast<int>(destinationLines.size()));
+    report << "  Source:\n";
+    for (const auto& line : sourceLines) report << "    " << line << "\n";
+    report << "  Destination:\n";
+    for (const auto& line : destinationLines) report << "    " << line << "\n";
+    return report;
+}
+
+wxString xLightsImportChannelMapDialog::GenerateQuikMapStarCandidateReport()
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+        }
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::vector<std::string> sourceLines, destinationLines;
+    AutoMapper::DescribeStarCandidates(roots, available, sourceLines, destinationLines);
+
+    wxString report;
+    report << wxString::Format("Star candidates identified (Phase 26, %d source / %d destination):\n",
                                 static_cast<int>(sourceLines.size()), static_cast<int>(destinationLines.size()));
     report << "  Source:\n";
     for (const auto& line : sourceLines) report << "    " << line << "\n";
