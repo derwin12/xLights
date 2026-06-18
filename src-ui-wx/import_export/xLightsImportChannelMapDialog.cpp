@@ -973,7 +973,7 @@ public:
 };
 
 // One row in the post-QuikMap review window - a single root-level match
-// from one of the "guessy" later phases (32/41/90/100/105/110/115/120/125),
+// from one of the "guessy" later phases (32/41/90/93/100/105/110/115/120/125),
 // plus the verdict the user assigns it ("", "Good", or "Bad").
 struct QuikMapReviewRow {
     xLightsImportModelNode* node;
@@ -1007,7 +1007,7 @@ public:
         auto* mainSizer = new wxBoxSizer(wxVERTICAL);
         mainSizer->Add(new wxStaticText(this, wxID_ANY,
             "These matches came from QuikMap's later, less name-driven phases "
-            "(32/41/90/100/105/110/115/120/125). Select rows and mark them Good "
+            "(32/41/90/93/100/105/110/115/120/125). Select rows and mark them Good "
             "or Bad, then save - the feedback file helps tune these phases later."),
             0, wxALL, 5);
 
@@ -3990,6 +3990,23 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
+    // Phase 93: matrix backfill. For an unmapped destination that's a
+    // matrix-like model (modelClass "Matrix", or a Custom model whose node
+    // count is close to its width*height grid), map it to a still-unmapped
+    // matrix-like vendor source, using any unused one first and cycling
+    // through the pool by closest dimension fit once those run out.
+    before = after;
+    spdlog::info("QuikMap: Phase 93 - Looking for matrix backfill matches... ({} unmapped roots)", before);
+    if (dlg) dlg->Update(89, "Phase 93: Looking for matrix backfill matches...");
+    DoMatrixBackfill(select, "Phase 93: MatrixBackfill");
+    after = CountUnmappedRoots();
+    int phase93 = before - after;
+    spdlog::info("QuikMap: Phase 93 complete - {} matches found", phase93);
+    summary << wxString::Format("Phase 93: Matrix backfill matches found: %d\n", phase93);
+    if (dlg) dlg->Update(89, wxString::Format("Phase 93 complete - matrix backfill matches found: %d", phase93));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
     // Phase 95: group-coverage skip. If an already-mapped destination group
     // is made up entirely of one model type (e.g. a group of Arches), mark
     // its individual member models as skipped so Phase 120 doesn't
@@ -4161,6 +4178,8 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
 
     if (detailedReport) {
         summary << "\n" << GenerateQuikMapMappedRootsReport();
+        summary << "\n" << GenerateQuikMapMatrixCandidateReport();
+        summary << "\n" << GenerateQuikMapTreeCandidateReport();
         summary << "\n" << GenerateQuikMapDetailReport();
     }
 
@@ -4181,6 +4200,7 @@ static const std::unordered_set<std::string> QUIKMAP_REVIEW_PHASES = {
     "Phase 32: SingingPropBackfill",
     "Phase 41: FloodlightBackfill",
     "Phase 90: LikeModel",
+    "Phase 93: MatrixBackfill",
     "Phase 100: CustomDimension",
     "Phase 105: ModelTypeCatchall",
     "Phase 110: GroupMemberDimension",
@@ -4256,6 +4276,88 @@ wxString xLightsImportChannelMapDialog::GenerateQuikMapMappedRootsReport() const
 
     report << wxString::Format("Mapped Models (%d):\n", modelCount) << models;
     report << wxString::Format("\nMapped Groups (%d):\n", groupCount) << groups;
+    return report;
+}
+
+wxString xLightsImportChannelMapDialog::GenerateQuikMapMatrixCandidateReport()
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.modelClass = ic->modelClass;
+                src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
+                src.width = ic->width;
+                src.height = ic->height;
+                src.depth = ic->depth;
+            }
+        }
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::vector<std::string> sourceLines, destinationLines;
+    AutoMapper::DescribeMatrixCandidates(roots, available, sourceLines, destinationLines);
+
+    wxString report;
+    report << wxString::Format("Matrix candidates identified (Phase 93, %d source / %d destination):\n",
+                                static_cast<int>(sourceLines.size()), static_cast<int>(destinationLines.size()));
+    report << "  Source:\n";
+    for (const auto& line : sourceLines) report << "    " << line << "\n";
+    report << "  Destination:\n";
+    for (const auto& line : destinationLines) report << "    " << line << "\n";
+    return report;
+}
+
+wxString xLightsImportChannelMapDialog::GenerateQuikMapTreeCandidateReport()
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.modelClass = ic->modelClass;
+                src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
+                src.width = ic->width;
+                src.height = ic->height;
+                src.depth = ic->depth;
+            }
+        }
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::vector<std::string> sourceLines, destinationLines;
+    AutoMapper::DescribeTreeCandidates(roots, available, sourceLines, destinationLines);
+
+    wxString report;
+    report << wxString::Format("Tree candidates identified (excluded from Phase 93 matrix matching, %d source / %d destination):\n",
+                                static_cast<int>(sourceLines.size()), static_cast<int>(destinationLines.size()));
+    report << "  Source:\n";
+    for (const auto& line : sourceLines) report << "    " << line << "\n";
+    report << "  Destination:\n";
+    for (const auto& line : destinationLines) report << "    " << line << "\n";
     return report;
 }
 
@@ -5132,6 +5234,55 @@ void xLightsImportChannelMapDialog::DoLikeModelBackfill(bool select, const std::
     AutoMapper::RunLikeModelBackfill(roots, available, select, selectedTargets, ruleLabel);
 }
 
+void xLightsImportChannelMapDialog::DoMatrixBackfill(bool select, const std::string& ruleLabel)
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.modelClass = ic->modelClass;
+                src.isSingingProp = ic->isSingingProp;
+                src.aliases = ic->aliases;
+                src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
+                src.width = ic->width;
+                src.height = ic->height;
+                src.depth = ic->depth;
+                src.strandCount = ic->strandCount;
+                if (!ic->groupModels.empty()) {
+                    for (const auto& memberName : wxSplit(ic->groupModels, ',')) {
+                        src.groupMemberNames.push_back(memberName.ToStdString());
+                    }
+                }
+            }
+        }
+        src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::unordered_set<const ImportMappingNode*> selectedTargets;
+    if (select && TreeListCtrl_Mapping->GetSelectedItemsCount() != 0) {
+        wxDataViewItemArray targetSelectedItems;
+        TreeListCtrl_Mapping->GetSelections(targetSelectedItems);
+        for (const wxDataViewItem& it : targetSelectedItems) {
+            selectedTargets.insert(static_cast<xLightsImportModelNode*>(it.GetID()));
+        }
+    }
+
+    AutoMapper::RunMatrixBackfill(roots, available, select, selectedTargets, ruleLabel);
+}
+
 void xLightsImportChannelMapDialog::DoGroupCoverageSkip(const std::string& ruleLabel)
 {
     std::vector<ImportMappingNode*> roots;
@@ -5390,14 +5541,26 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                         mm->height = h;
                         mm->depth = d;
                     } else if (mm->type == XmlNodeKeys::CustomType) {
-                        auto data = XmlSerialize::ParseCustomModel(node.attribute(XmlNodeKeys::CustomModelAttribute).as_string());
+                        // A vendor Custom model stores its grid as either the
+                        // uncompressed "CustomModel" attribute or the
+                        // "CustomModelCompressed" attribute - ParseCustomModelDataFromXml
+                        // picks whichever is present (compressed preferred). Calling
+                        // ParseCustomModel directly on just the CustomModel attribute
+                        // silently produced an empty grid (nodeCount/width/height all
+                        // 0) for any vendor model saved in compressed form.
+                        auto data = XmlSerialize::ParseCustomModelDataFromXml(node);
                         int count = 0;
                         int maxRow = 0;
                         int maxCol = 0;
                         for (int l = 0; l < (int)data.size(); l++) {
                             for (int r = 0; r < (int)data[l].size(); r++) {
                                 for (int c = 0; c < (int)data[l][r].size(); c++) {
-                                    if (data[l][r][c] != 0) {
+                                    // Both ParseCustomModel and ParseCompressed fill
+                                    // empty grid cells with -1 (see CustomModel.cpp's
+                                    // own val > 0 convention) - a plain != 0 check
+                                    // counts every empty cell as a node too, inflating
+                                    // nodeCount to ~width*height for every Custom model.
+                                    if (data[l][r][c] > 0) {
                                         ++count;
                                         if (r + 1 > maxRow) maxRow = r + 1;
                                         if (c + 1 > maxCol) maxCol = c + 1;

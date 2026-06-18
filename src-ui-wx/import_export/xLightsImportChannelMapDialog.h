@@ -591,6 +591,8 @@ class xLightsImportChannelMapDialog: public wxDialog
         void ShowQuikMapReviewWindow();
         wxString GenerateQuikMapMappedRootsReport() const;
         wxString GenerateQuikMapDetailReport() const;
+        wxString GenerateQuikMapMatrixCandidateReport();
+        wxString GenerateQuikMapTreeCandidateReport();
         void SaveXMapMapping(wxString const& filename);
 
         xLightsImportTreeModel *_dataModel;
@@ -763,6 +765,7 @@ protected:
         void DoFloodlightBackfill(bool select, const std::string& ruleLabel = "");
         void DoBestGuess(bool select, const std::string& ruleLabel = "");
         void DoLikeModelBackfill(bool select, const std::string& ruleLabel = "");
+        void DoMatrixBackfill(bool select, const std::string& ruleLabel = "");
         void DoGroupCoverageSkip(const std::string& ruleLabel = "");
         int CountUnmappedRoots() const;
         int CountUnmappedDescendants() const;

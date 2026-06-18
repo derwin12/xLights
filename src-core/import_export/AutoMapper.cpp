@@ -17,6 +17,7 @@
 #include "utils/string_utils.h"
 
 #include <spdlog/spdlog.h>
+#include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
 #include <cctype>
@@ -440,6 +441,64 @@ double GroupMemberDimensionScore(int targetNodes, int targetWidth, int targetHei
 } // namespace
 
 namespace AutoMapper {
+
+bool IsTreeLikeModel(const std::string& displayType) {
+    // A spinning tree shows up in two DisplayAs formats: the old combined
+    // form ("Tree 180"/"Tree 360", shape+rotation baked into the string -
+    // StartsWith "Tree ") and the new form (bare "Tree", with the
+    // shape/rotation broken out into a separate attribute). Both must be
+    // recognized here since Model::DetermineClass only handles the old
+    // format (grouping it under the same "Matrix" modelClass as a real
+    // Horiz/Vert Matrix panel) and leaves the new bare "Tree" unclassified.
+    return displayType == "Tree" || StartsWith(displayType, "Tree ");
+}
+
+bool IsMatrixLikeModel(const std::string& modelClass, const std::string& displayType, int width, int height, int nodeCount, int depth, bool isGroup) {
+    // A ModelGroup is never matrix-like, even one whose own modelClass or
+    // bounding-box dimensions happen to look right - a group's
+    // width/height/nodeCount are aggregated/bounding-box values across all
+    // its members (e.g. an "everything" group like "02 All No Forest No
+    // MT"), not a real grid, and can coincidentally satisfy the
+    // dimension-based ratio check below for completely unrelated reasons.
+    if (isGroup) return false;
+    // A spinning tree (see IsTreeLikeModel), a Cube model (DisplayAs
+    // "Cube"), and a Sphere model (DisplayAs "Sphere") are never a matrix,
+    // checked by displayType directly rather than modelClass, because
+    // Model::DetermineClass doesn't classify a bare "Tree", "Cube", or
+    // "Sphere" at all - all three fall through to modelClass "", which
+    // would otherwise let them slip into the dimension-based fallback below
+    // (e.g. a Cube's CubeWidth x CubeHeight x its node count, or a Sphere's
+    // similarly-derived width/height x node count, is numerically
+    // indistinguishable from a flat matrix grid).
+    if (IsTreeLikeModel(displayType)) return false;
+    if (displayType == "Cube" || StartsWith(displayType, "Cube ")) return false;
+    if (displayType == "Sphere" || StartsWith(displayType, "Sphere ")) return false;
+
+    if (modelClass == "Matrix") return true;
+    // Any other recognized class (e.g. "Line" for Arches/Single Line/Poly
+    // Line/Candy Canes/Circle/Window Frame, "SingingFace", "SpiralTree") is
+    // definitively NOT a matrix, regardless of its width/height/nodeCount -
+    // a "Triple Arches" model is laid out as 3 strings x N pixels, which is
+    // numerically indistinguishable from a 3xN matrix grid by dimensions
+    // alone. The dimension-based fallback below is only meaningful for
+    // models with no recognized class at all (plain "Custom" models, or a
+    // bare DisplayAs="Matrix" which Model::DetermineClass doesn't classify).
+    // TODO: Model::DetermineClass has no dedicated classification for a
+    // generic Custom model (it falls through to "" unless it's a singing
+    // face) - revisit giving plain Custom models their own recognized class
+    // (or at least a sub-classification, e.g. "Custom:Matrix" vs.
+    // "Custom:Outline" vs. "Custom:Sparse") so this dimension-based guess
+    // isn't the only signal available for them.
+    if (!modelClass.empty()) return false;
+    // A volumetric model (e.g. a 3D Cube/Cylinder, depth > 1) is never a
+    // flat matrix, regardless of its width/height/nodeCount - same
+    // depth-guard spirit as the dimension-based checks in Phase 105/110/115/120.
+    if (depth > 1) return false;
+    if (width <= 1 || height <= 1 || nodeCount <= 0) return false;
+    double full = static_cast<double>(width) * static_cast<double>(height);
+    double ratio = static_cast<double>(nodeCount) / full;
+    return ratio >= 0.5 && ratio <= 1.0;
+}
 
 bool MatchNorm(const std::string& target, const std::string& candidate,
                const std::string&, const std::string&,
@@ -1510,6 +1569,149 @@ void RunLikeModelBackfill(const std::vector<ImportMappingNode*>& roots,
             model->Map(sibling->GetMapping(), "Model");
             model->SetMappingRule(ruleLabel);
             break;
+        }
+    }
+}
+
+void DescribeMatrixCandidates(const std::vector<ImportMappingNode*>& roots,
+                              const std::vector<AvailableSource>& available,
+                              std::vector<std::string>& outSourceLines,
+                              std::vector<std::string>& outDestinationLines) {
+    for (const auto& src : available) {
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (!IsMatrixLikeModel(src.modelClass, src.displayType, src.width, src.height, src.nodeCount, src.depth, src.modelType == "ModelGroup")) continue;
+        outSourceLines.push_back(fmt::format("'{}' (type={}, class={}, {}x{}, {} nodes, group={})",
+                                              src.displayName, src.displayType, src.modelClass, src.width, src.height,
+                                              src.nodeCount, src.modelType == "ModelGroup"));
+    }
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!IsMatrixLikeModel(model->GetModelClass(), model->GetModelType(), model->GetWidth(), model->GetHeight(), model->GetNodeCount(), model->GetDepth(), model->IsGroup())) continue;
+        outDestinationLines.push_back(fmt::format("'{}' (type={}, class={}, {}x{}, {} nodes, group={}, mapped={}, skipped={})",
+                                                    model->GetCoreModel(), model->GetModelType(), model->GetModelClass(),
+                                                    model->GetWidth(), model->GetHeight(), model->GetNodeCount(), model->IsGroup(),
+                                                    !model->GetMapping().empty(), model->IsSkipped()));
+    }
+}
+
+void DescribeTreeCandidates(const std::vector<ImportMappingNode*>& roots,
+                            const std::vector<AvailableSource>& available,
+                            std::vector<std::string>& outSourceLines,
+                            std::vector<std::string>& outDestinationLines) {
+    for (const auto& src : available) {
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (!IsTreeLikeModel(src.displayType)) continue;
+        outSourceLines.push_back(fmt::format("'{}' (type={}, class={}, {}x{}, {} nodes, group={})",
+                                              src.displayName, src.displayType, src.modelClass, src.width, src.height,
+                                              src.nodeCount, src.modelType == "ModelGroup"));
+    }
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!IsTreeLikeModel(model->GetModelType())) continue;
+        outDestinationLines.push_back(fmt::format("'{}' (type={}, class={}, {}x{}, {} nodes, group={}, mapped={}, skipped={})",
+                                                    model->GetCoreModel(), model->GetModelType(), model->GetModelClass(),
+                                                    model->GetWidth(), model->GetHeight(), model->GetNodeCount(), model->IsGroup(),
+                                                    !model->GetMapping().empty(), model->IsSkipped()));
+    }
+}
+
+void RunMatrixBackfill(const std::vector<ImportMappingNode*>& roots,
+                       const std::vector<AvailableSource>& available,
+                       bool selectOnly,
+                       const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                       const std::string& ruleLabel) {
+    bool selectMapAvail = false;
+    bool selectMapTarget = false;
+    if (selectOnly) {
+        for (const auto& a : available) {
+            if (a.selected) { selectMapAvail = true; break; }
+        }
+        selectMapTarget = !selectedTargets.empty();
+    }
+
+    // Debug dump: every matrix-like vendor source and destination root this
+    // phase can see, regardless of mapped/skipped/selected state, so a
+    // QuikMap run's spdlog log shows exactly what was/wasn't identified as a
+    // matrix on each side. Same data is surfaced in the QuikMap detail
+    // report via DescribeMatrixCandidates - see
+    // xLightsImportChannelMapDialog::GenerateQuikMapMatrixCandidateReport().
+    std::vector<std::string> sourceLines, destinationLines;
+    DescribeMatrixCandidates(roots, available, sourceLines, destinationLines);
+    for (const auto& line : sourceLines) spdlog::info("QuikMap Phase 93: source matrix candidate {}", line);
+    for (const auto& line : destinationLines) spdlog::info("QuikMap Phase 93: destination matrix candidate {}", line);
+
+    // Same debug dump for tree-like sources/destinations - these are
+    // explicitly excluded from matrix classification (see IsTreeLikeModel),
+    // logged here too so a run's spdlog log confirms a spinning tree wasn't
+    // accidentally swept into the matrix pool above.
+    std::vector<std::string> treeSourceLines, treeDestinationLines;
+    DescribeTreeCandidates(roots, available, treeSourceLines, treeDestinationLines);
+    for (const auto& line : treeSourceLines) spdlog::info("QuikMap Phase 93: source tree candidate (excluded from matrix) {}", line);
+    for (const auto& line : treeDestinationLines) spdlog::info("QuikMap Phase 93: destination tree candidate (excluded from matrix) {}", line);
+
+    // Pool of matrix-like vendor sources (model<->model only - groups are
+    // never matrix-like, see IsMatrixLikeModel), used round-robin once every
+    // still-unused one has been claimed.
+    std::vector<const AvailableSource*> pool;
+    for (const auto& src : available) {
+        if (selectMapAvail && !src.selected) continue;
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (!IsMatrixLikeModel(src.modelClass, src.displayType, src.width, src.height, src.nodeCount, src.depth, src.modelType == "ModelGroup")) continue;
+        pool.push_back(&src);
+    }
+    if (pool.empty()) return;
+
+    // Names already claimed by an earlier phase - those pool members start
+    // "used" so an actually-unclaimed matrix source is preferred first.
+    std::unordered_map<const AvailableSource*, int> useCount;
+    for (auto* src : pool) {
+        bool alreadyUsed = false;
+        for (auto* model : roots) {
+            if (model == nullptr || model->GetMapping().empty()) continue;
+            if (Lower(Trim(model->GetMapping())) == Lower(Trim(src->displayName))) { alreadyUsed = true; break; }
+        }
+        useCount[src] = alreadyUsed ? 1 : 0;
+    }
+
+    for (auto* model : roots) {
+        if (model == nullptr || model->IsSkipped()) continue;
+        if (!model->GetMapping().empty()) continue;
+        if (selectMapTarget && selectedTargets.count(model) == 0) continue;
+        if (!IsMatrixLikeModel(model->GetModelClass(), model->GetModelType(), model->GetWidth(), model->GetHeight(), model->GetNodeCount(), model->GetDepth(), model->IsGroup())) continue;
+
+        const int targetNodes = model->GetNodeCount();
+        const int targetWidth = model->GetWidth();
+        const int targetHeight = model->GetHeight();
+        const double targetAspect = (targetWidth > 0 && targetHeight > 0)
+            ? static_cast<double>(targetWidth) / static_cast<double>(targetHeight)
+            : 0.0;
+        const std::string targetType = Lower(Trim(model->GetModelType()));
+
+        const AvailableSource* best = nullptr;
+        double bestScore = 0.0;
+        const AvailableSource* bestUnused = nullptr;
+        double bestUnusedScore = 0.0;
+        for (const auto* src : pool) {
+            // Both model and src are guaranteed non-group here -
+            // IsMatrixLikeModel(isGroup=true) always returns false, so the
+            // pool never contains a ModelGroup and this loop never reaches a
+            // group destination either.
+            double score = GroupMemberDimensionScore(targetNodes, targetWidth, targetHeight, targetAspect, targetType, *src);
+            if (best == nullptr || score < bestScore) {
+                best = src;
+                bestScore = score;
+            }
+            if (useCount[src] == 0 && (bestUnused == nullptr || score < bestUnusedScore)) {
+                bestUnused = src;
+                bestUnusedScore = score;
+            }
+        }
+
+        const AvailableSource* chosen = bestUnused != nullptr ? bestUnused : best;
+        if (chosen != nullptr) {
+            model->Map(chosen->displayName, chosen->modelType);
+            model->SetMappingRule(ruleLabel);
+            ++useCount[chosen];
         }
     }
 }

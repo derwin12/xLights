@@ -25,7 +25,7 @@ namespace AutoMapper {
 // Version tag for the QuikMap report summary (DoQuikMap's `summary` /
 // QuikMapReport.log). Bump this (v1.00 -> v1.01 -> ...) whenever the report
 // format/content changes, so old logs can be told apart from new ones.
-constexpr auto QUIKMAP_REPORT_VERSION = "v1.14";
+constexpr auto QUIKMAP_REPORT_VERSION = "v1.21";
 
 // QuikMap phases, in the order xLightsImportChannelMapDialog::DoQuikMap runs
 // them. Numbers are spaced by 5 so new phases can be inserted between
@@ -265,6 +265,34 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.14";
 //             RunLikeModelBackfill().
 //             e.g. dest "Cane-4" is unmapped; sibling "Cane-1" maps to
 //             vendor "Cane 1" → candidate "Cane 4" is found and assigned.
+//
+//   Phase 93: Matrix backfill - for each destination root still unmapped,
+//             not a group, and not skipped that is "matrix-like" (never a
+//             ModelGroup - a group's width/height/nodeCount are
+//             aggregated/bounding-box values, not a real grid; modelClass
+//             == "Matrix" i.e. DisplayAs "Horiz Matrix"/"Vert Matrix" - NOT
+//             "Tree N"/bare "Tree"/"Cube"/"Sphere", all excluded outright by
+//             displayType regardless of class - OR an unclassified
+//             (modelClass empty) flat (depth <= 1) model/Custom model whose
+//             width and height are both > 1 and whose node count is close
+//             to width*height - see IsMatrixLikeModel()), maps it to a
+//             still-unmapped matrix-like vendor model (never a group -
+//             same exclusion applies to vendor sources), picking the
+//             dimensionally-closest one (GroupMemberDimensionScore). Once
+//             every matrix-like vendor source has been used at least once,
+//             falls back to reusing the
+//             best-scoring one (same never-used-before-reuse pattern as
+//             Phase 115) so destinations beyond the vendor's matrix count
+//             still get a usable mapping rather than being left for the
+//             blind Phase 105/120 catch-alls. Logs every matrix-like source
+//             and destination candidate it finds (name + dims) for
+//             debugging. Runs after Phase 90 and before Phase 95. See
+//             RunMatrixBackfill().
+//             e.g. dest "Matrix 2" (Horiz Matrix, modelClass "Matrix") and
+//             dest "Pixel Grid" (Custom, 32x16, 512 nodes - exactly
+//             width*height) both match vendor matrix sources by closest
+//             dimension fit; a 3rd dest matrix beyond the vendor's count
+//             reuses whichever vendor matrix scored best.
 //
 //   Phase 95: Group-coverage skip - for each already-mapped destination group
 //             whose members all belong to the same model family (e.g. a
@@ -755,6 +783,95 @@ void RunLikeModelBackfill(const std::vector<ImportMappingNode*>& roots,
                           bool selectOnly,
                           const std::unordered_set<const ImportMappingNode*>& selectedTargets,
                           const std::string& ruleLabel = "");
+
+// Returns true if displayType identifies a spinning tree model, in either
+// the old combined DisplayAs format ("Tree N", e.g. "Tree 180"/"Tree 360" -
+// shape+rotation baked into the string) or the new format (bare "Tree",
+// with shape/rotation broken out into a separate attribute). Both must be
+// checked because Model::DetermineClass only recognizes the old format
+// (grouping it under the same "Matrix" modelClass as a real Horiz/Vert
+// Matrix panel) and leaves the new bare "Tree" unclassified (modelClass
+// ""). Used by IsMatrixLikeModel to exclude spinning trees from matrix
+// classification regardless of which format a given model uses.
+bool IsTreeLikeModel(const std::string& displayType);
+
+// Returns true if the given model "class"/displayType/dimensions/isGroup
+// describe a matrix-like model. A ModelGroup (isGroup) is excluded outright
+// - a group's width/height/nodeCount are aggregated/bounding-box values
+// across its members (e.g. an "everything" group), not a real grid, and can
+// coincidentally satisfy the dimension-based ratio check below for
+// completely unrelated reasons. Next, displayType is checked directly for
+// three never-a-matrix DisplayAs types, because Model::DetermineClass
+// handles them inconsistently: a spinning tree (see IsTreeLikeModel), a
+// Cube model ("Cube"), and a Sphere model ("Sphere") are all excluded
+// outright - "Tree N" is grouped under the same "Matrix" modelClass as a
+// real Horiz/Vert Matrix panel, while a bare "Tree", "Cube", and "Sphere"
+// aren't classified at all by DetermineClass and fall through to modelClass
+// "" - all these paths would otherwise reach the dimension-based fallback
+// below, and e.g. a Cube's width x height x node count is numerically
+// indistinguishable from a flat matrix grid even at depth 1. After that:
+// modelClass == "Matrix" (DetermineClass's recognized class for DisplayAs
+// "Horiz Matrix"/"Vert Matrix"/"Tree N") returns true. Any other non-empty
+// modelClass (e.g. "Line" for Arches/Single Line/Poly Line/Candy
+// Canes/Circle/Window Frame, "SingingFace", "SpiralTree") is definitively
+// NOT a matrix and returns false outright - a "Triple Arches" model (3
+// strings x N pixels) is numerically indistinguishable from a 3xN matrix
+// grid by dimensions alone, so the class check must come first and be
+// authoritative whenever it's known. Only when modelClass is empty
+// (unrecognized - a plain "Custom" model, or a bare DisplayAs="Matrix"
+// which Model::DetermineClass doesn't classify) does this fall back to a
+// dimension-based guess: a genuine 2D grid (width > 1 AND height > 1) whose
+// nodeCount is close to (at least half of, and no more than) width*height,
+// AND depth <= 1 (a volumetric model is never a flat matrix regardless of
+// its width/height/nodeCount) - distinguishing a dense Custom-model
+// matrix/panel from a sparse Custom shape (e.g. a star or snowflake) that
+// happens to have width/height set from its bounding box.
+bool IsMatrixLikeModel(const std::string& modelClass, const std::string& displayType, int width, int height, int nodeCount, int depth, bool isGroup);
+
+// Returns one descriptive line (name, type, class, dims, group/mapped/
+// skipped flags as relevant) for every matrix-like vendor source in
+// `available` and every matrix-like destination root in `roots`, per
+// IsMatrixLikeModel - regardless of mapped/skipped/selected state. Shared by
+// RunMatrixBackfill's debug log and the QuikMap dialog's detail-report
+// "Matrix candidates identified" section, so both always agree with
+// whatever IsMatrixLikeModel currently considers a match.
+void DescribeMatrixCandidates(const std::vector<ImportMappingNode*>& roots,
+                              const std::vector<AvailableSource>& available,
+                              std::vector<std::string>& outSourceLines,
+                              std::vector<std::string>& outDestinationLines);
+
+// Returns one descriptive line (name, type, class, dims, group/mapped/
+// skipped flags as relevant) for every tree-like vendor source in
+// `available` and every tree-like destination root in `roots`, per
+// IsTreeLikeModel - regardless of mapped/skipped/selected state. Shared by
+// RunMatrixBackfill's debug log and the QuikMap dialog's detail-report
+// "Tree candidates identified" section - trees are explicitly excluded from
+// matrix classification (see IsMatrixLikeModel), so this surfaces what was
+// excluded for review/confirmation rather than what was matched.
+void DescribeTreeCandidates(const std::vector<ImportMappingNode*>& roots,
+                            const std::vector<AvailableSource>& available,
+                            std::vector<std::string>& outSourceLines,
+                            std::vector<std::string>& outDestinationLines);
+
+// Matrix backfill pass (QuikMap Phase 93), run after RunLikeModelBackfill
+// and before RunGroupCoverageSkip/RunCatchAll. For each destination root
+// that is still unmapped, not a group, and not skipped, and is matrix-like
+// (see IsMatrixLikeModel()), maps it to a still-unmapped matrix-like vendor
+// model/group (model<->model, group<->group), preferring the dimensionally-
+// closest one (GroupMemberDimensionScore). A still-unused vendor matrix
+// source is always preferred over reusing one already claimed by this pass;
+// once every vendor matrix source has been used at least once, the closest-
+// scoring one is reused (cycling back through the same pool) so destination
+// matrices beyond the vendor's matrix count still get mapped rather than
+// being left for the blind Phase 105/120 catch-alls. For debugging, logs
+// (via spdlog) every matrix-like source and destination candidate it
+// identifies, including ones already mapped/skipped, before doing any
+// mapping.
+void RunMatrixBackfill(const std::vector<ImportMappingNode*>& roots,
+                       const std::vector<AvailableSource>& available,
+                       bool selectOnly,
+                       const std::unordered_set<const ImportMappingNode*>& selectedTargets,
+                       const std::string& ruleLabel = "");
 
 // Group-coverage skip pass (QuikMap Phase 95), run after
 // RunLikeModelBackfill and before RunCatchAll. For each destination root that
