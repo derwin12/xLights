@@ -299,7 +299,17 @@ of leaving extras unmapped.
 **Example:** Vendor group `Stars` only has 3 members but your group has 5
 stars → the 4th and 5th reuse vendor members 1 and 2.
 
-## Phase 120 - Final catch-all
+## Phase 120 - Sibling-reuse backfill
+
+**What it does:** For anything still unmapped, checks if a same-pattern
+sibling of yours already has a mapping, and reuses it. Runs before the
+unconstrained Phase 125 catch-all so a sibling-pattern reuse isn't
+pre-empted by catch-all grabbing the vendor candidate first.
+
+**Example:** Your `Md Star - 02` is unmapped; its sibling `Md Star - 01`
+is mapped to vendor `Star 1` → `Md Star - 02` reuses `Star 1`.
+
+## Phase 125 - Final catch-all
 
 **What it does:** The last-resort pass - pairs anything still unmapped
 purely by general shape/kind compatibility, ignoring names. Still blocks
@@ -309,14 +319,6 @@ prop can't become a non-singing one).
 **Example:** Your leftover `PropX` (a "Tree 360" type) is still unmapped;
 vendor `LeftoverA` (also "Tree 360") is still unmapped → paired by shape,
 no name match needed.
-
-## Phase 125 - Sibling-reuse backfill
-
-**What it does:** For anything still unmapped, checks if a same-pattern
-sibling of yours already has a mapping, and reuses it.
-
-**Example:** Your `Md Star - 02` is unmapped; its sibling `Md Star - 01`
-is mapped to vendor `Star 1` → `Md Star - 02` reuses `Star 1`.
 
 ---
 
@@ -352,5 +354,5 @@ is mapped to vendor `Star 1` → `Md Star - 02` reuses `Star 1`.
 | 107 | Homogeneous-family group backfill | "All-one-type" group confirms a family is present |
 | 110 | Group-member dimension | Maps group members via the group's vendor pool |
 | 115 | Group-member dimension backfill | Same, reusing pool if you have more members |
-| 120 | Final catch-all | Last resort, shape-only pairing |
-| 125 | Sibling-reuse backfill | Reuses a same-pattern sibling's mapping |
+| 120 | Sibling-reuse backfill | Reuses a same-pattern sibling's mapping |
+| 125 | Final catch-all | Last resort, shape-only pairing |

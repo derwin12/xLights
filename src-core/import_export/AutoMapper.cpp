@@ -1059,7 +1059,46 @@ void Run(const std::vector<ImportMappingNode*>& roots,
     std::stable_sort(sortedAvailable.begin(), sortedAvailable.end(),
                       [](const AvailableSource* a, const AvailableSource* b) { return a->effectCount > b->effectCount; });
 
+    // One-time diagnostic dump of every bare ModelGroup vendor candidate this
+    // call can see, before any per-destination filtering - lets a confusing
+    // "why didn't X ever show up as a candidate" QuikMap report be checked
+    // directly against spdlog rather than guessed at.
+    if (ruleLabel.rfind("Phase 25", 0) == 0) {
+        for (const auto* srcPtr : sortedAvailable) {
+            if (srcPtr->modelType != "ModelGroup") continue;
+            spdlog::info("QuikMap {}: vendor group candidate pool: '{}' (canonical='{}', selected={}, effectCount={})",
+                          ruleLabel, srcPtr->displayName, srcPtr->canonicalName, srcPtr->selected, srcPtr->effectCount);
+        }
+    }
+
+    // Precompute each group destination's confirmed live-member composition
+    // (see GroupMemberFamiliesLive) up front, and process destinations whose
+    // composition is actually confirmed (non-empty) before ones it isn't -
+    // otherwise, when two destination groups both pass the same single
+    // contested vendor candidate by name alone (e.g. your "Flat Trees And
+    // Stars" and "Stars on Trees" both fuzzy-matching the one vendor group
+    // "Trees Stars"), whichever happened to come first in `roots` would
+    // claim it regardless of whether its own members actually support that
+    // match. A destination with no recognized member composition at all
+    // can't out-compete one that's structurally confirmed.
+    std::unordered_map<ImportMappingNode*, std::unordered_set<std::string>> destGroupFamiliesByModel;
     for (auto* model : roots) {
+        if (model == nullptr || !model->IsGroup()) continue;
+        if (auto* grp = dynamic_cast<ModelGroup*>(renderContext.GetModel(model->GetCoreModel()))) {
+            destGroupFamiliesByModel[model] = GroupMemberFamiliesLive(grp->ModelNames(), rootByName);
+        }
+    }
+    std::vector<ImportMappingNode*> orderedRoots = roots;
+    std::stable_sort(orderedRoots.begin(), orderedRoots.end(), [&](ImportMappingNode* a, ImportMappingNode* b) {
+        auto confirmed = [&](ImportMappingNode* m) {
+            if (m == nullptr) return false;
+            auto it = destGroupFamiliesByModel.find(m);
+            return it != destGroupFamiliesByModel.end() && !it->second.empty();
+        };
+        return confirmed(a) && !confirmed(b);
+    });
+
+    for (auto* model : orderedRoots) {
         if (model == nullptr) {
             spdlog::warn("AutoMapper::Run: null root encountered, skipping");
             continue;
@@ -1081,18 +1120,15 @@ void Run(const std::vector<ImportMappingNode*>& roots,
         Model* layoutModel = renderContext.GetModel(model->GetCoreModel());
 
         // For a group destination, the families actually present among its
-        // live members (see GroupCompositionScore) and the list of vendor
-        // group candidates that pass lambda_model below - collected instead
-        // of mapped immediately so that, if more than one vendor group
-        // matches equally well by name, the one whose own members' families
-        // best overlap this group's can be preferred as a tie-breaker.
-        std::unordered_set<std::string> destGroupFamilies;
+        // live members (precomputed above) and the list of vendor group
+        // candidates that pass lambda_model below - collected instead of
+        // mapped immediately so that, if more than one vendor group matches
+        // equally well by name, the one whose own members' families best
+        // overlap this group's can be preferred as a tie-breaker.
+        auto destGroupFamiliesIt = destGroupFamiliesByModel.find(model);
+        std::unordered_set<std::string> destGroupFamilies =
+            destGroupFamiliesIt != destGroupFamiliesByModel.end() ? destGroupFamiliesIt->second : std::unordered_set<std::string>();
         std::vector<const AvailableSource*> groupCandidates;
-        if (model->IsGroup()) {
-            if (auto* grp = dynamic_cast<ModelGroup*>(layoutModel)) {
-                destGroupFamilies = GroupMemberFamiliesLive(grp->ModelNames(), rootByName);
-            }
-        }
 
         for (const auto* srcPtr : sortedAvailable) {
             const auto& src = *srcPtr;

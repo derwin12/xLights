@@ -4045,7 +4045,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
 
     // Phase 95: group-coverage skip. If an already-mapped destination group
     // is made up entirely of one model type (e.g. a group of Arches), mark
-    // its individual member models as skipped so Phase 120 doesn't
+    // its individual member models as skipped so Phase 125 doesn't
     // separately/redundantly map them.
     spdlog::info("QuikMap: Phase 95 - Checking group coverage...");
     if (dlg) dlg->Update(89, "Phase 95: Checking group coverage...");
@@ -4073,7 +4073,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // Phase 105: model-type catch-all. Maps any still-unmapped destination
     // root to a still-unmapped vendor model/group of the same kind AND the
     // same model "type" (e.g. "Arches" to "Arches"), ignoring names. Runs
-    // ahead of the unconditional Phase 120 catch-all so like-for-like model
+    // ahead of the unconditional Phase 125 catch-all so like-for-like model
     // types are preferred.
     before = after;
     spdlog::info("QuikMap: Phase 105 - Looking for like-model-type matches... ({} unmapped roots)", before);
@@ -4111,7 +4111,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     // maps the destination group's still-unmapped individual members (e.g.
     // "EFlake46", "HFlake1") to the closest-by-node-count still-unmapped
     // member of the vendor group (e.g. "Snowflake 1".."Snowflake 6"), so they
-    // aren't left for the unconstrained Phase 120 catch-all.
+    // aren't left for the unconstrained Phase 125 catch-all.
     before = after;
     spdlog::info("QuikMap: Phase 110 - Looking for group-member dimension matches... ({} unmapped roots)", before);
     if (dlg) dlg->Update(90, "Phase 110: Looking for group-member dimension matches...");
@@ -4140,35 +4140,37 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
-    // Phase 120: last-resort catch-all. Maps anything still unmapped on the
+    // Phase 120: sibling-reuse backfill. For any destination root still
+    // unmapped at this point (e.g. a numbered family with more destination
+    // props than like-typed vendor props), reuse an already-mapped sibling's
+    // vendor mapping (same fuzzy base/side, same model type). Runs before
+    // the unconstrained Phase 125 catch-all so a sibling-pattern reuse isn't
+    // pre-empted by catch-all grabbing the vendor candidate first.
+    before = after;
+    spdlog::info("QuikMap: Phase 120 - Looking for sibling-reuse matches... ({} unmapped roots)", before);
+    if (dlg) dlg->Update(90, "Phase 120: Looking for sibling-reuse matches...");
+    DoSiblingReuseBackfill(select, "Phase 120: SiblingReuse");
+    after = CountUnmappedRoots();
+    int phase120 = before - after;
+    spdlog::info("QuikMap: Phase 120 complete - {} matches found", phase120);
+    summary << wxString::Format("Phase 120: Sibling-reuse matches found: %d\n", phase120);
+    if (dlg) dlg->Update(100, wxString::Format("Phase 120 complete - sibling-reuse matches found: %d", phase120));
+    NotifyMappingItemsChanged();
+    TreeListCtrl_Mapping->Refresh();
+
+    // Phase 125: last-resort catch-all. Maps anything still unmapped on the
     // vendor side to anything still unmapped on the user's layout, as long
     // as model maps to model, group maps to group, and type matches type
     // (e.g. SubModel/Strand/Node only match the same kind).
     before = after;
-    spdlog::info("QuikMap: Phase 120 - Mapping remaining unmapped items... ({} unmapped roots)", before);
-    if (dlg) dlg->Update(90, "Phase 120: Mapping remaining unmapped items...");
-    DoCatchAllFallback(select, "Phase 120: Catchall");
-    after = CountUnmappedRoots();
-    int phase120 = before - after;
-    spdlog::info("QuikMap: Phase 120 complete - {} matches found", phase120);
-    summary << wxString::Format("Phase 120: Catch-all matches found: %d\n", phase120);
-    if (dlg) dlg->Update(100, wxString::Format("Phase 120 complete - catch-all matches found: %d", phase120));
-    NotifyMappingItemsChanged();
-    TreeListCtrl_Mapping->Refresh();
-
-    // Phase 125: sibling-reuse backfill. For any destination root still
-    // unmapped after Phase 120 (e.g. a numbered family with more destination
-    // props than like-typed vendor props), reuse an already-mapped sibling's
-    // vendor mapping (same fuzzy base/side, same model type).
-    before = after;
-    spdlog::info("QuikMap: Phase 125 - Looking for sibling-reuse matches... ({} unmapped roots)", before);
-    if (dlg) dlg->Update(100, "Phase 125: Looking for sibling-reuse matches...");
-    DoSiblingReuseBackfill(select, "Phase 125: SiblingReuse");
+    spdlog::info("QuikMap: Phase 125 - Mapping remaining unmapped items... ({} unmapped roots)", before);
+    if (dlg) dlg->Update(100, "Phase 125: Mapping remaining unmapped items...");
+    DoCatchAllFallback(select, "Phase 125: Catchall");
     after = CountUnmappedRoots();
     int phase125 = before - after;
     spdlog::info("QuikMap: Phase 125 complete - {} matches found", phase125);
-    summary << wxString::Format("Phase 125: Sibling-reuse matches found: %d\n", phase125);
-    if (dlg) dlg->Update(100, wxString::Format("Phase 125 complete - sibling-reuse matches found: %d", phase125));
+    summary << wxString::Format("Phase 125: Catch-all matches found: %d\n", phase125);
+    if (dlg) dlg->Update(100, wxString::Format("Phase 125 complete - catch-all matches found: %d", phase125));
     NotifyMappingItemsChanged();
     TreeListCtrl_Mapping->Refresh();
 
@@ -4190,24 +4192,9 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
     }
 
     if (detailedReport && phase120 > 0) {
-        summary << "\nCatch-all matches (Phase 120):\n";
-        std::function<void(xLightsImportModelNode*)> walkCatchAll = [&](xLightsImportModelNode* node) {
-            if (node->IsMapped() && node->GetMappingRule() == "Phase 120: Catchall") {
-                summary << wxString::Format("  %s -> %s\n", node->GetModelName(), wxString(node->GetMapping()));
-            }
-            for (unsigned int i = 0; i < node->GetChildCount(); ++i) {
-                walkCatchAll(node->GetNthChild(i));
-            }
-        };
-        for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
-            walkCatchAll(_dataModel->GetNthChild(i));
-        }
-    }
-
-    if (detailedReport && phase125 > 0) {
-        summary << "\nSibling-reuse matches (Phase 125):\n";
+        summary << "\nSibling-reuse matches (Phase 120):\n";
         std::function<void(xLightsImportModelNode*)> walkSiblingReuse = [&](xLightsImportModelNode* node) {
-            if (node->IsMapped() && node->GetMappingRule() == "Phase 125: SiblingReuse") {
+            if (node->IsMapped() && node->GetMappingRule() == "Phase 120: SiblingReuse") {
                 summary << wxString::Format("  %s -> %s\n", node->GetModelName(), wxString(node->GetMapping()));
             }
             for (unsigned int i = 0; i < node->GetChildCount(); ++i) {
@@ -4216,6 +4203,21 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         };
         for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
             walkSiblingReuse(_dataModel->GetNthChild(i));
+        }
+    }
+
+    if (detailedReport && phase125 > 0) {
+        summary << "\nCatch-all matches (Phase 125):\n";
+        std::function<void(xLightsImportModelNode*)> walkCatchAll = [&](xLightsImportModelNode* node) {
+            if (node->IsMapped() && node->GetMappingRule() == "Phase 125: Catchall") {
+                summary << wxString::Format("  %s -> %s\n", node->GetModelName(), wxString(node->GetMapping()));
+            }
+            for (unsigned int i = 0; i < node->GetChildCount(); ++i) {
+                walkCatchAll(node->GetNthChild(i));
+            }
+        };
+        for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+            walkCatchAll(_dataModel->GetNthChild(i));
         }
     }
 
@@ -4264,8 +4266,8 @@ static const std::unordered_set<std::string> QUIKMAP_REVIEW_PHASES = {
     "Phase 107: FamilyGroupBackfill",
     "Phase 110: GroupMemberDimension",
     "Phase 115: GroupMemberDimensionBackfill",
-    "Phase 120: Catchall",
-    "Phase 125: SiblingReuse",
+    "Phase 120: SiblingReuse",
+    "Phase 125: Catchall",
 };
 
 void xLightsImportChannelMapDialog::ShowQuikMapReviewWindow()
