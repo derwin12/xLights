@@ -869,14 +869,25 @@ bool IsSingingFaceRangeName(std::string_view name)
     return true;
 }
 
-// True if `faceNode` (a <faceInfo> element from an RGB effects/model XML) is
-// Type="NodeRange" and has at least one non-empty Mouth-*/Eye-*/etc node
-// range defined - i.e. a real singing-face definition, not just an
-// empty/unused face (or one that only defines a FaceOutline). Mirrors
-// Model::UpdateFaceInfoNodes's notion of "has face info nodes".
+// True if `type` is a face Type that drives mouth movement from real
+// per-node data (numeric pixel ranges for "NodeRange", or named-node
+// references via NodeNames for "SingleNode"/"Coro") rather than from static
+// images ("Matrix", "Default", "Rendered") - i.e. a type that can make a
+// model a genuine singing prop.
+bool IsNodeBasedFaceType(std::string_view type)
+{
+    return type == "NodeRange" || type == "SingleNode" || type == "Coro";
+}
+
+// True if `faceNode` (a <faceInfo> element from an RGB effects/model XML) has
+// a node-based Type (see IsNodeBasedFaceType) and has at least one non-empty
+// Mouth-*/Eye-*/etc range/node-name defined - i.e. a real singing-face
+// definition, not just an empty/unused face (or one that only defines a
+// FaceOutline). Mirrors Model::UpdateFaceInfoNodes's notion of "has face info
+// nodes".
 bool HasFaceNodeRanges(const pugi::xml_node& faceNode)
 {
-    if (std::string_view(faceNode.attribute("Type").as_string()) != "NodeRange") {
+    if (!IsNodeBasedFaceType(faceNode.attribute("Type").as_string())) {
         return false;
     }
     for (const auto& attr : faceNode.attributes()) {
@@ -891,7 +902,7 @@ bool HasFaceNodeRanges(const pugi::xml_node& faceNode)
 bool HasFaceNodeRanges(const FaceStateData& faceInfo)
 {
     for (const auto& face : faceInfo) {
-        if (face.second.count("Type") == 0 || face.second.at("Type") != "NodeRange") continue;
+        if (face.second.count("Type") == 0 || !IsNodeBasedFaceType(face.second.at("Type"))) continue;
         for (const auto& range : face.second) {
             if (!IsSingingFaceRangeName(range.first)) continue;
             if (!range.second.empty()) return true;
@@ -3704,6 +3715,31 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         spdlog::info("QuikMap: Phase 1 complete - {} shadow models skipped", skipAfter - skipBefore);
     }
 
+    // Phase 2: skip models/groups wired through an "LED Panel Matrix"
+    // controller protocol - they report Matrix-like dimensions/node counts
+    // but aren't addressable the way QuikMap's matrix matching assumes, and
+    // mapping them produces a corrupt/garbled import.
+    spdlog::info("QuikMap: Phase 2 - Looking for LED Panel Matrix protocol models/groups to skip...");
+    if (dlg) dlg->Update(4, "Phase 2: Looking for LED Panel Matrix protocol models/groups to skip...");
+    {
+        std::vector<ImportMappingNode*> roots;
+        roots.reserve(_dataModel->GetChildCount());
+        for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+            roots.push_back(_dataModel->GetNthChild(i));
+        }
+        int skipBefore = 0;
+        for (auto* root : roots) {
+            if (root != nullptr && root->IsSkipped()) ++skipBefore;
+        }
+        AutoMapper::RunSkipLEDPanelMatrix(roots, *xlights, "Phase 2: Skip (LED Panel Matrix)");
+        int skipAfter = 0;
+        for (auto* root : roots) {
+            if (root != nullptr && root->IsSkipped()) ++skipAfter;
+        }
+        summary << wxString::Format("Phase 2: LED Panel Matrix protocol models/groups skipped: %d\n", skipAfter - skipBefore);
+        spdlog::info("QuikMap: Phase 2 complete - {} LED Panel Matrix protocol models/groups skipped", skipAfter - skipBefore);
+    }
+
     // Phase 5: exact (case-insensitive) name matches.
     int before = CountUnmappedRoots();
     spdlog::info("QuikMap: Phase 5 - Looking for exact name matches... ({} unmapped roots)", before);
@@ -4551,7 +4587,12 @@ void xLightsImportChannelMapDialog::DoAutoMap(
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
+                if (!ic->groupModels.empty()) {
+                    for (const auto& memberName : wxSplit(ic->groupModels, ',')) {
+                        src.groupMemberNames.push_back(memberName.ToStdString());
+                    }
+                }
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -4592,7 +4633,7 @@ void xLightsImportChannelMapDialog::DoSubModelFallback(bool select, const std::s
         if (src.canonicalName.find('/') == std::string::npos) {
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -4671,6 +4712,7 @@ void xLightsImportChannelMapDialog::DoFamilyAnchoredFuzzy(bool select, const std
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
                 src.isSingingProp = ic->isSingingProp;
+                src.isLEDPanelMatrix = ic->isLEDPanelMatrix;
                 src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
@@ -4714,7 +4756,7 @@ void xLightsImportChannelMapDialog::DoCustomExactDimensionMatch(bool select, con
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
@@ -4757,7 +4799,7 @@ void xLightsImportChannelMapDialog::DoCustomSubmodelOverlapMatch(bool select, co
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
                 src.displayType = ic->type;
             }
         }
@@ -4905,6 +4947,7 @@ void xLightsImportChannelMapDialog::DoCatchAllFallback(bool select, const std::s
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
                 src.isSingingProp = ic->isSingingProp;
+                src.isLEDPanelMatrix = ic->isLEDPanelMatrix;
                 src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
@@ -4948,6 +4991,7 @@ void xLightsImportChannelMapDialog::DoSiblingReuseBackfill(bool select, const st
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.isSingingProp = ic->isSingingProp;
+                src.isLEDPanelMatrix = ic->isLEDPanelMatrix;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -4984,7 +5028,7 @@ void xLightsImportChannelMapDialog::DoCustomDimensionMatch(bool select, const st
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
@@ -5027,7 +5071,7 @@ void xLightsImportChannelMapDialog::DoGroupMemberDimensionMatch(bool select, con
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
@@ -5075,7 +5119,7 @@ void xLightsImportChannelMapDialog::DoGroupMemberDimensionBackfill(bool select, 
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
                 src.width = ic->width;
@@ -5123,7 +5167,7 @@ void xLightsImportChannelMapDialog::DoModelTypeCatchAll(bool select, const std::
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
                 src.displayType = ic->type;
             }
         }
@@ -5162,6 +5206,7 @@ void xLightsImportChannelMapDialog::DoFamilyGroupBackfill(bool select, const std
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
                 src.isSingingProp = ic->isSingingProp;
+                src.isLEDPanelMatrix = ic->isLEDPanelMatrix;
                 src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
@@ -5205,7 +5250,7 @@ void xLightsImportChannelMapDialog::DoSingingProp(bool select, const std::string
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -5242,7 +5287,7 @@ void xLightsImportChannelMapDialog::DoSingingPropBackfill(bool select, const std
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -5279,7 +5324,7 @@ void xLightsImportChannelMapDialog::DoFloodlight(bool select, const std::string&
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
                 src.isFloodlight = ic->isFloodlight;
                 src.isFloodGroup = ic->isFloodGroup;
             }
@@ -5318,7 +5363,7 @@ void xLightsImportChannelMapDialog::DoFloodlightBackfill(bool select, const std:
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
                 src.isFloodlight = ic->isFloodlight;
                 src.isFloodGroup = ic->isFloodGroup;
             }
@@ -5357,7 +5402,7 @@ void xLightsImportChannelMapDialog::DoBestGuess(bool select, const std::string& 
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
-src.isSingingProp = ic->isSingingProp;src.aliases = ic->aliases;
+src.isSingingProp = ic->isSingingProp;src.isLEDPanelMatrix = ic->isLEDPanelMatrix;src.aliases = ic->aliases;
             }
         }
         src.selected = ListCtrl_Available->GetItemState(j, wxLIST_STATE_SELECTED) == wxLIST_STATE_SELECTED;
@@ -5428,6 +5473,7 @@ void xLightsImportChannelMapDialog::DoMatrixBackfill(bool select, const std::str
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.modelClass = ic->modelClass;
                 src.isSingingProp = ic->isSingingProp;
+                src.isLEDPanelMatrix = ic->isLEDPanelMatrix;
                 src.aliases = ic->aliases;
                 src.displayType = ic->type;
                 src.nodeCount = ic->nodeCount;
@@ -5683,14 +5729,19 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                 if (auto mm = GetImportChannel(name); mm) {
                     mm->type = node.attribute(XmlNodeKeys::DisplayAsAttribute).as_string();
                     bool singingFace = false;
-                    if (mm->type == XmlNodeKeys::CustomType) {
-                        for (pugi::xml_node nodechildren = node.first_child(); nodechildren; nodechildren = nodechildren.next_sibling()) {
-                            if (std::string_view(nodechildren.name()) == XmlNodeKeys::FaceNodeName && HasFaceNodeRanges(nodechildren)) {
-                                singingFace = true;
-                            }
+                    bool ledPanelMatrix = false;
+                    for (pugi::xml_node nodechildren = node.first_child(); nodechildren; nodechildren = nodechildren.next_sibling()) {
+                        std::string_view childName = nodechildren.name();
+                        if (mm->type == XmlNodeKeys::CustomType && childName == XmlNodeKeys::FaceNodeName && HasFaceNodeRanges(nodechildren)) {
+                            singingFace = true;
+                        }
+                        if (childName == XmlNodeKeys::CtrlConnectionName &&
+                            ::Lower(::Trim(nodechildren.attribute(XmlNodeKeys::ProtocolAttribute).as_string())) == "led panel matrix") {
+                            ledPanelMatrix = true;
                         }
                     }
                     mm->isSingingProp = singingFace;
+                    mm->isLEDPanelMatrix = ledPanelMatrix;
 
                     std::string startChannel = node.attribute(XmlNodeKeys::StartChannelAttribute).as_string();
                     if (!startChannel.empty() && startChannel.front() == '>') {

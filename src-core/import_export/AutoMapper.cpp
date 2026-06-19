@@ -872,6 +872,40 @@ void RunFamilyAnchoredFuzzy(const std::vector<ImportMappingNode*>& roots,
     }
 }
 
+// Union of FuzzyModelFamilies(name) over a group's member names - the set of
+// recognized families (tree/star/snowflake/spinner/etc) actually present
+// among its members, as opposed to FuzzyModelFamilies on the group's own
+// name. Used by GroupCompositionScore as a tie-breaker in Run() below.
+std::unordered_set<std::string> GroupMemberFamilies(const std::vector<std::string>& memberNames) {
+    std::unordered_set<std::string> families;
+    for (const auto& name : memberNames) {
+        auto f = FuzzyModelFamilies(name);
+        families.insert(f.begin(), f.end());
+    }
+    return families;
+}
+
+// Set-Jaccard overlap between two groups' member-family sets (see
+// GroupMemberFamilies) - 0 if either side has no recognized member family
+// (nothing to compare), otherwise |intersection| / |union|. Used in Run() to
+// break a tie when a destination group's name matches more than one vendor
+// group equally well: a destination group with mixed members (e.g. "Trees
+// Stars", containing both tree-like and star-like models) should prefer a
+// vendor group whose own members are also a tree+star mix, over one that's
+// actually all-star despite an equally good name match on the group's own
+// name (e.g. "Group - Flat Trees And Stars").
+double GroupCompositionScore(const std::unordered_set<std::string>& destFamilies,
+                              const std::unordered_set<std::string>& srcFamilies) {
+    if (destFamilies.empty() || srcFamilies.empty()) return 0.0;
+    size_t shared = 0;
+    for (const auto& f : destFamilies) {
+        if (srcFamilies.count(f)) ++shared;
+    }
+    std::unordered_set<std::string> uni = destFamilies;
+    uni.insert(srcFamilies.begin(), srcFamilies.end());
+    return static_cast<double>(shared) / static_cast<double>(uni.size());
+}
+
 void Run(const std::vector<ImportMappingNode*>& roots,
          const std::vector<AvailableSource>& available,
          RenderContext& renderContext,
@@ -930,6 +964,20 @@ void Run(const std::vector<ImportMappingNode*>& roots,
         // without repeated map lookups.
         Model* layoutModel = renderContext.GetModel(model->GetCoreModel());
 
+        // For a group destination, the families actually present among its
+        // live members (see GroupCompositionScore) and the list of vendor
+        // group candidates that pass lambda_model below - collected instead
+        // of mapped immediately so that, if more than one vendor group
+        // matches equally well by name, the one whose own members' families
+        // best overlap this group's can be preferred as a tie-breaker.
+        std::unordered_set<std::string> destGroupFamilies;
+        std::vector<const AvailableSource*> groupCandidates;
+        if (model->IsGroup()) {
+            if (auto* grp = dynamic_cast<ModelGroup*>(layoutModel)) {
+                destGroupFamilies = GroupMemberFamilies(grp->ModelNames());
+            }
+        }
+
         for (const auto& src : available) {
             if (selectMapAvail && !src.selected) continue;
             const std::string& availName = src.canonicalName;
@@ -987,13 +1035,32 @@ void Run(const std::vector<ImportMappingNode*>& roots,
                 if (!allowSharedSource && usedModelSources.count(availName) != 0) continue;
                 if (model->GetMapping().empty() &&
                     lambda_model(model->GetCoreModel(), availName, extra1, extra2, aliases)) {
-                    model->Map(src.displayName, src.modelType);
-                    model->SetMappingRule(ruleLabel);
-                    if (!allowSharedSource) usedModelSources.insert(availName);
+                    if (model->IsGroup()) {
+                        // Defer mapping - see groupCandidates comment above.
+                        groupCandidates.push_back(&src);
+                    } else {
+                        model->Map(src.displayName, src.modelType);
+                        model->SetMappingRule(ruleLabel);
+                        if (!allowSharedSource) usedModelSources.insert(availName);
+                    }
                 }
             }
         }
 
+        if (model->IsGroup() && model->GetMapping().empty() && !groupCandidates.empty()) {
+            const AvailableSource* best = groupCandidates.front();
+            double bestScore = GroupCompositionScore(destGroupFamilies, GroupMemberFamilies(best->groupMemberNames));
+            for (size_t i = 1; i < groupCandidates.size(); ++i) {
+                double score = GroupCompositionScore(destGroupFamilies, GroupMemberFamilies(groupCandidates[i]->groupMemberNames));
+                if (score > bestScore) {
+                    best = groupCandidates[i];
+                    bestScore = score;
+                }
+            }
+            model->Map(best->displayName, best->modelType);
+            model->SetMappingRule(ruleLabel);
+            if (!allowSharedSource) usedModelSources.insert(best->canonicalName);
+        }
     }
 
     // Process selected submodels independently
@@ -1700,6 +1767,7 @@ void DescribeMatrixCandidates(const std::vector<ImportMappingNode*>& roots,
                               std::vector<std::string>& outDestinationLines) {
     for (const auto& src : available) {
         if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (src.isLEDPanelMatrix) continue;
         if (!IsMatrixLikeModel(src.modelClass, src.displayType, src.width, src.height, src.nodeCount, src.depth, src.modelType == "ModelGroup")) continue;
         outSourceLines.push_back(fmt::format("'{}' (type={}, class={}, {}x{}, {} nodes, group={})",
                                               src.displayName, src.displayType, src.modelClass, src.width, src.height,
@@ -1836,11 +1904,17 @@ void RunMatrixBackfill(const std::vector<ImportMappingNode*>& roots,
 
     // Pool of matrix-like vendor sources (model<->model only - groups are
     // never matrix-like, see IsMatrixLikeModel), used round-robin once every
-    // still-unused one has been claimed.
+    // still-unused one has been claimed. A source whose controller protocol
+    // is "LED Panel Matrix" (isLEDPanelMatrix) reports Matrix-like
+    // dimensions/node counts but isn't addressable the way this backfill
+    // assumes, so it's excluded the same as a destination root carrying that
+    // protocol is skipped at Phase 2 (RunSkipLEDPanelMatrix) - otherwise it
+    // gets round-robined onto every unmapped destination matrix.
     std::vector<const AvailableSource*> pool;
     for (const auto& src : available) {
         if (selectMapAvail && !src.selected) continue;
         if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (src.isLEDPanelMatrix) continue;
         if (!IsMatrixLikeModel(src.modelClass, src.displayType, src.width, src.height, src.nodeCount, src.depth, src.modelType == "ModelGroup")) continue;
         pool.push_back(&src);
     }
@@ -1916,7 +1990,7 @@ std::string ClassifyDestinationFamily(ImportMappingNode* node) {
 // Same classification for a vendor AvailableSource.
 std::string ClassifySourceFamily(const AvailableSource& src) {
     bool isGroup = (src.modelType == "ModelGroup");
-    if (IsMatrixLikeModel(src.modelClass, src.displayType, src.width, src.height, src.nodeCount, src.depth, isGroup)) return "matrix";
+    if (!src.isLEDPanelMatrix && IsMatrixLikeModel(src.modelClass, src.displayType, src.width, src.height, src.nodeCount, src.depth, isGroup)) return "matrix";
     if (IsAStarModel(src.displayName, isGroup)) return "star";
     if (IsASnowflakeModel(src.displayName, isGroup)) return "snowflake";
     return std::string();
@@ -3411,6 +3485,27 @@ bool ContainsDMXProp(Model* m, RenderContext& renderContext, std::set<std::strin
     return false;
 }
 
+// True if `m`'s controller connection protocol is "LED Panel Matrix" (e.g. a
+// face/matrix model wired through an LED panel controller rather than pixel
+// data), or `m` is a ModelGroup that (recursively) contains at least one such
+// model. These models report Matrix-like dimensions/node counts but aren't
+// addressable the way QuikMap's other matrix matching assumes, and mapping
+// them produces a corrupt/garbled import - they must never be auto-mapped.
+// `visited` guards against group cycles.
+bool ContainsLEDPanelMatrixProtocol(Model* m, RenderContext& renderContext, std::set<std::string>& visited) {
+    if (m == nullptr) return false;
+    if (Lower(Trim(m->GetControllerProtocol())) == "led panel matrix") return true;
+    if (m->GetDisplayAs() != DisplayAsType::ModelGroup) return false;
+    if (!visited.insert(m->GetName()).second) return false;
+
+    auto* grp = dynamic_cast<ModelGroup*>(m);
+    if (grp == nullptr) return false;
+    for (const auto& name : grp->ModelNames()) {
+        if (ContainsLEDPanelMatrixProtocol(renderContext.GetModel(name), renderContext, visited)) return true;
+    }
+    return false;
+}
+
 } // anonymous namespace
 
 void RunSkipDMX(const std::vector<ImportMappingNode*>& roots,
@@ -3447,6 +3542,24 @@ void RunSkipShadow(const std::vector<ImportMappingNode*>& roots,
         // with no independent effect data of its own, even on the rare model
         // where ShadowModelFor didn't get set/parsed.
         if (layoutModel->IsShadowModel() || StartsWith(layoutModel->GetModelStartChannel(), "@")) {
+            model->SetSkipped(true);
+            model->SetMappingRule(ruleLabel);
+        }
+    }
+}
+
+void RunSkipLEDPanelMatrix(const std::vector<ImportMappingNode*>& roots,
+                           RenderContext& renderContext,
+                           const std::string& ruleLabel) {
+    for (auto* model : roots) {
+        if (model == nullptr) continue;
+        if (!model->GetMapping().empty() || model->IsSkipped()) continue;
+
+        Model* layoutModel = renderContext.GetModel(model->GetCoreModel());
+        if (layoutModel == nullptr) continue;
+
+        std::set<std::string> visited;
+        if (ContainsLEDPanelMatrixProtocol(layoutModel, renderContext, visited)) {
             model->SetSkipped(true);
             model->SetMappingRule(ruleLabel);
         }

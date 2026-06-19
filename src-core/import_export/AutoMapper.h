@@ -44,6 +44,13 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.23";
 //             See RunSkipShadow().
 //             e.g. dest "MH-DIMMERS" (ShadowModelFor="MH-Pan") → skipped.
 //
+//   Phase  2: LED Panel Matrix protocol skip pass - marks destination roots
+//             whose controller connection protocol is "LED Panel Matrix"
+//             (case-insensitive), or groups that (recursively) contain at
+//             least one such model, as skipped. See RunSkipLEDPanelMatrix().
+//             e.g. dest "Shark" (ControllerConnection Protocol="LED Panel
+//             Matrix") → skipped; never mapped.
+//
 //   Phase  5: Exact name matches (case-insensitive) between vendor models/
 //             groups and the user's models/groups. See MatchNorm, Run().
 //             e.g. dest "Cane-1" matches vendor "cane-1" (same name,
@@ -1154,6 +1161,17 @@ void RunSkipDMX(const std::vector<ImportMappingNode*>& roots,
 void RunSkipShadow(const std::vector<ImportMappingNode*>& roots,
                    RenderContext& renderContext,
                    const std::string& ruleLabel = "");
+
+// LED Panel Matrix protocol skip pass (QuikMap Phase 2), run immediately
+// after RunSkipShadow. Marks each destination root whose layout Model's
+// controller connection protocol is "LED Panel Matrix" (case-insensitive),
+// or a ModelGroup that (recursively) contains at least one such model, as
+// skipped. These models report Matrix-like dimensions/node counts but aren't
+// addressable the way QuikMap's other matrix matching assumes, and mapping
+// them produces a corrupt/garbled import.
+void RunSkipLEDPanelMatrix(const std::vector<ImportMappingNode*>& roots,
+                           RenderContext& renderContext,
+                           const std::string& ruleLabel = "");
 
 // Parses [T:Xxx] / [T:Xxx_Yyy] type-hint tags out of a model's Description
 // field and returns the corresponding alias-like strings - a "[T:Matrix]"

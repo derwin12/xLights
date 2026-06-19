@@ -476,6 +476,14 @@ struct ImportChannel
     // it's a real singing prop, not just a Custom model that happens to have
     // an empty/unused face definition.
     bool isSingingProp = false;
+    // True if this model's ControllerConnection protocol is "LED Panel
+    // Matrix" (case-insensitive) - wired through an LED panel controller
+    // rather than pixel data. Reports Matrix-like dimensions/node counts but
+    // isn't addressable the way QuikMap's matrix matching assumes, so it must
+    // be excluded from the vendor matrix-like pool the same as a destination
+    // root carrying this protocol is skipped (see AutoMapper::
+    // RunSkipLEDPanelMatrix / ContainsLEDPanelMatrixProtocol).
+    bool isLEDPanelMatrix = false;
     // True if this is a non-group, single-line model with one node per
     // string (a "floodlight"). See ImportMappingNode::IsFloodlight.
     bool isFloodlight = false;

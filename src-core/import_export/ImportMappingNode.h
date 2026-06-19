@@ -141,6 +141,12 @@ struct AvailableSource {
     // True if this bare-model entry is a real singing prop (see
     // ImportMappingNode::IsSingingProp). False for strand/node entries.
     bool isSingingProp{ false };
+    // True if this bare-model entry's ControllerConnection protocol is "LED
+    // Panel Matrix" (case-insensitive). Reports Matrix-like dimensions/node
+    // counts but isn't addressable the way QuikMap's matrix matching assumes,
+    // so it must be excluded from any matrix-like vendor pool (e.g. QuikMap
+    // Phase 93's RunMatrixBackfill). False for strand/node entries.
+    bool isLEDPanelMatrix{ false };
     // True if this bare-model entry is a floodlight (see
     // ImportMappingNode::IsFloodlight). False for strand/node entries.
     bool isFloodlight{ false };
