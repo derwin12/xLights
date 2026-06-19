@@ -35,11 +35,26 @@ model starts").
 
 **Example:** `MH-DIMMERS` is a shadow of `MH-Pan` → skipped.
 
+## Phase 2 - Skip LED Panel Matrix protocol
+
+**What it does:** Marks models/groups wired through an "LED Panel Matrix"
+controller protocol as skipped. These report Matrix-like dimensions/node
+counts (so they'd otherwise look like a normal pixel matrix), but they
+aren't addressable the same way - mapping them produces a corrupt/garbled
+import. This skip also applies to the vendor side: a vendor model with this
+protocol is excluded from any matrix-like candidate pool (e.g. Phase 93),
+so it can't get round-robined onto every real destination matrix.
+
+**Example:** `Shark` (a face model with `ControllerConnection
+Protocol="LED Panel Matrix"`) → skipped, never mapped.
+
 ## Phase 5 - Exact name match
 
 **What it does:** The simplest, most confident match - if a vendor model
 and one of your models have the exact same name (ignoring upper/lower
-case), map them.
+case), map them. Compares the whole name as-is (no word-splitting), so
+vendor/brand names in a name (see Phase 25's note below) still have to
+match exactly here.
 
 **Example:** Your `Cane-1` matches the vendor's `cane-1`.
 
@@ -115,10 +130,31 @@ its individual submodels/strands by name.
 **What it does:** "Best guess" name matching - splits names into words,
 ignores small differences, and requires enough shared words (and matching
 numbers/sides) to be confident. Only matches model-to-model or
-group-to-group, never mixes the two.
+group-to-group, never mixes the two. Filler words ("group", "and", "on",
+"of", "with", etc.) and known vendor/brand names (GE, EFL, Boscoyo, Chroma,
+Twinkly, Impression, Daycor, Living Light Shows/LLS, GRP, SS, Showstopper,
+PPD, PixelTrim, PixNode, xTreme) are stripped before comparing, so they
+don't drag down or inflate the word-overlap score.
 
 **Example:** Your `Candy-Cane-Left-1` fuzzy-matches vendor `Cane 1 Left` -
 the words "cane", "1", "left" line up well enough.
+
+**Group-vs-group tie-breaker:** This phase (and Phases 5/10/27, which share
+the same matching code) scans vendor candidates highest-effect-count-first,
+so a vendor model/group with substantial real effect data wins any tie over
+an equally-name-matching but barely-used one. For group-to-group matches
+specifically, if *more than one* vendor group passes the name check equally
+well, QuikMap looks at what each group's members actually structurally are
+(matrix/tree/star/snowflake, verified the same way Phase 107 does - real
+dimensions and `IsAStarModel`/`IsASnowflakeModel`, not just member names) and
+prefers the vendor group whose member composition best overlaps your
+group's, rather than just taking the first name match found.
+
+**Example:** Your group `Trees Stars` (members are a mix of actual tree and
+star models) matches two vendor groups equally well by name: `Flat Trees
+And Stars` and `Stars On Trees`. If `Stars On Trees`'s own members are
+confirmed to be a tree+star mix while `Flat Trees And Stars`'s members are
+actually all stars, QuikMap prefers `Stars On Trees`.
 
 ## Phase 26 - Fuzzy match using group contents
 
@@ -290,6 +326,7 @@ is mapped to vendor `Star 1` → `Md Star - 02` reuses `Star 1`.
 |---|---|---|
 | 0 | Skip DMX | Never map DMX fixtures |
 | 1 | Skip shadow models | Never map overlay/shadow models |
+| 2 | Skip LED Panel Matrix protocol | Never map LED-panel-wired models, either side |
 | 5 | Exact name | Same name, different case |
 | 10 | Alias | Matches one of your saved aliases |
 | 12 | Custom exact dimension | Same node count + grid size |

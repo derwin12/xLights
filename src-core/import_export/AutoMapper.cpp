@@ -11,7 +11,6 @@
 #include "AutoMapper.h"
 
 #include "ImportMappingNode.h"
-#include "models/DisplayAsType.h"
 #include "models/Model.h"
 #include "models/ModelGroup.h"
 #include "render/RenderContext.h"
@@ -122,8 +121,20 @@ void FillMappedModelChildren(const std::vector<ImportMappingNode*>& roots,
 // xLightsMapper Python prototype's STRATEGIES.md, scoped down to a single
 // last-resort matcher (MatchFuzzy).
 
+// Includes vendor/brand names (GE, EFL, Boscoyo, Chroma, Twinkly,
+// Impression, Daycor, Living Light Shows/LLS, GRP, SS, Showstopper, PPD,
+// PixelTrim, PixNode, xTreme) that are pure marketing noise on a model name
+// and shouldn't count toward fuzzy word-overlap. These only affect
+// token-based matching (FuzzyTokens, used by MatchFuzzy/Phase 25+ and the
+// family-keyword table) - Phase 5's exact-name match (MatchNorm) and Phase
+// 10's alias match (MatchAggressive) both compare the whole trimmed/lowered
+// string as-is and never tokenize, so a brand name still correctly blocks
+// (or is required for) an exact/alias match there.
 const std::unordered_set<std::string> FUZZY_STOPWORDS = {
-    "group", "model", "lights", "light", "the", "and", "all", "on", "of", "with"
+    "group", "model", "lights", "light", "the", "and", "all", "on", "of", "with",
+    "ge", "efl", "boscoyo", "chroma", "twinkly", "impression", "daycor",
+    "living", "shows", "lls", "grp", "ss", "showstopper", "ppd",
+    "pixeltrim", "pixnode", "xtreme"
 };
 
 // Token -> canonical family name. A name can belong to multiple families.
@@ -873,46 +884,106 @@ void RunFamilyAnchoredFuzzy(const std::vector<ImportMappingNode*>& roots,
     }
 }
 
-// Union of FuzzyModelFamilies(name) over a group's member names - the set of
-// recognized families (tree/star/snowflake/spinner/etc) actually present
-// among its members, as opposed to FuzzyModelFamilies on the group's own
-// name. Used by GroupCompositionScore as a tie-breaker in Run() below.
-std::unordered_set<std::string> GroupMemberFamilies(const std::vector<std::string>& memberNames) {
-    std::unordered_set<std::string> families;
-    for (const auto& name : memberNames) {
-        auto f = FuzzyModelFamilies(name);
-        families.insert(f.begin(), f.end());
-    }
-    return families;
+// Classifies a destination root into one of the structural/name families
+// recognized elsewhere in QuikMap, or "" if it's none of them. Matrix and
+// tree have a real structural signal (dimensions/DisplayAs); star and
+// snowflake are name-only (see IsAStarModel/IsASnowflakeModel).
+std::string ClassifyDestinationFamily(ImportMappingNode* node) {
+    if (node == nullptr) return std::string();
+    if (IsMatrixLikeModel(node->GetModelClass(), node->GetModelType(), node->GetWidth(), node->GetHeight(), node->GetNodeCount(), node->GetDepth(), node->IsGroup())) return "matrix";
+    if (IsTreeLikeModel(node->GetModelType())) return "tree";
+    if (IsAStarModel(node->GetCoreModel(), node->IsGroup())) return "star";
+    if (IsASnowflakeModel(node->GetCoreModel(), node->IsGroup())) return "snowflake";
+    return std::string();
 }
 
-// Same as GroupMemberFamilies, but for a destination group's *live* members:
-// also folds in each member's structural DisplayAs (via
-// EffectiveModelFamilies's IsTreeLikeModel fallback), so a real spinning
-// tree whose name doesn't literally contain "tree" still contributes the
-// "tree" family. Star/snowflake have no structural signal (see
-// IsAStarModel/IsASnowflakeModel) and stay name-token-only either way.
+// Same classification for a vendor AvailableSource.
+std::string ClassifySourceFamily(const AvailableSource& src) {
+    bool isGroup = (src.modelType == "ModelGroup");
+    if (!src.isLEDPanelMatrix && IsMatrixLikeModel(src.modelClass, src.displayType, src.width, src.height, src.nodeCount, src.depth, isGroup)) return "matrix";
+    if (IsTreeLikeModel(src.displayType)) return "tree";
+    if (IsAStarModel(src.displayName, isGroup)) return "star";
+    if (IsASnowflakeModel(src.displayName, isGroup)) return "snowflake";
+    return std::string();
+}
+
+// Classifies one member of a live destination ModelGroup. Prefers the
+// member's own ImportMappingNode root (if it's tracked as one in `roots` -
+// true for virtually every real member, since every model in the layout is
+// its own root regardless of group membership) so matrix/tree classification
+// - which need real structural data, not just a name - is possible; falls
+// back to name-only star/snowflake/tree checks when the member isn't a
+// tracked root.
+std::string ClassifyGroupMemberFamily(const std::string& memberName,
+                                       const std::unordered_map<std::string, ImportMappingNode*>& rootByName) {
+    auto it = rootByName.find(Lower(Trim(memberName)));
+    if (it != rootByName.end()) {
+        std::string f = ClassifyDestinationFamily(it->second);
+        if (!f.empty()) return f;
+    }
+    if (IsAStarModel(memberName, false)) return "star";
+    if (IsASnowflakeModel(memberName, false)) return "snowflake";
+    if (FuzzyModelFamilies(memberName).count("tree")) return "tree";
+    return std::string();
+}
+
+// Same idea as ClassifyGroupMemberFamily, but for a vendor group's member
+// names: looks the member up in the vendor's own AvailableSource list (every
+// bare vendor model gets one, with real modelClass/displayType/dimensions)
+// for structural matrix/tree classification, falling back to name-only
+// star/snowflake/tree checks when the member has no AvailableSource entry of
+// its own (e.g. it's nested several levels deep, or wasn't in the import's
+// flat model list).
+std::string ClassifyGroupMemberFamilyAvailable(const std::string& memberName,
+                                                 const std::unordered_map<std::string, const AvailableSource*>& availableByName) {
+    auto it = availableByName.find(Lower(Trim(memberName)));
+    if (it != availableByName.end()) {
+        std::string f = ClassifySourceFamily(*it->second);
+        if (!f.empty()) return f;
+    }
+    if (IsAStarModel(memberName, false)) return "star";
+    if (IsASnowflakeModel(memberName, false)) return "snowflake";
+    if (FuzzyModelFamilies(memberName).count("tree")) return "tree";
+    return std::string();
+}
+
+// The set of recognized families (see ClassifyGroupMemberFamily) actually
+// confirmed present among a destination group's live members, via real
+// structural data wherever possible - not just a name-token guess on the
+// group's own name. Used by GroupCompositionScore as a tie-breaker in Run()
+// below.
 std::unordered_set<std::string> GroupMemberFamiliesLive(const std::vector<std::string>& memberNames,
-                                                          RenderContext& renderContext) {
+                                                          const std::unordered_map<std::string, ImportMappingNode*>& rootByName) {
     std::unordered_set<std::string> families;
     for (const auto& name : memberNames) {
-        Model* m = renderContext.GetModel(name);
-        std::string displayType = m != nullptr ? DisplayAsTypeToString(m->GetDisplayAs()) : "";
-        auto f = EffectiveModelFamilies(name, std::vector<std::string>{}, displayType);
-        families.insert(f.begin(), f.end());
+        std::string f = ClassifyGroupMemberFamily(name, rootByName);
+        if (!f.empty()) families.insert(f);
     }
     return families;
 }
 
-// Set-Jaccard overlap between two groups' member-family sets (see
-// GroupMemberFamilies) - 0 if either side has no recognized member family
-// (nothing to compare), otherwise |intersection| / |union|. Used in Run() to
-// break a tie when a destination group's name matches more than one vendor
-// group equally well: a destination group with mixed members (e.g. "Trees
-// Stars", containing both tree-like and star-like models) should prefer a
-// vendor group whose own members are also a tree+star mix, over one that's
-// actually all-star despite an equally good name match on the group's own
-// name (e.g. "Group - Flat Trees And Stars").
+// Same as GroupMemberFamiliesLive, but for a vendor group's member names (see
+// ClassifyGroupMemberFamilyAvailable).
+std::unordered_set<std::string> GroupMemberFamiliesAvailable(const std::vector<std::string>& memberNames,
+                                                               const std::unordered_map<std::string, const AvailableSource*>& availableByName) {
+    std::unordered_set<std::string> families;
+    for (const auto& name : memberNames) {
+        std::string f = ClassifyGroupMemberFamilyAvailable(name, availableByName);
+        if (!f.empty()) families.insert(f);
+    }
+    return families;
+}
+
+// Set-Jaccard overlap between two groups' confirmed member-family sets (see
+// GroupMemberFamiliesLive/GroupMemberFamiliesAvailable) - 0 if either side
+// has no recognized member family (nothing to compare), otherwise
+// |intersection| / |union|. Used in Run() to break a tie when a destination
+// group's name matches more than one vendor group equally well: a
+// destination group with mixed members (e.g. "Trees Stars", containing both
+// tree-like and star-like models) should prefer a vendor group whose own
+// members are also a tree+star mix, over one that's actually all-star
+// despite an equally good name match on the group's own name (e.g. "Group -
+// Flat Trees And Stars").
 double GroupCompositionScore(const std::unordered_set<std::string>& destFamilies,
                               const std::unordered_set<std::string>& srcFamilies) {
     if (destFamilies.empty() || srcFamilies.empty()) return 0.0;
@@ -962,6 +1033,32 @@ void Run(const std::vector<ImportMappingNode*>& roots,
         }
     }
 
+    // Lookup maps for the group-composition tie-breaker below (see
+    // GroupMemberFamiliesLive/GroupMemberFamiliesAvailable) - every
+    // destination root and every bare vendor model, keyed by lowered/trimmed
+    // name, so a group's member names can be resolved to real structural
+    // data instead of guessed from the member's own name alone.
+    std::unordered_map<std::string, ImportMappingNode*> rootByName;
+    for (auto* r : roots) {
+        if (r != nullptr) rootByName[Lower(Trim(r->GetCoreModel()))] = r;
+    }
+    std::unordered_map<std::string, const AvailableSource*> availableByName;
+    for (const auto& src : available) {
+        if (src.canonicalName.find('/') == std::string::npos) availableByName[src.canonicalName] = &src;
+    }
+
+    // Scan vendor candidates highest-effectCount-first, not in whatever
+    // order they happened to be listed - a model/group with substantial
+    // real effect data in the source sequence is far more likely to be the
+    // intended match than an otherwise-equal-looking candidate that's
+    // barely used (or unused), so it should win any tie in the matching
+    // loop below.
+    std::vector<const AvailableSource*> sortedAvailable;
+    sortedAvailable.reserve(available.size());
+    for (const auto& src : available) sortedAvailable.push_back(&src);
+    std::stable_sort(sortedAvailable.begin(), sortedAvailable.end(),
+                      [](const AvailableSource* a, const AvailableSource* b) { return a->effectCount > b->effectCount; });
+
     for (auto* model : roots) {
         if (model == nullptr) {
             spdlog::warn("AutoMapper::Run: null root encountered, skipping");
@@ -993,11 +1090,12 @@ void Run(const std::vector<ImportMappingNode*>& roots,
         std::vector<const AvailableSource*> groupCandidates;
         if (model->IsGroup()) {
             if (auto* grp = dynamic_cast<ModelGroup*>(layoutModel)) {
-                destGroupFamilies = GroupMemberFamiliesLive(grp->ModelNames(), renderContext);
+                destGroupFamilies = GroupMemberFamiliesLive(grp->ModelNames(), rootByName);
             }
         }
 
-        for (const auto& src : available) {
+        for (const auto* srcPtr : sortedAvailable) {
+            const auto& src = *srcPtr;
             if (selectMapAvail && !src.selected) continue;
             const std::string& availName = src.canonicalName;
 
@@ -1074,11 +1172,11 @@ void Run(const std::vector<ImportMappingNode*>& roots,
             };
 
             const AvailableSource* best = groupCandidates.front();
-            double bestScore = GroupCompositionScore(destGroupFamilies, GroupMemberFamilies(best->groupMemberNames));
+            double bestScore = GroupCompositionScore(destGroupFamilies, GroupMemberFamiliesAvailable(best->groupMemberNames, availableByName));
             for (size_t i = 1; i < groupCandidates.size(); ++i) {
-                double score = GroupCompositionScore(destGroupFamilies, GroupMemberFamilies(groupCandidates[i]->groupMemberNames));
+                double score = GroupCompositionScore(destGroupFamilies, GroupMemberFamiliesAvailable(groupCandidates[i]->groupMemberNames, availableByName));
                 spdlog::info("QuikMap {}: group composition candidate '{}' (member families: {}) vs destination '{}' (member families: {}) -> score {:.2f}",
-                              ruleLabel, groupCandidates[i]->displayName, joinSet(GroupMemberFamilies(groupCandidates[i]->groupMemberNames)),
+                              ruleLabel, groupCandidates[i]->displayName, joinSet(GroupMemberFamiliesAvailable(groupCandidates[i]->groupMemberNames, availableByName)),
                               model->GetCoreModel(), joinSet(destGroupFamilies), score);
                 if (score > bestScore) {
                     best = groupCandidates[i];
@@ -1088,10 +1186,10 @@ void Run(const std::vector<ImportMappingNode*>& roots,
             if (groupCandidates.size() > 1) {
                 spdlog::info("QuikMap {}: destination '{}' (member families: {}) had {} candidate vendor groups - chose '{}' (member families: {}, score {:.2f})",
                               ruleLabel, model->GetCoreModel(), joinSet(destGroupFamilies), groupCandidates.size(),
-                              best->displayName, joinSet(GroupMemberFamilies(best->groupMemberNames)), bestScore);
+                              best->displayName, joinSet(GroupMemberFamiliesAvailable(best->groupMemberNames, availableByName)), bestScore);
             } else {
                 spdlog::info("QuikMap {}: destination '{}' (member families: {}) had a single candidate vendor group '{}' (member families: {}) - no tie to break",
-                              ruleLabel, model->GetCoreModel(), joinSet(destGroupFamilies), best->displayName, joinSet(GroupMemberFamilies(best->groupMemberNames)));
+                              ruleLabel, model->GetCoreModel(), joinSet(destGroupFamilies), best->displayName, joinSet(GroupMemberFamiliesAvailable(best->groupMemberNames, availableByName)));
             }
             model->Map(best->displayName, best->modelType);
             model->SetMappingRule(ruleLabel);
@@ -2010,46 +2108,6 @@ void RunMatrixBackfill(const std::vector<ImportMappingNode*>& roots,
         }
     }
 }
-
-namespace {
-
-// Classifies a destination root into one of the three structural/name
-// families recognized elsewhere in QuikMap, or "" if it's none of them.
-std::string ClassifyDestinationFamily(ImportMappingNode* node) {
-    if (node == nullptr) return std::string();
-    if (IsMatrixLikeModel(node->GetModelClass(), node->GetModelType(), node->GetWidth(), node->GetHeight(), node->GetNodeCount(), node->GetDepth(), node->IsGroup())) return "matrix";
-    if (IsAStarModel(node->GetCoreModel(), node->IsGroup())) return "star";
-    if (IsASnowflakeModel(node->GetCoreModel(), node->IsGroup())) return "snowflake";
-    return std::string();
-}
-
-// Same classification for a vendor AvailableSource.
-std::string ClassifySourceFamily(const AvailableSource& src) {
-    bool isGroup = (src.modelType == "ModelGroup");
-    if (!src.isLEDPanelMatrix && IsMatrixLikeModel(src.modelClass, src.displayType, src.width, src.height, src.nodeCount, src.depth, isGroup)) return "matrix";
-    if (IsAStarModel(src.displayName, isGroup)) return "star";
-    if (IsASnowflakeModel(src.displayName, isGroup)) return "snowflake";
-    return std::string();
-}
-
-// Classifies one member of a live ModelGroup by name. Prefers the member's
-// own ImportMappingNode root (if it's tracked as one in `roots`) so matrix
-// classification - which needs structural data, not just a name - is
-// possible; falls back to a name-only star/snowflake check (the only
-// families with a name-only signal) when the member isn't a tracked root.
-std::string ClassifyGroupMemberFamily(const std::string& memberName,
-                                       const std::unordered_map<std::string, ImportMappingNode*>& rootByName) {
-    auto it = rootByName.find(Lower(Trim(memberName)));
-    if (it != rootByName.end()) {
-        std::string f = ClassifyDestinationFamily(it->second);
-        if (!f.empty()) return f;
-    }
-    if (IsAStarModel(memberName, false)) return "star";
-    if (IsASnowflakeModel(memberName, false)) return "snowflake";
-    return std::string();
-}
-
-} // namespace
 
 void RunFamilyGroupBackfill(const std::vector<ImportMappingNode*>& roots,
                             const std::vector<AvailableSource>& available,
