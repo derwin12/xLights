@@ -11,6 +11,7 @@
 #include "AutoMapper.h"
 
 #include "ImportMappingNode.h"
+#include "models/DisplayAsType.h"
 #include "models/Model.h"
 #include "models/ModelGroup.h"
 #include "render/RenderContext.h"
@@ -122,7 +123,7 @@ void FillMappedModelChildren(const std::vector<ImportMappingNode*>& roots,
 // last-resort matcher (MatchFuzzy).
 
 const std::unordered_set<std::string> FUZZY_STOPWORDS = {
-    "group", "model", "lights", "light", "the", "and", "all"
+    "group", "model", "lights", "light", "the", "and", "all", "on", "of", "with"
 };
 
 // Token -> canonical family name. A name can belong to multiple families.
@@ -885,6 +886,24 @@ std::unordered_set<std::string> GroupMemberFamilies(const std::vector<std::strin
     return families;
 }
 
+// Same as GroupMemberFamilies, but for a destination group's *live* members:
+// also folds in each member's structural DisplayAs (via
+// EffectiveModelFamilies's IsTreeLikeModel fallback), so a real spinning
+// tree whose name doesn't literally contain "tree" still contributes the
+// "tree" family. Star/snowflake have no structural signal (see
+// IsAStarModel/IsASnowflakeModel) and stay name-token-only either way.
+std::unordered_set<std::string> GroupMemberFamiliesLive(const std::vector<std::string>& memberNames,
+                                                          RenderContext& renderContext) {
+    std::unordered_set<std::string> families;
+    for (const auto& name : memberNames) {
+        Model* m = renderContext.GetModel(name);
+        std::string displayType = m != nullptr ? DisplayAsTypeToString(m->GetDisplayAs()) : "";
+        auto f = EffectiveModelFamilies(name, std::vector<std::string>{}, displayType);
+        families.insert(f.begin(), f.end());
+    }
+    return families;
+}
+
 // Set-Jaccard overlap between two groups' member-family sets (see
 // GroupMemberFamilies) - 0 if either side has no recognized member family
 // (nothing to compare), otherwise |intersection| / |union|. Used in Run() to
@@ -974,7 +993,7 @@ void Run(const std::vector<ImportMappingNode*>& roots,
         std::vector<const AvailableSource*> groupCandidates;
         if (model->IsGroup()) {
             if (auto* grp = dynamic_cast<ModelGroup*>(layoutModel)) {
-                destGroupFamilies = GroupMemberFamilies(grp->ModelNames());
+                destGroupFamilies = GroupMemberFamiliesLive(grp->ModelNames(), renderContext);
             }
         }
 
@@ -1048,14 +1067,31 @@ void Run(const std::vector<ImportMappingNode*>& roots,
         }
 
         if (model->IsGroup() && model->GetMapping().empty() && !groupCandidates.empty()) {
+            auto joinSet = [](const std::unordered_set<std::string>& s) {
+                std::string out;
+                for (const auto& f : s) { if (!out.empty()) out += ","; out += f; }
+                return out.empty() ? std::string("<none>") : out;
+            };
+
             const AvailableSource* best = groupCandidates.front();
             double bestScore = GroupCompositionScore(destGroupFamilies, GroupMemberFamilies(best->groupMemberNames));
             for (size_t i = 1; i < groupCandidates.size(); ++i) {
                 double score = GroupCompositionScore(destGroupFamilies, GroupMemberFamilies(groupCandidates[i]->groupMemberNames));
+                spdlog::info("QuikMap {}: group composition candidate '{}' (member families: {}) vs destination '{}' (member families: {}) -> score {:.2f}",
+                              ruleLabel, groupCandidates[i]->displayName, joinSet(GroupMemberFamilies(groupCandidates[i]->groupMemberNames)),
+                              model->GetCoreModel(), joinSet(destGroupFamilies), score);
                 if (score > bestScore) {
                     best = groupCandidates[i];
                     bestScore = score;
                 }
+            }
+            if (groupCandidates.size() > 1) {
+                spdlog::info("QuikMap {}: destination '{}' (member families: {}) had {} candidate vendor groups - chose '{}' (member families: {}, score {:.2f})",
+                              ruleLabel, model->GetCoreModel(), joinSet(destGroupFamilies), groupCandidates.size(),
+                              best->displayName, joinSet(GroupMemberFamilies(best->groupMemberNames)), bestScore);
+            } else {
+                spdlog::info("QuikMap {}: destination '{}' (member families: {}) had a single candidate vendor group '{}' (member families: {}) - no tie to break",
+                              ruleLabel, model->GetCoreModel(), joinSet(destGroupFamilies), best->displayName, joinSet(GroupMemberFamilies(best->groupMemberNames)));
             }
             model->Map(best->displayName, best->modelType);
             model->SetMappingRule(ruleLabel);
