@@ -25,7 +25,7 @@ namespace AutoMapper {
 // Version tag for the QuikMap report summary (DoQuikMap's `summary` /
 // QuikMapReport.log). Bump this (v1.00 -> v1.01 -> ...) whenever the report
 // format/content changes, so old logs can be told apart from new ones.
-constexpr auto QUIKMAP_REPORT_VERSION = "v1.23";
+constexpr auto QUIKMAP_REPORT_VERSION = "v1.25";
 
 // QuikMap phases, in the order xLightsImportChannelMapDialog::DoQuikMap runs
 // them. Numbers are spaced by 5 so new phases can be inserted between
@@ -332,15 +332,18 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.23";
 //             "Snowflake 2" (46 nodes, Custom) — same family ("flake"
 //             keyword), closest node count among available vendor Customs.
 //
-//   Phase 105: Model-type catch-all - for each destination root still
-//             unmapped and not skipped, pairs it with a still-unmapped
-//             vendor model/group of the same kind (model<->model,
-//             group<->group) AND the same model "type"
+//   Phase 105: Model-type catch-all - for each non-group destination root
+//             still unmapped and not skipped, pairs it with a still-unmapped
+//             non-group vendor model of the same model "type"
 //             (ImportMappingNode::GetModelType / AvailableSource::displayType,
-//             e.g. "Arches", "Tree 360", "Matrix"), regardless of name. Runs
-//             after Phase 100 and before the unconditional Phase 120
-//             catch-all, so like-for-like model types are preferred over a
-//             blind pairing. See RunModelTypeCatchAll().
+//             e.g. "Arches", "Tree 360", "Matrix"), regardless of name.
+//             ModelGroups are excluded on both sides - a group's "type" is
+//             always the literal "ModelGroup", not a real shape signal, so a
+//             type-only match between groups is meaningless and is left for
+//             Phase 120 instead. Runs after Phase 100 and before the
+//             unconditional Phase 120 catch-all, so like-for-like model
+//             types are preferred over a blind pairing. See
+//             RunModelTypeCatchAll().
 //             e.g. dest "MyArch-3" (type "Arches") matches vendor "Arch C"
 //             (type "Arches") purely by model type — no name overlap needed.
 //
@@ -453,10 +456,11 @@ constexpr auto QUIKMAP_REPORT_VERSION = "v1.23";
 //             blocks it outright.
 //
 //   Phase 125: Sibling-reuse backfill - for each destination root that is
-//             still unmapped, not skipped, and not a group, looks for an
-//             already-mapped sibling root (same FuzzyBaseTokens + side
-//             signature, and matching singing-prop status - see below) and
-//             reuses that sibling's vendor mapping verbatim. See
+//             still unmapped and not skipped, looks for an already-mapped
+//             sibling root of the same kind (model<->model, group<->group;
+//             same FuzzyBaseTokens + side signature, and matching
+//             singing-prop status - see below) and reuses that sibling's
+//             vendor mapping verbatim. See
 //             RunSiblingReuseBackfill().
 //             e.g. dest "Md Star - 02" is unmapped; sibling "Md Star - 01"
 //             maps to vendor "Star 1" → "Md Star - 02" reuses "Star 1"
@@ -577,7 +581,17 @@ enum class AvailableKindFilter { Any, SameKindOnly, CrossKindOnly };
 // used. Phase 10 (Alias) passes true: a user can deliberately put the same
 // alias on multiple props (e.g. two different "Mega Tree" stand-ins that
 // should both receive the same vendor effects), so alias matches must be
-// allowed to fan out to more than one destination.
+// allowed to fan out to more than one destination. Independent of this
+// flag, a vendor ModelGroup is always exempt from the dedup when matched
+// against a destination ModelGroup - sharing is implicitly allowed for any
+// group<->group pairing even when allowSharedSource is false, since a
+// vendor group's effects are generic enough to legitimately apply to more
+// than one destination group (e.g. "Group - Mini Trees Left" and "Group -
+// Mini Trees Right" both fuzzy-matching the single vendor "Mini Trees"
+// group with an identical score, since the differing left/right side token
+// appears in neither side's token set and so can't break the tie -
+// whichever happened to come first in `roots` shouldn't be the only one
+// allowed to claim it). This exemption never applies to plain models.
 void Run(const std::vector<ImportMappingNode*>& roots,
          const std::vector<AvailableSource>& available,
          RenderContext& renderContext,
@@ -837,6 +851,14 @@ bool IsMegaTreeModel(const std::string& displayType, int nodeCount);
 // IsMatrixLikeModel(isGroup).
 bool IsAStarModel(const std::string& name, bool isGroup);
 
+// Returns true if name is a star (see IsAStarModel) AND nodeCount is > 100 -
+// a "mega star" is a fundamentally different physical prop from a small
+// decorative star, same split/reasoning as IsMegaTreeModel but for the star
+// family, since IsAStarModel has no structural signal to discriminate on its
+// own. Used to keep mega stars and small stars from matching each other in
+// QuikMap's star-matching phases.
+bool IsMegaStarModel(const std::string& name, bool isGroup, int nodeCount);
+
 // Returns true if name's tokens belong to the "snowflake" family (keywords
 // flake, snowflake - see FUZZY_FAMILY_KEYWORDS). Split out from
 // IsAStarModel since "star" and "snowflake" are related but distinct
@@ -947,6 +969,20 @@ void DescribeMegaTreeCandidates(const std::vector<ImportMappingNode*>& roots,
                                 std::vector<std::string>& outSourceLines,
                                 std::vector<std::string>& outDestinationLines);
 
+// Returns one descriptive line (name, type, group/mapped/skipped flags as
+// relevant) for every vendor source in `available` with isSingingProp set
+// and every not-skipped destination root in `roots` per
+// ImportMappingNode::IsSingingProp() - regardless of mapped/selected state (a
+// skipped destination, e.g. a shadow model, is never a real candidate so
+// it's excluded outright rather than just flagged). Shared by
+// RunSingingProp's debug log and the QuikMap dialog's detail-report "Singing
+// prop candidates identified" section, same pattern as
+// DescribeStarCandidates/DescribeSnowflakeCandidates.
+void DescribeSingingPropCandidates(const std::vector<ImportMappingNode*>& roots,
+                                    const std::vector<AvailableSource>& available,
+                                    std::vector<std::string>& outSourceLines,
+                                    std::vector<std::string>& outDestinationLines);
+
 // Matrix backfill pass (QuikMap Phase 93), run after RunLikeModelBackfill
 // and before RunGroupCoverageSkip/RunCatchAll. For each destination root
 // that is still unmapped, not a group, and not skipped, and is matrix-like
@@ -1039,22 +1075,25 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
                  const std::string& ruleLabel = "");
 
 // Sibling-reuse backfill pass (QuikMap Phase 125), run after RunCatchAll. For
-// each destination root that is still unmapped, not skipped, and not a group,
-// looks for an already-mapped sibling root (same FuzzyBaseTokens and
-// FuzzySideSignature, e.g. "Md Star - 01"/"Md Star - 02" share base "md star"
-// and no side) whose ImportMappingNode::GetModelType() matches
+// each destination root that is still unmapped and not skipped, looks for an
+// already-mapped sibling root of the same kind (model<->model, group<->group
+// - same FuzzyBaseTokens and FuzzySideSignature, e.g. "Md Star - 01"/"Md
+// Star - 02" share base "md star" and no side; "Group - Mini Trees Left"/
+// "Group - Mini Trees Right" share base "group mini trees" with side
+// left/right) whose ImportMappingNode::GetModelType() matches
 // (case-insensitive), and reuses that sibling's vendor mapping verbatim
 // (multiple destination roots may end up pointing at the same vendor
-// source). This catches numbered families where the vendor side has fewer
-// like-typed models than the destination (e.g. two "Md Star" props but only
-// one vendor "Star" model) - rather than leaving the extra ones unmapped,
-// they reuse their sibling's mapping. Does not touch Strand/Node children.
-// A sibling's mapping is only reused if the vendor source's isSingingProp
-// matches the destination's own IsSingingProp() - a singing prop's vendor
-// mapping carries face/mouth-movement data that's meaningless on a non-
-// singing destination (and vice versa), so a same-fuzzy-base-token sibling
-// pairing isn't enough on its own when one side is a singing prop and the
-// other isn't.
+// source). This catches numbered/sided families where the vendor side has
+// fewer like-typed models/groups than the destination (e.g. two "Md Star"
+// props but only one vendor "Star" model, or a Left/Right pair of
+// destination groups but only one vendor group) - rather than leaving the
+// extra ones unmapped, they reuse their sibling's mapping. Does not touch
+// Strand/Node children. A sibling's mapping is only reused if the vendor
+// source's isSingingProp matches the destination's own IsSingingProp() - a
+// singing prop's vendor mapping carries face/mouth-movement data that's
+// meaningless on a non-singing destination (and vice versa), so a
+// same-fuzzy-base-token sibling pairing isn't enough on its own when one
+// side is a singing prop and the other isn't.
 void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
                               const std::vector<AvailableSource>& available,
                               bool selectOnly,
@@ -1081,19 +1120,23 @@ void RunCustomDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                               const std::string& ruleLabel = "");
 
 // Model-type catch-all pass (QuikMap Phase 105), run after
-// RunGroupCoverageSkip and before RunCatchAll. For each destination root
-// that is still unmapped and not skipped, claims the next not-yet-used
-// available source of the matching kind (ModelGroup destinations only draw
-// from ModelGroup sources, everything else only draws from non-ModelGroup
-// sources) whose AvailableSource::displayType matches the destination's
-// ImportMappingNode::GetModelType() (case-insensitive). Names are ignored,
-// but the model "type" (e.g. "Arches", "Tree 360", "Matrix") must agree -
-// this is a tighter, like-for-like alternative to RunCatchAll's
-// unconditional pairing. Destination roots whose GetModelType() is "Custom"
-// are skipped entirely - "Custom" covers too wide a range of shapes (e.g. a
-// 3D Cube and a flat Snowflake) for a type-only match to be meaningful, so
-// those are left for Phase 100's dimension-based match or Phase 120. As with
-// RunCatchAll, any newly-mapped root's still-
+// RunGroupCoverageSkip and before RunCatchAll. For each non-group
+// destination root that is still unmapped and not skipped, claims the next
+// not-yet-used non-ModelGroup available source whose AvailableSource::
+// displayType matches the destination's ImportMappingNode::GetModelType()
+// (case-insensitive). Names are ignored, but the model "type" (e.g.
+// "Arches", "Tree 360", "Matrix") must agree - this is a tighter,
+// like-for-like alternative to RunCatchAll's unconditional pairing.
+// Destination roots whose GetModelType() is "Custom" are skipped entirely -
+// "Custom" covers too wide a range of shapes (e.g. a 3D Cube and a flat
+// Snowflake) for a type-only match to be meaningful, so those are left for
+// Phase 100's dimension-based match or Phase 120. ModelGroup destinations
+// are skipped entirely too - a group's "type" is always the literal string
+// "ModelGroup" (a container marker, not a real physical-shape signal), so a
+// type-only match between groups degenerates into "any group matches any
+// group" with no name/family awareness; groups are left for Phase 120
+// (RunCatchAll), which applies FamiliesCompatible/dimension scoring
+// instead. As with RunCatchAll, any newly-mapped root's still-
 // unmapped Strand/Node children are then filled from not-yet-used
 // `<mappedVendorModel>/...` sources of the corresponding depth.
 void RunModelTypeCatchAll(const std::vector<ImportMappingNode*>& roots,

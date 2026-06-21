@@ -604,6 +604,7 @@ class xLightsImportChannelMapDialog: public wxDialog
         wxString GenerateQuikMapStarCandidateReport();
         wxString GenerateQuikMapSnowflakeCandidateReport();
         wxString GenerateQuikMapMegaTreeCandidateReport();
+        wxString GenerateQuikMapSingingPropCandidateReport();
         void SaveXMapMapping(wxString const& filename);
 
         xLightsImportTreeModel *_dataModel;

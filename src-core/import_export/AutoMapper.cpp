@@ -527,8 +527,22 @@ bool IsMegaTreeModel(const std::string& displayType, int nodeCount) {
     // strand length alone: a "FlatTree" can have NodesPerString=80 (over a
     // naive per-strand-length threshold) but only 1 strand, 80 nodes total,
     // while a real mega tree's per-strand length is similar but multiplied
-    // across many strands into the thousands.
-    return IsTreeLikeModel(displayType) && nodeCount >= 1000;
+    // across many strands into the thousands. Threshold lowered from the
+    // original 1000 to 500 after a real-world multi-strand tree ("Ribbon
+    // Tree 16-50": NumStrings=16 x NodesPerString=50 = 800 nodes) fell under
+    // 1000 and got grouped with single-strand 80-node flat trees by Phase
+    // 107 - 500 still clears typical flat-tree counts (tens to ~100 nodes)
+    // by a wide margin while catching genuinely multi-strand props.
+    return IsTreeLikeModel(displayType) && nodeCount >= 500;
+}
+
+bool IsMegaStarModel(const std::string& name, bool isGroup, int nodeCount) {
+    // Same split as IsMegaTreeModel, but for the star family: a star prop
+    // has no structural DisplayAs/modelClass signal (see IsAStarModel), so
+    // node count alone (over the user-chosen 100-node threshold) is what
+    // distinguishes a large "mega star" from a small decorative one - both
+    // pass IsAStarModel on name alone.
+    return IsAStarModel(name, isGroup) && nodeCount > 100;
 }
 
 bool IsMatrixLikeModel(const std::string& modelClass, const std::string& displayType, int width, int height, int nodeCount, int depth, bool isGroup) {
@@ -709,8 +723,17 @@ void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
     for (const auto& line : snowflakeSourceLines) spdlog::info("QuikMap {}: source snowflake candidate {}", ruleLabel, line);
     for (const auto& line : snowflakeDestinationLines) spdlog::info("QuikMap {}: destination snowflake candidate {}", ruleLabel, line);
 
-    // Seed "used" with anything already mapped so this pass doesn't hand out
-    // a source another phase already used.
+    // Seed "used" with anything already mapped by an *earlier* phase, so this
+    // pass doesn't hand out a source another phase already used. Frozen at
+    // this seed value (never mutated below) - unlike most other phases, a
+    // vendor ModelGroup matched here may legitimately apply to more than one
+    // destination ModelGroup (e.g. "Group - Mini Trees Left" and "Group -
+    // Mini Trees Right" both fuzzy-match the single vendor "Mini Trees"
+    // group with an identical Jaccard score, since the differing "left"/
+    // "right" side tokens appear in neither candidate's token set and so
+    // don't affect the score either way) - sharing is scoped to this
+    // function specifically because it only ever matches group<->group (see
+    // the IsGroup()/ModelGroup checks below), never individual models.
     std::unordered_set<std::string> used;
     for (auto* model : roots) {
         if (model == nullptr) continue;
@@ -750,7 +773,6 @@ void RunGroupContentFuzzy(const std::vector<ImportMappingNode*>& roots,
 
             model->Map(src.displayName, src.modelType);
             model->SetMappingRule(ruleLabel);
-            used.insert(Lower(Trim(src.displayName)));
             break;
         }
     }
@@ -834,6 +856,14 @@ void RunFamilyAnchoredFuzzy(const std::vector<ImportMappingNode*>& roots,
             if (IsTreeLikeModel(model->GetModelType()) && IsTreeLikeModel(src.displayType) &&
                 IsMegaTreeModel(model->GetModelType(), model->GetNodeCount()) != IsMegaTreeModel(src.displayType, src.nodeCount)) continue;
 
+            // A "mega star" (IsMegaStarModel, node count > 100) must not
+            // match a small decorative star and vice versa - same split
+            // reasoning as the mega-tree guard above, applied to the
+            // name-only star family since IsAStarModel has no structural
+            // signal of its own.
+            if (IsAStarModel(targetName, model->IsGroup()) && IsAStarModel(src.displayName, srcIsGroup) &&
+                IsMegaStarModel(targetName, model->IsGroup(), targetNodes) != IsMegaStarModel(src.displayName, srcIsGroup, src.nodeCount)) continue;
+
             // A native Star model (DisplayAs="Star", e.g. a tree's star-
             // topper "FlatTreeStar-N") must never match a Tree-classified
             // vendor source, or vice versa - the destination name often
@@ -891,8 +921,13 @@ void RunFamilyAnchoredFuzzy(const std::vector<ImportMappingNode*>& roots,
 std::string ClassifyDestinationFamily(ImportMappingNode* node) {
     if (node == nullptr) return std::string();
     if (IsMatrixLikeModel(node->GetModelClass(), node->GetModelType(), node->GetWidth(), node->GetHeight(), node->GetNodeCount(), node->GetDepth(), node->IsGroup())) return "matrix";
-    if (IsTreeLikeModel(node->GetModelType())) return "tree";
-    if (IsAStarModel(node->GetCoreModel(), node->IsGroup())) return "star";
+    // Split mega tree out from regular tree - same structural guard used at
+    // Phase 28/110/115/120 (IsMegaTreeModel) - so a homogeneous-family
+    // backfill (Phase 107) never treats a real mega tree and a small flat
+    // tree as interchangeable just because both are IsTreeLikeModel.
+    if (IsTreeLikeModel(node->GetModelType())) return IsMegaTreeModel(node->GetModelType(), node->GetNodeCount()) ? "megatree" : "tree";
+    // Same megastar/star split as megatree/tree above (IsMegaStarModel).
+    if (IsAStarModel(node->GetCoreModel(), node->IsGroup())) return IsMegaStarModel(node->GetCoreModel(), node->IsGroup(), node->GetNodeCount()) ? "megastar" : "star";
     if (IsASnowflakeModel(node->GetCoreModel(), node->IsGroup())) return "snowflake";
     return std::string();
 }
@@ -901,8 +936,8 @@ std::string ClassifyDestinationFamily(ImportMappingNode* node) {
 std::string ClassifySourceFamily(const AvailableSource& src) {
     bool isGroup = (src.modelType == "ModelGroup");
     if (!src.isLEDPanelMatrix && IsMatrixLikeModel(src.modelClass, src.displayType, src.width, src.height, src.nodeCount, src.depth, isGroup)) return "matrix";
-    if (IsTreeLikeModel(src.displayType)) return "tree";
-    if (IsAStarModel(src.displayName, isGroup)) return "star";
+    if (IsTreeLikeModel(src.displayType)) return IsMegaTreeModel(src.displayType, src.nodeCount) ? "megatree" : "tree";
+    if (IsAStarModel(src.displayName, isGroup)) return IsMegaStarModel(src.displayName, isGroup, src.nodeCount) ? "megastar" : "star";
     if (IsASnowflakeModel(src.displayName, isGroup)) return "snowflake";
     return std::string();
 }
@@ -1179,13 +1214,25 @@ void Run(const std::vector<ImportMappingNode*>& roots,
                 }
             } else {
                 // match model to model
+                bool srcIsGroup = (src.modelType == "ModelGroup");
                 if (kindFilter != AvailableKindFilter::Any) {
-                    bool srcIsGroup = (src.modelType == "ModelGroup");
                     bool sameKind = (model->IsGroup() == srcIsGroup);
                     if (kindFilter == AvailableKindFilter::SameKindOnly && !sameKind) continue;
                     if (kindFilter == AvailableKindFilter::CrossKindOnly && sameKind) continue;
                 }
-                if (!allowSharedSource && usedModelSources.count(availName) != 0) continue;
+                // A group<->group fuzzy match is exempt from the
+                // one-vendor-per-destination dedup, same spirit as
+                // allowSharedSource (Phase 10/Alias) but scoped to groups
+                // only: a vendor ModelGroup's effects are generic enough to
+                // legitimately apply to more than one destination group
+                // (e.g. "Group - Mini Trees Left"/"Right" both scoring an
+                // identical Jaccard match against the single vendor "Mini
+                // Trees" group, since the differing left/right side token
+                // appears in neither side's token set and so can't break the
+                // tie) - whichever destination happens to come first in
+                // `roots` shouldn't be the only one allowed to claim it.
+                bool groupShared = model->IsGroup() && srcIsGroup;
+                if (!allowSharedSource && !groupShared && usedModelSources.count(availName) != 0) continue;
                 if (model->GetMapping().empty() &&
                     lambda_model(model->GetCoreModel(), availName, extra1, extra2, aliases)) {
                     if (model->IsGroup()) {
@@ -1229,7 +1276,11 @@ void Run(const std::vector<ImportMappingNode*>& roots,
             }
             model->Map(best->displayName, best->modelType);
             model->SetMappingRule(ruleLabel);
-            if (!allowSharedSource) usedModelSources.insert(best->canonicalName);
+            // Same group<->group sharing exemption as the per-candidate
+            // check above - don't mark a vendor group "used" so another
+            // sibling destination group can still claim it too.
+            bool groupShared = best->modelType == "ModelGroup";
+            if (!allowSharedSource && !groupShared) usedModelSources.insert(best->canonicalName);
         }
     }
 
@@ -1370,6 +1421,16 @@ void RunSingingProp(const std::vector<ImportMappingNode*>& roots,
         }
         selectMapTarget = !selectedTargets.empty();
     }
+
+    // Debug dump: every singing-prop vendor source and not-skipped
+    // destination root this phase can see, regardless of mapped/selected
+    // state, so a QuikMap run's spdlog log shows exactly which models
+    // were/weren't recognized as singing props on each side - same pattern
+    // as DescribeStarCandidates/DescribeSnowflakeCandidates.
+    std::vector<std::string> singingSourceLines, singingDestinationLines;
+    DescribeSingingPropCandidates(roots, available, singingSourceLines, singingDestinationLines);
+    for (const auto& line : singingSourceLines) spdlog::info("QuikMap {}: source singing-prop candidate {}", ruleLabel, line);
+    for (const auto& line : singingDestinationLines) spdlog::info("QuikMap {}: destination singing-prop candidate {}", ruleLabel, line);
 
     // Seed "used" with anything already mapped (by name, lowered/trimmed) so
     // this pass doesn't hand out a source a previous phase already used.
@@ -1980,16 +2041,21 @@ void DescribeStarCandidates(const std::vector<ImportMappingNode*>& roots,
                             std::vector<std::string>& outDestinationLines) {
     for (const auto& src : available) {
         if (src.canonicalName.find('/') != std::string::npos) continue;
-        if (!IsAStarModel(src.displayName, src.modelType == "ModelGroup")) continue;
-        outSourceLines.push_back(fmt::format("'{}' (type={}, group={})",
-                                              src.displayName, src.displayType.empty() ? src.modelType : src.displayType,
-                                              src.modelType == "ModelGroup"));
+        bool srcIsGroup = (src.modelType == "ModelGroup");
+        if (!IsAStarModel(src.displayName, srcIsGroup)) continue;
+        bool mega = IsMegaStarModel(src.displayName, srcIsGroup, src.nodeCount);
+        outSourceLines.push_back(fmt::format("{}'{}' (type={}, group={}, nodeCount={}, mega={})",
+                                              mega ? "**MEGA STAR** " : "", src.displayName,
+                                              src.displayType.empty() ? src.modelType : src.displayType,
+                                              srcIsGroup, src.nodeCount, mega));
     }
     for (auto* model : roots) {
         if (model == nullptr || model->IsSkipped()) continue;
         if (!IsAStarModel(model->GetCoreModel(), model->IsGroup())) continue;
-        outDestinationLines.push_back(fmt::format("'{}' (type={}, group={}, mapped={}, skipped={})",
-                                                    model->GetCoreModel(), model->GetModelType(), model->IsGroup(),
+        bool mega = IsMegaStarModel(model->GetCoreModel(), model->IsGroup(), model->GetNodeCount());
+        outDestinationLines.push_back(fmt::format("{}'{}' (type={}, group={}, nodeCount={}, mega={}, mapped={}, skipped={})",
+                                                    mega ? "**MEGA STAR** " : "", model->GetCoreModel(), model->GetModelType(),
+                                                    model->IsGroup(), model->GetNodeCount(), mega,
                                                     !model->GetMapping().empty(), model->IsSkipped()));
     }
 }
@@ -2034,6 +2100,26 @@ void DescribeMegaTreeCandidates(const std::vector<ImportMappingNode*>& roots,
         outDestinationLines.push_back(fmt::format("{}'{}' (type={}, nodeCount={}, mega={}, mapped={}, skipped={})",
                                                     mega ? "**MEGA TREE** " : "", model->GetCoreModel(), model->GetModelType(),
                                                     model->GetNodeCount(), mega,
+                                                    !model->GetMapping().empty(), model->IsSkipped()));
+    }
+}
+
+void DescribeSingingPropCandidates(const std::vector<ImportMappingNode*>& roots,
+                                    const std::vector<AvailableSource>& available,
+                                    std::vector<std::string>& outSourceLines,
+                                    std::vector<std::string>& outDestinationLines) {
+    for (const auto& src : available) {
+        if (src.canonicalName.find('/') != std::string::npos) continue;
+        if (!src.isSingingProp) continue;
+        outSourceLines.push_back(fmt::format("'{}' (type={}, group={})",
+                                              src.displayName, src.displayType.empty() ? src.modelType : src.displayType,
+                                              src.modelType == "ModelGroup"));
+    }
+    for (auto* model : roots) {
+        if (model == nullptr || model->IsSkipped()) continue;
+        if (!model->IsSingingProp()) continue;
+        outDestinationLines.push_back(fmt::format("'{}' (type={}, group={}, mapped={}, skipped={})",
+                                                    model->GetCoreModel(), model->GetModelType(), model->IsGroup(),
                                                     !model->GetMapping().empty(), model->IsSkipped()));
     }
 }
@@ -2976,6 +3062,7 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                 : 0.0;
             const std::string targetType = Lower(Trim(model->GetModelType()));
             const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases(), model->GetModelType());
+            const bool targetIsSinging = model->IsSingingProp();
 
             const AvailableSource* best = nullptr;
             double bestScore = 0.0;
@@ -2985,6 +3072,13 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                 if (src.modelType == "ModelGroup") continue;
                 if (used.count(Lower(Trim(src.displayName))) != 0) continue;
                 if (vendorMembers.count(Lower(Trim(src.displayName))) == 0) continue;
+
+                // A singing prop's vendor mapping carries face/mouth-movement
+                // effect data that's meaningless on a non-singing destination
+                // (and vice versa) - same guard as Phase 28/100/125. Without
+                // this, a vendor group member like "Singing Bulb Yellow" could
+                // be dimension-matched against a non-singing destination.
+                if (src.isSingingProp != targetIsSinging) continue;
 
                 // 3D models (depth > 1) must not match flat models and vice
                 // versa - same guard as Phase 120's RunCatchAllFallback.
@@ -3009,6 +3103,11 @@ void RunGroupMemberDimensionMatch(const std::vector<ImportMappingNode*>& roots,
                 // closeness.
                 if (IsTreeLikeModel(model->GetModelType()) && IsTreeLikeModel(src.displayType) &&
                     IsMegaTreeModel(model->GetModelType(), model->GetNodeCount()) != IsMegaTreeModel(src.displayType, src.nodeCount)) continue;
+
+                // Same mega-star-vs-small-star guard as Phase 28 - both sides
+                // here are already non-group (see the continues above).
+                if (IsAStarModel(model->GetCoreModel(), false) && IsAStarModel(src.displayName, false) &&
+                    IsMegaStarModel(model->GetCoreModel(), false, targetNodes) != IsMegaStarModel(src.displayName, false, src.nodeCount)) continue;
 
                 // A native Star model (DisplayAs="Star", e.g. a tree's star-
                 // topper "FlatTreeStar-N") must never match a Tree-classified
@@ -3166,12 +3265,16 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
                 : 0.0;
             const std::string targetType = Lower(Trim(model->GetModelType()));
             const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases(), model->GetModelType());
+            const bool targetIsSinging = model->IsSingingProp();
 
             const AvailableSource* best = nullptr;
             double bestScore = 0.0;
             const AvailableSource* bestUnused = nullptr;
             double bestUnusedScore = 0.0;
             for (const auto* src : pool) {
+                // Same singing-prop guard as RunGroupMemberDimensionMatch/Phase 28/100/125.
+                if (src->isSingingProp != targetIsSinging) continue;
+
                 // 3D models (depth > 1) must not match flat models and vice
                 // versa - same guard as RunGroupMemberDimensionMatch/Phase 120.
                 if (model->GetDepth() > 1 || src->depth > 1) {
@@ -3181,6 +3284,10 @@ void RunGroupMemberDimensionBackfill(const std::vector<ImportMappingNode*>& root
                 // Same mega-tree-vs-small-tree guard as RunGroupMemberDimensionMatch.
                 if (IsTreeLikeModel(model->GetModelType()) && IsTreeLikeModel(src->displayType) &&
                     IsMegaTreeModel(model->GetModelType(), model->GetNodeCount()) != IsMegaTreeModel(src->displayType, src->nodeCount)) continue;
+
+                // Same mega-star-vs-small-star guard as RunGroupMemberDimensionMatch/Phase 28.
+                if (IsAStarModel(model->GetCoreModel(), false) && IsAStarModel(src->displayName, false) &&
+                    IsMegaStarModel(model->GetCoreModel(), false, targetNodes) != IsMegaStarModel(src->displayName, false, src->nodeCount)) continue;
 
                 // A native Star model (DisplayAs="Star", e.g. a tree's star-
                 // topper "FlatTreeStar-N") must never match a Tree-classified
@@ -3269,8 +3376,8 @@ void RunModelTypeCatchAll(const std::vector<ImportMappingNode*>& roots,
         }
     }
 
-    // Top-level pass: model<->model, group<->group, requiring matching model
-    // "type" (e.g. "Arches", "Tree 360", "Matrix"), ignoring names entirely.
+    // Top-level pass: model<->model, requiring matching model "type" (e.g.
+    // "Arches", "Tree 360", "Matrix"), ignoring names entirely.
     for (auto* model : roots) {
         if (model == nullptr) continue;
         if (selectMapAvail || selectMapTarget) {
@@ -3279,6 +3386,18 @@ void RunModelTypeCatchAll(const std::vector<ImportMappingNode*>& roots,
         }
         if (!model->GetMapping().empty()) continue;
         if (model->IsSkipped()) continue;
+
+        // A ModelGroup's "type" is always the literal string "ModelGroup" -
+        // a container marker, not a real physical-shape signal like "Arches"
+        // or "Matrix" - so a blind type match here degenerates into "any
+        // group matches any group" with zero name/family awareness. This
+        // caused e.g. "Group - Mini Trees Right" (no vendor counterpart left
+        // after Phase 25 claimed the one vendor "Mini Trees" group for
+        // "Group - Mini Trees Left") to get paired with the totally
+        // unrelated "Yard Border" group. Groups are left for Phase 120
+        // (RunCatchAll), which actually applies FamiliesCompatible/dimension
+        // scoring instead of a bare type-string match.
+        if (model->IsGroup()) continue;
 
         const std::string targetType = Lower(Trim(model->GetModelType()));
         if (targetType.empty()) continue;
@@ -3293,8 +3412,7 @@ void RunModelTypeCatchAll(const std::vector<ImportMappingNode*>& roots,
             if (selectMapAvail && !src.selected) continue;
             if (src.canonicalName.find('/') != std::string::npos) continue;
             if (used.count(Lower(Trim(src.displayName))) != 0) continue;
-            bool srcIsGroup = (src.modelType == "ModelGroup");
-            if (srcIsGroup != model->IsGroup()) continue;
+            if (src.modelType == "ModelGroup") continue;
             if (Lower(Trim(src.displayType)) != targetType) continue;
 
             model->Map(src.displayName, src.modelType);
@@ -3404,6 +3522,7 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
             : 0.0;
         const std::string targetType = Lower(Trim(model->GetModelType()));
         const auto targetFamilies = EffectiveModelFamilies(model->GetCoreModel(), model->GetAliases(), model->GetModelType());
+        const bool targetIsSinging = model->IsSingingProp();
 
         const AvailableSource* best = nullptr;
         double bestScore = 0.0;
@@ -3413,6 +3532,15 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
             if (used.count(Lower(Trim(src.displayName))) != 0) continue;
             bool srcIsGroup = (src.modelType == "ModelGroup");
             if (srcIsGroup != model->IsGroup()) continue;
+
+            // A singing prop's vendor mapping carries face/mouth-movement
+            // effect data that's meaningless on a non-singing destination
+            // (and vice versa) - same guard as Phase 28/100/125. Without
+            // this, a Custom-shaped destination with no recognized
+            // modelClass/family (e.g. "Singing Bulb Yellow") could fall
+            // through every other guard below and get dimension-matched
+            // against an unrelated vendor source like "Matrix 2".
+            if (src.isSingingProp != targetIsSinging) continue;
 
             // Vendor ModelGroups carrying "Last"/"Override"/"Bottom" special
             // sequencer-meaning names (see RunSpecialKeywordGroupMatch /
@@ -3474,6 +3602,12 @@ void RunCatchAll(const std::vector<ImportMappingNode*>& roots,
             // as Phase 28/110/115.
             if (IsTreeLikeModel(model->GetModelType()) && IsTreeLikeModel(src.displayType) &&
                 IsMegaTreeModel(model->GetModelType(), model->GetNodeCount()) != IsMegaTreeModel(src.displayType, src.nodeCount)) continue;
+
+            // A "mega star" (IsMegaStarModel, node count > 100) must not
+            // match a small decorative star and vice versa - same guard as
+            // Phase 28/110/115.
+            if (IsAStarModel(model->GetCoreModel(), model->IsGroup()) && IsAStarModel(src.displayName, srcIsGroup) &&
+                IsMegaStarModel(model->GetCoreModel(), model->IsGroup(), targetNodes) != IsMegaStarModel(src.displayName, srcIsGroup, src.nodeCount)) continue;
 
             // A native Star model (DisplayAs="Star", e.g. a tree's star-
             // topper "FlatTreeStar-N") must never match a Tree-classified
@@ -3548,7 +3682,7 @@ void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
     bool selectMapTarget = selectOnly && !selectedTargets.empty();
 
     for (auto* model : roots) {
-        if (model == nullptr || model->IsGroup() || model->IsSkipped()) continue;
+        if (model == nullptr || model->IsSkipped()) continue;
         if (!model->GetMapping().empty()) continue;
         if (selectMapTarget && selectedTargets.count(model) == 0) continue;
 
@@ -3562,7 +3696,14 @@ void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
         const bool targetIsSinging = model->IsSingingProp();
 
         for (auto* sibling : roots) {
-            if (sibling == nullptr || sibling == model || sibling->IsGroup()) continue;
+            if (sibling == nullptr || sibling == model) continue;
+            // A group sibling may only reuse another group's vendor mapping,
+            // never a non-group's, and vice versa - e.g. "Group - Mini Trees
+            // Right" (the lone vendor "Mini Trees" group already claimed by
+            // "Group - Mini Trees Left") should reuse that vendor group, not
+            // some unrelated non-group sibling that happens to share a base
+            // token.
+            if (sibling->IsGroup() != model->IsGroup()) continue;
             if (sibling->GetMapping().empty()) continue;
             if (Lower(Trim(sibling->GetModelType())) != targetType) continue;
             if (sibling->GetDepth() > 1 || model->GetDepth() > 1) {
@@ -3590,7 +3731,7 @@ void RunSiblingReuseBackfill(const std::vector<ImportMappingNode*>& roots,
             }
             if (vendorIsSinging != targetIsSinging) continue;
 
-            model->Map(sibling->GetMapping(), "Model");
+            model->Map(sibling->GetMapping(), model->IsGroup() ? "ModelGroup" : "Model");
             model->SetMappingRule(ruleLabel);
             break;
         }

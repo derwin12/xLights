@@ -4240,6 +4240,7 @@ void xLightsImportChannelMapDialog::DoQuikMap(bool select, bool headless, wxStri
         summary << "\n" << GenerateQuikMapStarCandidateReport();
         summary << "\n" << GenerateQuikMapSnowflakeCandidateReport();
         summary << "\n" << GenerateQuikMapMegaTreeCandidateReport();
+        summary << "\n" << GenerateQuikMapSingingPropCandidateReport();
         summary << "\n" << GenerateQuikMapDetailReport();
     }
 
@@ -4434,6 +4435,7 @@ wxString xLightsImportChannelMapDialog::GenerateQuikMapStarCandidateReport()
             src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
             if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
                 src.displayType = ic->type;
+                src.nodeCount = ic->nodeCount;
             }
         }
         available.push_back(std::move(src));
@@ -4525,6 +4527,43 @@ wxString xLightsImportChannelMapDialog::GenerateQuikMapMegaTreeCandidateReport()
 
     wxString report;
     report << wxString::Format("Mega tree candidates identified (Phase 28, %d source / %d destination):\n",
+                                static_cast<int>(sourceLines.size()), static_cast<int>(destinationLines.size()));
+    report << "  Source:\n";
+    for (const auto& line : sourceLines) report << "    " << line << "\n";
+    report << "  Destination:\n";
+    for (const auto& line : destinationLines) report << "    " << line << "\n";
+    return report;
+}
+
+wxString xLightsImportChannelMapDialog::GenerateQuikMapSingingPropCandidateReport()
+{
+    std::vector<AvailableSource> available;
+    available.reserve(ListCtrl_Available->GetItemCount());
+    for (int j = 0; j < ListCtrl_Available->GetItemCount(); ++j) {
+        AvailableSource src;
+        src.displayName = ListCtrl_Available->GetItemText(j, 1).ToStdString();
+        src.canonicalName = ListCtrl_Available->GetItemText(j, 1).Trim(true).Trim(false).Lower().ToStdString();
+        if (src.canonicalName.find('/') == std::string::npos) {
+            src.modelType = findModelType(ListCtrl_Available->GetItemText(j, 1));
+            if (auto* ic = GetImportChannel(src.displayName); ic != nullptr) {
+                src.displayType = ic->type;
+                src.isSingingProp = ic->isSingingProp;
+            }
+        }
+        available.push_back(std::move(src));
+    }
+
+    std::vector<ImportMappingNode*> roots;
+    roots.reserve(_dataModel->GetChildCount());
+    for (unsigned int i = 0; i < _dataModel->GetChildCount(); ++i) {
+        roots.push_back(_dataModel->GetNthChild(i));
+    }
+
+    std::vector<std::string> sourceLines, destinationLines;
+    AutoMapper::DescribeSingingPropCandidates(roots, available, sourceLines, destinationLines);
+
+    wxString report;
+    report << wxString::Format("Singing prop candidates identified (Phase 30, %d source / %d destination):\n",
                                 static_cast<int>(sourceLines.size()), static_cast<int>(destinationLines.size()));
     report << "  Source:\n";
     for (const auto& line : sourceLines) report << "    " << line << "\n";
@@ -5716,15 +5755,6 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                 }
             }
         }
-        // Models chained off a singing prop via StartChannel=">OtherModel:n"
-        // (e.g. a "Ribbon" decoration chained off "Singing Tree Female") are
-        // part of that prop's physical assembly, even though they carry no
-        // FaceInfo of their own. Collect the chain target for each model here
-        // and propagate isSingingProp from the chain target after the main
-        // loop, so they're excluded from generic name-based matching the same
-        // as the singing prop itself.
-        std::unordered_map<std::string, std::string> chainTarget;
-
         if (modelNode) {
             for (pugi::xml_node node = modelNode.first_child(); node; node = node.next_sibling()) {
                 std::string name = node.attribute(XmlNodeKeys::NameAttribute).as_string();
@@ -5745,13 +5775,6 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
                     mm->isSingingProp = singingFace;
                     mm->isLEDPanelMatrix = ledPanelMatrix;
 
-                    std::string startChannel = node.attribute(XmlNodeKeys::StartChannelAttribute).as_string();
-                    if (!startChannel.empty() && startChannel.front() == '>') {
-                        std::string target = startChannel.substr(1);
-                        auto colon = target.rfind(':');
-                        if (colon != std::string::npos) target = target.substr(0, colon);
-                        if (!target.empty() && target != name) chainTarget[name] = target;
-                    }
                     bool spiralTree = std::string_view(node.attribute(XmlNodeKeys::TreeSpiralRotationsAttribute).as_string("0")) != "0";
                     bool sticks = std::string_view(node.attribute(XmlNodeKeys::CCSticksAttribute).as_string("false")) == "true";
                     std::string dropPattern = node.attribute(XmlNodeKeys::DropPatternAttribute).as_string();
@@ -5899,22 +5922,6 @@ void xLightsImportChannelMapDialog::LoadRgbEffectsFile() {
 
             }
 
-            // Resolve chains (following through multiple links if needed) and
-            // mark any model chained to a singing prop as a singing prop too.
-            for (const auto& [name, target] : chainTarget) {
-                std::string cur = target;
-                std::unordered_set<std::string> seen{name};
-                while (true) {
-                    if (auto* targetMm = GetImportChannel(cur); targetMm != nullptr && targetMm->isSingingProp) {
-                        if (auto* mm = GetImportChannel(name); mm != nullptr) mm->isSingingProp = true;
-                        break;
-                    }
-                    if (!seen.insert(cur).second) break;
-                    auto it = chainTarget.find(cur);
-                    if (it == chainTarget.end()) break;
-                    cur = it->second;
-                }
-            }
         }
 
         // A "flood group" is a ModelGroup whose members are all floodlights.
