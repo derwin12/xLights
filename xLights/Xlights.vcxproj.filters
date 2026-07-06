@@ -63,6 +63,8 @@
     <ClCompile Include="..\src-ui-wx\import_export\FileConverter.cpp" />
     <ClCompile Include="..\src-ui-wx\shared\utils\FlickerFreeBitmapButton.cpp" />
     <ClCompile Include="..\src-ui-wx\model\GenerateCustomModelDialog.cpp" />
+    <ClCompile Include="..\src-ui-wx\klightmapper\CustomModelMethodPickerDialog.cpp" />
+    <ClCompile Include="..\src-ui-wx\klightmapper\KLightMapperBridge_win.cpp" />
     <ClCompile Include="..\src-core\utils\AppCallbacks.cpp" />
     <ClCompile Include="..\src-core\utils\JobPool.cpp" />
     <ClCompile Include="..\src-ui-wx\app-shell\KeyBindings.cpp" />
@@ -88,6 +90,9 @@
     <ClCompile Include="..\src-ui-wx\layout\PreviewPane.cpp" />
     <ClCompile Include="..\src-ui-wx\sequencer\RenameTextDialog.cpp" />
     <ClCompile Include="..\src-core\render\RenderEngine.cpp">
+      <Filter>render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src-core\render\xLightsShowContext.cpp">
       <Filter>render</Filter>
     </ClCompile>
     <ClCompile Include="..\src-core\render\ModelGifExporter.cpp">
@@ -149,6 +154,9 @@
     <ClCompile Include="..\src-ui-wx\color\xlColourPickerButton.cpp" />
     <ClCompile Include="..\src-ui-wx\color\xlColourPickerDialog.cpp" />
     <ClCompile Include="..\src-ui-wx\shared\utils\xlGridCanvas.cpp" />
+    <ClCompile Include="..\src-core\render\HeadlessRenderContext.cpp">
+      <Filter>render</Filter>
+    </ClCompile>
     <ClCompile Include="..\src-ui-wx\xLightsApp.cpp" />
     <ClCompile Include="..\src-ui-wx\import_export\xLightsImportChannelMapDialog.cpp" />
     <ClCompile Include="..\src-ui-wx\import_export\xLightsImportChannelMapDialogAI.cpp" />
@@ -190,6 +198,9 @@
     <ClCompile Include="..\src-ui-wx\setup\MultiControllerUploadDialog.cpp" />
     <ClCompile Include="..\src-ui-wx\shared\utils\wxModelGridCellRenderer.cpp" />
     <ClCompile Include="..\src-core\render\FSEQFile.cpp">
+      <Filter>render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src-core\render\FSEQFileIO.cpp">
       <Filter>render</Filter>
     </ClCompile>
     <ClCompile Include="..\src-ui-wx\model\PathGenerationDialog.cpp" />
@@ -712,6 +723,15 @@
     </ClCompile>
     <ClCompile Include="..\src-core\render\Effect.cpp">
       <Filter>render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src-core\render\EffectSymbol.cpp">
+      <Filter>render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src-core\render\EffectSymbolManager.cpp">
+      <Filter>render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src-ui-wx\EffectSymbolDialog.cpp">
+      <Filter>sequencer</Filter>
     </ClCompile>
     <ClCompile Include="..\src-ui-wx\sequencer\EffectDropTarget.cpp">
       <Filter>sequencer</Filter>
@@ -1462,6 +1482,8 @@
     <ClInclude Include="..\src-ui-wx\import_export\FileConverter.h" />
     <ClInclude Include="..\src-ui-wx\shared\utils\FlickerFreeBitmapButton.h" />
     <ClInclude Include="..\src-ui-wx\model\GenerateCustomModelDialog.h" />
+    <ClInclude Include="..\src-ui-wx\klightmapper\CustomModelMethodPickerDialog.h" />
+    <ClInclude Include="..\src-ui-wx\klightmapper\KLightMapperBridge.h" />
     <ClInclude Include="..\src-ui-wx\shared\utils\Images_png.h" />
     <ClInclude Include="..\src-core\utils\AppCallbacks.h" />
     <ClInclude Include="..\src-core\utils\JobPool.h" />
@@ -2121,6 +2143,15 @@
     <ClInclude Include="..\src-core\render\Effect.h">
       <Filter>render</Filter>
     </ClInclude>
+    <ClInclude Include="..\src-core\render\EffectSymbol.h">
+      <Filter>render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src-core\render\EffectSymbolManager.h">
+      <Filter>render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src-ui-wx\EffectSymbolDialog.h">
+      <Filter>sequencer</Filter>
+    </ClInclude>
     <ClInclude Include="..\src-ui-wx\sequencer\EffectDropTarget.h">
       <Filter>sequencer</Filter>
     </ClInclude>
@@ -2733,6 +2764,9 @@
     <ClInclude Include="..\src-core\effects\ispc\SpiralsFunctions.ispc.h">
       <Filter>Effects\ispc</Filter>
     </ClInclude>
+    <ClInclude Include="..\src-core\effects\ispc\GalaxyFunctions.ispc.h">
+      <Filter>Effects\ispc</Filter>
+    </ClInclude>
     <ClInclude Include="..\src-core\effects\ispc\WarpFunctions.ispc.h">
       <Filter>Effects\ispc</Filter>
     </ClInclude>
@@ -3060,6 +3094,9 @@
       <Filter>Effects\ispc</Filter>
     </CustomBuild>
     <CustomBuild Include="..\src-core\effects\ispc\SpiralsFunctions.ispc">
+      <Filter>Effects\ispc</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\src-core\effects\ispc\GalaxyFunctions.ispc">
       <Filter>Effects\ispc</Filter>
     </CustomBuild>
     <CustomBuild Include="..\src-core\effects\ispc\LayerBlendingFunctions.ispc">

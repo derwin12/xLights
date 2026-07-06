@@ -80,6 +80,7 @@ void SequenceElements::Clear() {
     mRowInformation.clear();
     mSelectedRanges.clear();
     undo_mgr.Clear();
+    _effectSymbolManager.Clear();
     mSelectedTimingRow = -1;
     mTimingRowCount = 0;
     mFirstVisibleModelRow = 0;
@@ -104,6 +105,28 @@ void SequenceElements::SetSequenceEnd(int ms)
 int SequenceElements::GetSequenceEnd() const
 {
     return mSequenceEndMS;
+}
+
+int SequenceElements::GetMaxEffectEndTimeMS() const
+{
+    int maxEndMS = 0;
+
+    for (size_t i = 0; i < GetElementCount(); i++) {
+        Element* e = GetElement(i);
+        if (e->GetType() != ElementType::ELEMENT_TYPE_TIMING) {
+            for (size_t j = 0; j < e->GetEffectLayerCount(); j++) {
+                EffectLayer* el = e->GetEffectLayer(j);
+                for (int k = 0; k < el->GetEffectCount(); k++) {
+                    Effect* eff = el->GetEffect(k);
+                    if (eff->GetEndTimeMS() > maxEndMS) {
+                        maxEndMS = eff->GetEndTimeMS();
+                    }
+                }
+            }
+        }
+    }
+
+    return maxEndMS;
 }
 
 EffectLayer* SequenceElements::GetEffectLayer(const Row_Information_Struct *s) const
@@ -679,8 +702,14 @@ int SequenceElements::LoadEffects(EffectLayer* effectLayer,
                     }
                 }
                 if (effectName != "Random") {
-                    effectLayer->AddEffect(id, effectName, settings, pal,
+                    Effect* newEffect = effectLayer->AddEffect(id, effectName, settings, pal,
                                            startTime, endTime, EFFECT_NOT_SELECTED, bProtected, false, importing);
+                    if (newEffect != nullptr && !effect.attribute("linkedSymbol").empty()) {
+                        std::string symbolId = effect.attribute("linkedSymbol").as_string("");
+                        if (!symbolId.empty() && _effectSymbolManager.SymbolExists(symbolId)) {
+                            newEffect->LinkToSymbol(symbolId);
+                        }
+                    }
                 } else {
                     spdlog::warn("Random effect not loaded on element {} layer {} ({:.2f}-{:.2f})", effectLayer->GetParentElement()->GetName(), effectLayer->GetLayerNumber(), startTime / 1000, endTime / 1000);
                 }
@@ -777,6 +806,8 @@ bool SequenceElements::LoadSequencerFile(SequenceFile& xml_file, pugi::xml_docum
             mSongStructure.LoadFromXml(e);
         } else if (ename == "Jukebox") {
             LoadJukeboxButtons(e, xml_file.GetJukeboxButtons());
+        } else if (ename == "EffectSymbols") {
+            _effectSymbolManager.LoadFromXml(e);
         } else if (ename == "ElementEffects") {
             // Count effects for progress
             int count = 0;

@@ -5500,6 +5500,11 @@ static Model* GetXlightsModel(Model* model, std::string& last_model, xLightsFram
             spdlog::error("Unable to load model from '{}': {}", last_model, e.what());
             DisplayError("Unable to load model file:\n" + std::string(e.what()));
             cancelled = true;
+            // CreateDefaultModelFromSavedModelNode deletes the passed-in model
+            // before deserializing, so on a throw `model` is already freed;
+            // returning it non-null makes FinalizeModel's cancel path delete
+            // it a second time.
+            model = nullptr;
         }
 
         if (!cancelled && model != nullptr) {
@@ -5543,8 +5548,8 @@ static Model* GetXlightsModel(Model* model, std::string& last_model, xLightsFram
                     try {
                         extraModel = extraModel->CreateDefaultModelFromSavedModelNode(extraModel, child, xlights->AllModels, extraCancelled);
                     } catch (const std::exception& e) {
+                        // the callee already deleted extraModel before throwing
                         spdlog::error("Unable to load additional model: {}", e.what());
-                        delete extraModel;
                         continue;
                     }
                     if (extraCancelled || extraModel == nullptr) continue;
@@ -5814,8 +5819,14 @@ void LayoutPanel::FinalizeModel()
                 // it internally before returning a newly deserialized model. On failure it returns
                 // nullptr having already freed the passed-in pointer, so we must NOT delete
                 // extraModel here (would double-delete). Match the primary model path which also
-                // just returns without manual cleanup.
-                extraModel = extraModel->CreateDefaultModelFromSavedModelNode(extraModel, extraDoc.document_element(), xlights->AllModels, extraCancelled);
+                // just returns without manual cleanup. The deserializer throws on a malformed
+                // file (after freeing extraModel), so catch it or it escapes FinalizeModel.
+                try {
+                    extraModel = extraModel->CreateDefaultModelFromSavedModelNode(extraModel, extraDoc.document_element(), xlights->AllModels, extraCancelled);
+                } catch (const std::exception& e) {
+                    spdlog::error("Unable to load additional model from '{}': {}", extraModelPath, e.what());
+                    continue;
+                }
 
                 if (extraCancelled || extraModel == nullptr) {
                     continue;
@@ -6448,6 +6459,9 @@ void LayoutPanel::OnPreviewMouseMove3D(wxMouseEvent& event)
                 xlights->AddTraceMessage("LayoutPanel::OnPreviewMouseMove3D Not selection latched - Editing models");
                 for (const auto& it : modelPreview->GetModels())
                 {
+                    if (it == nullptr) {
+                        continue;
+                    }
                     if (it->GetBaseObjectScreenLocation().HitTest3D(ray_origin, ray_direction, intersection_distance)) {
                         if (intersection_distance < distance) {
                             distance = intersection_distance;
@@ -7783,16 +7797,25 @@ void LayoutPanel::ExportFacesStatesSubModels() {
 
         for (auto const& idx : dlg.GetSelections()) {
             Model* targetModel = xlights->GetModel(choices.at(idx));
-            targetModel->SetFaceInfo(sourceFaces);
-            targetModel->SetStateInfo(sourceStates);
 
-            // Copy submodels using copy constructor
+            auto targetFaces = targetModel->GetFaceInfo();
+            for (const auto& [name, data] : sourceFaces) {
+                targetFaces[name] = data;
+            }
+            targetModel->SetFaceInfo(targetFaces);
+
+            auto targetStates = targetModel->GetStateInfo();
+            for (const auto& [name, data] : sourceStates) {
+                targetStates[name] = data;
+            }
+            targetModel->SetStateInfo(targetStates);
+
             for (int i = 0; i < selectedModel->GetNumSubModels(); ++i) {
                 const SubModel* sourceSubModel = dynamic_cast<const SubModel*>(selectedModel->GetSubModel(i));
                 if (sourceSubModel != nullptr) {
-                    // Create SubModel using copy constructor
+                    targetModel->RemoveSubModel(sourceSubModel->GetName());
                     SubModel* sm = new SubModel(targetModel, sourceSubModel);
-                    targetModel->AddSubmodel(sm);                    
+                    targetModel->AddSubmodel(sm);
                 }
             }
             targetModel->IncrementChangeCount();
@@ -8741,6 +8764,36 @@ void LayoutPanel::OnNewModelTypeButtonClicked(wxCommandEvent& event) {
     }
 }
 
+void LayoutPanel::BeginImportModelFromFile(const std::string& xmodelPath) {
+    // Drive the existing "Import Custom" click-to-place flow with a known file
+    // instead of prompting for one. Mirrors OnNewModelTypeButtonClicked selecting
+    // the Import-Custom button: when the user next clicks the layout,
+    // CreateNewModel("Import Custom") -> FinalizeModel -> GetXlightsModel runs, and
+    // because _lastXlightsModel is non-empty GetXlightsModel skips its file prompt
+    // and loads xmodelPath. Used by the desktop KLightMapper scan completion to add
+    // the mapped model straight onto the layout, just like a vendor download.
+    NewModelBitmapButton* importBtn = nullptr;
+    for (const auto& it : buttons) {
+        if (it->GetModelType() == "Import Custom") {
+            importBtn = it;
+            it->SetState(1);
+        } else {
+            it->SetState(0);
+        }
+    }
+    if (importBtn == nullptr) {
+        return; // Import-Custom tool missing (shouldn't happen)
+    }
+    selectedButton = importBtn;
+    UnSelectAllModels();
+    Notebook_Objects->ChangeSelection(0);
+    editing_models = true;
+    modelPreview->SetFocus();
+    // Preset the path LAST: selecting a button leaves _lastXlightsModel untouched
+    // (only deselecting clears it), and GetXlightsModel keys off it at click time.
+    _lastXlightsModel = xmodelPath;
+}
+
 void LayoutPanel::AddObjectButton(wxMenu& mnu, const long id, const std::string &name, const char *icon[]) {
     wxMenuItem* menu_item = mnu.Append(id, name);
     if (icon != nullptr) {
@@ -9356,7 +9409,13 @@ void LayoutPanel::DeleteSelectedModels()
             // we suspend deferred work because if the delete model pops a dialog then the ASAP work gets done prematurely
             xlights->GetOutputModelManager()->SuspendDeferredWork(true);
             xlights->UnselectEffect(); // we do this just in case the effect is on the model we are deleting
-            xlights->AbortRender();    // stop any rendering as deleting models from under the renderer will crash xlights
+            if (!xlights->AbortRender()) {
+                // Render didn't drain in time — deleting models now would free
+                // them out from under a running render worker and crash. Skip
+                // the delete and restore the deferred-work flag suspended above.
+                xlights->GetOutputModelManager()->SuspendDeferredWork(false);
+                return;
+            }
 
             CreateUndoPoint("All", wxJoin(modelsToDelete, ','));
 
@@ -9419,7 +9478,9 @@ void LayoutPanel::DeleteSelectedGroups()
 		CreateUndoPoint("All", wxJoin(groupsToDelete, ','));
 
 		xlights->UnselectEffect(); // we do this just in case the effect is on the model we are deleting
-        xlights->AbortRender(); // stop rendering as deleting groups while rendering is not good
+        // Stop rendering before deleting groups out from under a running render
+        // worker (crash). Bail if render won't drain in time.
+        if (!xlights->AbortRender()) return;
 
 		for (const auto& it : groupsToDelete) {
 			xlights->AllModels.Delete(it.ToStdString());

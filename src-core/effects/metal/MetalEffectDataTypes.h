@@ -55,18 +55,24 @@ struct PlasmaData
 struct RotoZoomData {
     uint32_t width;
     uint32_t height;
-    
+
     float offset;
     float xrotation;
     int32_t xpivot;
     float yrotation;
     int32_t ypivot;
-    
+
     float zrotation;
     float zoom;
     float zoomquality;
     int32_t pivotpointx;
     int32_t pivotpointy;
+};
+
+struct TentBlurData {
+    uint32_t width;
+    uint32_t height;
+    int32_t halfK; // (kernelWidth - 1) / 2, tent weights halfK+1-|i|
 };
 
 // allow up to 16 arms, more than that and drop to CPU render
@@ -302,6 +308,32 @@ struct MetalSpiralsData {
 
     simd::uchar4  colorsAsRGBA[MAX_METAL_SPIRALS_COLORS];
     simd::float3  colorsAsHSV[MAX_METAL_SPIRALS_COLORS];
+};
+
+#define MAX_METAL_GALAXY_COLORS 8
+
+// Mirrors ispc::GalaxyISPCData - the Galaxy "New Render Method" gather.
+struct MetalGalaxyData {
+    uint32_t width;
+    uint32_t height;
+    float    pos_x;
+    float    pos_y;
+    float    radius1;
+    float    radius2;
+    float    width1;
+    float    width2;
+    float    revs;
+    float    start_angle;
+    int32_t  reverse_dir;
+    int32_t  inward;
+    int32_t  blend_edges;
+    float    head_end_of_tail;
+    float    tail_end_of_tail;
+    float    color_length;
+    int32_t  num_colors;
+    float    palR[MAX_METAL_GALAXY_COLORS];
+    float    palG[MAX_METAL_GALAXY_COLORS];
+    float    palB[MAX_METAL_GALAXY_COLORS];
 };
 
 struct LayerBlendingData {

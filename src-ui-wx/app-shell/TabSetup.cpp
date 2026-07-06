@@ -536,6 +536,11 @@ bool xLightsFrame::SetDir(const wxString& newdir, bool permanent)
         _outputModelManager.AddASAPWork(OutputModelManager::WORK_RESEND_CONTROLLER_CONFIG, "SetDir");
     }
 
+    _outputManager.SomethingChanged();
+    AllModels.RecalcStartChannels();
+    _outputModelManager.RemoveWork("ASAP", OutputModelManager::WORK_MODELS_REWORK_STARTCHANNELS);
+    _outputModelManager.AddImmediateWork(OutputModelManager::WORK_RELOAD_MODELLIST, "SetDir-post-rework");
+
     ValidateWindow();
 
     return true;
@@ -2318,7 +2323,7 @@ void xLightsFrame::OnListItemSelectedControllers(wxListEvent& event)
     auto name = List_Controllers->GetItemText(event.GetItem());
     auto controller = _outputManager.GetController(name);
 
-    if (controller->IsFromBase())
+    if (controller != nullptr && controller->IsFromBase())
     {
         List_Controllers->SetToolTip("From Base Show Directory");
     }
